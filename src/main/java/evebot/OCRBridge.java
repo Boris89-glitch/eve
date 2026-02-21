@@ -1,4 +1,3 @@
-// src/main/java/evebot/OCRBridge.java
 package evebot;
 
 import com.google.gson.Gson;
@@ -7,149 +6,204 @@ import com.google.gson.JsonSyntaxException;
 import evebot.models.Mission;
 
 import java.io.*;
-import java.nio.file.Paths;
-import java.util.Map;
+import java.nio.file.*;
 
+/**
+ * OCRBridge calls the Python mission_reader.py script and parses its JSON
+ * output into a Mission object.
+ *
+ * The script is located by searching in order:
+ *   1. ocr/mission_reader.py   (standard layout)
+ *   2. mission_reader.py       (flat layout / running from project root)
+ */
 public class OCRBridge {
-    private String pythonScriptPath;
-    private Gson gson;
+
+    private final String pythonScriptPath;
+    private final Gson gson;
+
+    // -----------------------------------------------------------------------
 
     public OCRBridge() {
-        // Get the absolute path to the Python script
-        this.pythonScriptPath = Paths.get("ocr", "mission_reader.py").toAbsolutePath().toString();
+        this.pythonScriptPath = resolvePythonScript();
         this.gson = new Gson();
-
-        // Check if Python script exists
-        File scriptFile = new File(pythonScriptPath);
-        if (!scriptFile.exists()) {
-            System.err.println("WARNING: Python script not found at: " + pythonScriptPath);
-        }
     }
 
+    private String resolvePythonScript() {
+        System.out.println("[OCRBridge] Working dir: " + java.nio.file.Paths.get("").toAbsolutePath());
+        String[] candidates = {
+                "ocr/mission_reader.py",
+                "mission_reader.py",
+                Paths.get("ocr", "mission_reader.py").toAbsolutePath().toString(),
+                Paths.get("mission_reader.py").toAbsolutePath().toString()
+        };
+        for (String path : candidates) {
+            if (new File(path).exists()) {
+                System.out.println("[OCRBridge] Found Python script at: " + path);
+                return path;
+            }
+        }
+        System.err.println("[OCRBridge] WARNING: mission_reader.py not found in any expected location.");
+        return "mission_reader.py"; // best-effort fallback
+    }
+
+    // -----------------------------------------------------------------------
+    // Core: run the Python script and return raw JSON string
+    // -----------------------------------------------------------------------
+
     public String readMissionFromScreen(int x, int y, int width, int height) {
+
         try {
-            // Build process to run Python script with coordinates
-            ProcessBuilder pb = new ProcessBuilder("python", pythonScriptPath,
-                    String.valueOf(x), String.valueOf(y),
-                    String.valueOf(width), String.valueOf(height));
+            ProcessBuilder pb = new ProcessBuilder(
+                    "python", pythonScriptPath,
+                    String.valueOf(x),
+                    String.valueOf(y),
+                    String.valueOf(width),
+                    String.valueOf(height));
 
-            // Set environment variables if needed
-            Map<String, String> env = pb.environment();
-            env.put("PYTHONIOENCODING", "utf-8");
-            env.put("PYTHONUNBUFFERED", "1");
-
-            // Redirect error stream to output stream
-            pb.redirectErrorStream(true);
+            pb.environment().put("PYTHONIOENCODING", "utf-8");
+            pb.environment().put("PYTHONUNBUFFERED", "1");
+            pb.redirectErrorStream(false); // keep stderr separate so we can log it
 
             Process process = pb.start();
 
-            // Read output
-            BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(process.getInputStream(), "UTF-8"));
+            // Log stderr without blocking
+            Thread stderrThread = new Thread(() -> {
+                try (BufferedReader err = new BufferedReader(
+                        new InputStreamReader(process.getErrorStream(), "UTF-8"))) {
+                    String line;
+                    while ((line = err.readLine()) != null) {
+                        System.err.println("[OCR stderr] " + line);
+                    }
+                } catch (IOException ignored) {}
+            }, "ocr-stderr");
+            stderrThread.setDaemon(true);
+            stderrThread.start();
 
+            // Read stdout (the JSON result)
             StringBuilder output = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                output.append(line);
+            try (BufferedReader reader = new BufferedReader(
+                    new InputStreamReader(process.getInputStream(), "UTF-8"))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line);
+                }
             }
 
             int exitCode = process.waitFor();
 
-            if (exitCode == 0 && output.length() > 0) {
-                return output.toString();
-            } else {
-                System.err.println("Python process exited with code: " + exitCode);
+            if (exitCode != 0) {
+                System.err.println("[OCRBridge] Python exited with code " + exitCode);
+            }
+
+            String result = output.toString().trim();
+            if (result.isEmpty()) {
+                System.err.println("[OCRBridge] Python produced no output.");
                 return null;
             }
 
+            return result;
+
         } catch (Exception e) {
-            System.err.println("Error in OCRBridge: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("[OCRBridge] Error running Python: " + e.getMessage());
             return null;
         }
     }
 
-    // NEW: Parse JSON output from Python into Mission object
+    // -----------------------------------------------------------------------
+    // Parse JSON → Mission
+    // -----------------------------------------------------------------------
+
     public Mission parseMissionJson(String jsonString) {
+        if (jsonString == null || jsonString.isEmpty()) return null;
+
+        System.out.println("[OCRBridge] Raw Python output: " + jsonString);
+
         try {
             JsonObject json = gson.fromJson(jsonString, JsonObject.class);
 
-            // Check for error message
             if (json.has("error")) {
-                System.err.println("OCR Error: " + json.get("error").getAsString());
+                System.err.println("[OCRBridge] OCR error: " + json.get("error").getAsString());
                 return null;
             }
 
-            // Create new Mission object with parsed data
             Mission mission = new Mission();
+            mission.setTitle(str(json, "title"));
+            mission.setObjective(str(json, "objective"));
+            mission.setTarget(str(json, "target"));
+            mission.setLocation(str(json, "location"));
+            mission.setSecurity(str(json, "security"));
+            mission.setRawText(str(json, "raw_text"));
 
-            // Set basic fields
-            mission.setTitle(getJsonString(json, "title"));
-            mission.setObjective(getJsonString(json, "objective"));
-            mission.setTarget(getJsonString(json, "target"));
-            mission.setLocation(getJsonString(json, "location"));
-            mission.setSecurity(getJsonString(json, "security"));
-            mission.setRawText(getJsonString(json, "raw_text"));
+            // Parse ship target from objective/raw text (e.g. "Destroy the Enyo")
+            mission.setShipTarget(extractShipTarget(mission));
 
-            // Set mission type (handle potential parsing errors)
+            System.out.println("[OCRBridge] Raw Python output: " + jsonString);
+
             try {
-                String typeStr = getJsonString(json, "type");
-                if (typeStr != null && !typeStr.isEmpty()) {
-                    mission.setType(Mission.MissionType.valueOf(typeStr));
-                } else {
-                    mission.setType(Mission.MissionType.OTHER);
-                }
+                String typeStr = str(json, "type");
+                mission.setType(typeStr != null
+                        ? Mission.MissionType.valueOf(typeStr.toUpperCase())
+                        : Mission.MissionType.OTHER);
             } catch (IllegalArgumentException e) {
-                System.err.println("Unknown mission type: " + getJsonString(json, "type"));
                 mission.setType(Mission.MissionType.OTHER);
             }
 
             return mission;
 
         } catch (JsonSyntaxException e) {
-            System.err.println("Invalid JSON format: " + e.getMessage());
-            System.err.println("Raw output: " + jsonString);
-            return null;
-        } catch (Exception e) {
-            System.err.println("Error parsing mission JSON: " + e.getMessage());
-            e.printStackTrace();
+            System.err.println("[OCRBridge] Invalid JSON: " + e.getMessage());
+            System.err.println("[OCRBridge] Raw output was: " + jsonString);
             return null;
         }
     }
 
-    // Helper method to safely get string from JSON
-    private String getJsonString(JsonObject json, String key) {
-        if (json.has(key) && !json.get(key).isJsonNull()) {
-            return json.get(key).getAsString();
-        }
-        return "Unknown";
-    }
+    // -----------------------------------------------------------------------
+    // Ship target extraction  ("Destroy the Enyo" → "Enyo")
+    // -----------------------------------------------------------------------
 
-    // NEW: Combined method to read and parse mission in one call
-    public Mission readMission(int x, int y, int width, int height) {
-        String jsonOutput = readMissionFromScreen(x, y, width, height);
-        if (jsonOutput != null && !jsonOutput.isEmpty()) {
-            return parseMissionJson(jsonOutput);
+    /**
+     * Looks for "Destroy the <Ship>" or "Destray the <Ship>" (OCR typo)
+     * in objective and raw_text fields.
+     */
+    private String extractShipTarget(Mission mission) {
+        String[] fieldsToSearch = {
+                mission.getObjective(),
+                mission.getRawText(),
+                mission.getTitle()
+        };
+
+        // Regex: "destroy" (with common OCR variants) followed by optional "the"
+        // then the ship name (capitalised word)
+        java.util.regex.Pattern pattern = java.util.regex.Pattern.compile(
+                "(?i)des[a-z]{0,4}y\\s+(?:the\\s+)?([A-Z][a-zA-Z]+)"
+        );
+
+        for (String field : fieldsToSearch) {
+            if (field == null) continue;
+            java.util.regex.Matcher m = pattern.matcher(field);
+            if (m.find()) {
+                return m.group(1); // e.g. "Enyo"
+            }
         }
         return null;
     }
 
-    // Test method
-    public static void main(String[] args) {
-        OCRBridge bridge = new OCRBridge();
+    // -----------------------------------------------------------------------
+    // Combined convenience method
+    // -----------------------------------------------------------------------
 
-        // Test with some coordinates
-        Mission mission = bridge.readMission(100, 100, 400, 300);
+    public Mission readMission(int x, int y, int width, int height) {
+        String json = readMissionFromScreen(x, y, width, height);
+        return parseMissionJson(json);
+    }
 
-        if (mission != null) {
-            System.out.println("Mission read successfully:");
-            System.out.println("  Title: " + mission.getTitle());
-            System.out.println("  Target: " + mission.getTarget());
-            System.out.println("  Location: " + mission.getLocation());
-            System.out.println("  Security: " + mission.getSecurity());
-            System.out.println("  Type: " + mission.getType());
-        } else {
-            System.out.println("Failed to read mission");
-        }
+    // -----------------------------------------------------------------------
+    // Helper
+    // -----------------------------------------------------------------------
+
+    private String str(JsonObject json, String key) {
+        return (json.has(key) && !json.get(key).isJsonNull())
+                ? json.get(key).getAsString()
+                : null;
     }
 }

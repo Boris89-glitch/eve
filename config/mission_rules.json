@@ -1,0 +1,13 @@
+{
+  "accept": [
+    { "title_contains": "anomic",       "comment": "Burner missions" },
+    { "title_contains": "recon",        "comment": "Recon missions"  },
+    { "title_contains": "annihilation", "comment": "Anni missions"   }
+  ],
+  "decline": [
+    { "target_contains": "serpentis",   "comment": "No serpentis burners" },
+    { "target_contains": "jaguar",      "comment": "No jaguar burners"    },
+    { "location_contains": "j0c-",      "comment": "System too far"       },
+    { "location_contains": "p33-",      "comment": "System too far"       }
+  ]
+}

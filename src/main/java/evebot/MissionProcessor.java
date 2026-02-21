@@ -38,7 +38,7 @@ public class MissionProcessor {
 
         // 2. Filter by location (too far systems)
         String location = mission.getLocation().toLowerCase();
-        if (location.contains("j0c-") || location.contains("p33-")) {
+        if (location.contains("j0c-") || location.contains("p33-") || location.contains("-t2i")){
             System.out.println("Reject: system too far");
             return false;
         }
@@ -49,7 +49,7 @@ public class MissionProcessor {
 
         // Decline Serpentis or Jaguar burner missions
         if (mission.getType() == Mission.MissionType.BURNER) {
-            if (target.contains("serpentis") || target.contains("jaguar")) {
+            if (target.contains("Daredevil") || target.contains("jaguar")) {
                 System.out.println("Reject: unwanted burner ship");
                 return false;
             }

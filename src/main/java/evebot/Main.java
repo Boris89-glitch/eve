@@ -4,44 +4,60 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Entry point for the EVE Online Multi-Client Bot.
+ *
+ * Start-up sequence:
+ *   1. StateManager  — loads persisted client states + registers Ctrl+Shift+O
+ *   2. ClientManager — loads window / coordinate config, builds rule engine
+ *   3. Scheduler     — polls clients every 2 s, auto-saves state every 30 s
+ *
+ * The bot does NOT act until Ctrl+Shift+O is pressed (or "toggle" typed).
+ * It then resumes each client from its last known state.  Clients with no
+ * saved state begin in IDLE, waiting for a mission dialog to appear.
+ */
 public class Main {
-    private ClientManager clientManager;
+
     private StateManager stateManager;
+    private ClientManager clientManager;
     private ScheduledExecutorService scheduler;
+
+    // -----------------------------------------------------------------------
 
     public static void main(String[] args) {
         new Main().start();
     }
 
     public void start() {
-        System.out.println("Starting EVE Online Multi-Client Bot...");
+        System.out.println("╔══════════════════════════════════════════╗");
+        System.out.println("║   EVE Online Multi-Client Bot  v0.1      ║");
+        System.out.println("║   Press Ctrl+Shift+O to start / pause    ║");
+        System.out.println("╚══════════════════════════════════════════╝");
 
-        // Initialize components
+        // 1. State manager (also registers hotkey)
         this.stateManager = new StateManager();
+
+        // 2. Client manager (depends on stateManager)
         this.clientManager = new ClientManager(stateManager);
-        this.scheduler = Executors.newScheduledThreadPool(5);
 
-        // Load configuration
-        loadConfiguration();
+        // 3. Scheduler
+        this.scheduler = Executors.newScheduledThreadPool(3);
 
-        // Start monitoring clients
-        startMonitoring();
-    }
+        // Poll clients every 2 seconds
+        scheduler.scheduleAtFixedRate(
+                clientManager::monitorClients,
+                0, 2, TimeUnit.SECONDS);
 
-    private void loadConfiguration() {
-        // TODO: Load mission configs and client positions
-        System.out.println("Loading configuration...");
-    }
+        // Persist state every 30 seconds (also saved on every transition)
+        scheduler.scheduleAtFixedRate(
+                stateManager::saveStates,
+                20, 20, TimeUnit.SECONDS);
 
-    private void startMonitoring() {
-        // Schedule client monitoring every 2 seconds
-        scheduler.scheduleAtFixedRate(() -> {
-            clientManager.monitorClients();
-        }, 0, 2, TimeUnit.SECONDS);
-
-        // Schedule state persistence every 30 seconds
-        scheduler.scheduleAtFixedRate(() -> {
+        // Keep the JVM alive
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            System.out.println("\n[Main] Shutting down — saving state...");
             stateManager.saveStates();
-        }, 0, 30, TimeUnit.SECONDS);
+            scheduler.shutdownNow();
+        }));
     }
 }
