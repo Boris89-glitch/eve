@@ -1,0 +1,7 @@
+# Updated for Python 3.13 compatibility
+pytesseract>=0.3.13
+Pillow>=10.4.0
+pyautogui>=0.9.54
+pywin32>=306
+opencv-python>=4.9.0.80
+numpy>=1.26.0
