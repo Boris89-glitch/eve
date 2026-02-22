@@ -55,6 +55,7 @@ public class ClientManager {
     private void loadCalibratedCoordinates() {
         // Try config/ directory first, then project root
         List<Path> candidates = List.of(
+                Paths.get("ocr", "config", "mission_coordinates.json"),
                 Paths.get("config", "mission_coordinates.json"),
                 Paths.get("mission_coordinates.json")
         );
@@ -164,8 +165,8 @@ public class ClientManager {
         //       open in this client window.  For now we attempt an OCR read; if
         //       it returns a non-null mission we assume the dialog is open.
 
-        Rectangle missionArea = getMissionAreaForClient(clientId);
-        Mission mission = missionProcessor.readMission(missionArea);
+        //Rectangle missionArea = getMissionAreaForClient(clientId);
+        Mission mission = missionProcessor.readMission(window);
 
         if (mission != null && mission.getTitle() != null
                 && !mission.getTitle().equals("Unknown")) {
@@ -185,8 +186,8 @@ public class ClientManager {
 
         if (mission == null) {
             // Somehow we got here without a mission — re-read
-            Rectangle missionArea = getMissionAreaForClient(clientId);
-            mission = missionProcessor.readMission(missionArea);
+            //Rectangle missionArea = getMissionAreaForClient(clientId);
+            mission = missionProcessor.readMission(window);
             stateManager.getState(clientId).setCurrentMission(mission);
         }
 

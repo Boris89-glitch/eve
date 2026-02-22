@@ -7,6 +7,7 @@ import evebot.models.Mission;
 
 import java.nio.file.*;
 import java.util.*;
+import java.util.List;
 
 /**
  * MissionConfig loads and evaluates accept/decline rules from
@@ -34,7 +35,11 @@ import java.util.*;
  */
 public class MissionConfig {
 
-    private static final Path RULES_FILE = Paths.get("config", "mission_rules.json");
+    private static final List<Path> RULES_CANDIDATES = List.of(
+            Paths.get("ocr", "config", "mission_rules.json"),
+            Paths.get("config", "mission_rules.json"),
+            Paths.get("mission_rules.json")
+    );
 
     private final List<Rule> acceptRules  = new ArrayList<>();
     private final List<Rule> declineRules = new ArrayList<>();
@@ -91,16 +96,21 @@ public class MissionConfig {
     // -----------------------------------------------------------------------
 
     private void loadRules() {
-        if (!Files.exists(RULES_FILE)) {
-            System.out.println("[MissionConfig] No rules file found at " + RULES_FILE
-                    + " — writing default rules.");
+        Path rulesFile = RULES_CANDIDATES.stream()
+                .filter(Files::exists)
+                .findFirst()
+                .orElse(null);
+
+        if (rulesFile == null) {
+            System.out.println("[MissionConfig] No rules file found — writing default rules.");
             writeDefaultRules();
             loadRules(); // recurse once
             return;
         }
 
+        System.out.println("[MissionConfig] Loading rules from " + rulesFile);
         try {
-            String content = new String(Files.readAllBytes(RULES_FILE));
+            String content = new String(Files.readAllBytes(rulesFile));
             JsonObject json = gson.fromJson(content, JsonObject.class);
 
             parseRules(json.getAsJsonArray("accept"),  acceptRules);
@@ -147,9 +157,10 @@ public class MissionConfig {
                 + "    { \"location_contains\": \"p33-\",      \"comment\": \"System too far\"       }\n"
                 + "  ]\n"
                 + "}\n";
+        Path defaultTarget = RULES_CANDIDATES.get(0); // write to config/mission_rules.json
         try {
-            Files.createDirectories(RULES_FILE.getParent());
-            Files.write(RULES_FILE, defaultJson.getBytes(),
+            Files.createDirectories(defaultTarget.getParent());
+            Files.write(defaultTarget, defaultJson.getBytes(),
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (Exception e) {
             System.err.println("[MissionConfig] Could not write default rules: " + e.getMessage());

@@ -226,18 +226,25 @@ class EVEMissionReader:
         raw_objective = "Unknown"
         raw_location = "Unknown"
 
+        # Find title by mission keyword
         for i, line in enumerate(lines[:15]):
             lower = line.lower()
             for kws in self.mission_keywords.values():
                 if any(kw in lower for kw in kws):
                     raw_title = line
-                    if i + 3 < len(lines):
-                        raw_objective = lines[i + 3]
-                    if i + 5 < len(lines):
-                        raw_location = lines[i + 5]
                     break
             if raw_title != "Unknown":
                 break
+
+        # Find objective and location by their own keywords — don't rely on
+        # fixed line offsets which break when OCR merges or drops lines.
+        for line in lines:
+            lower = line.lower()
+            if lower.startswith("destroy") or "destroy the" in lower:
+                raw_objective = line
+            if "location" in lower and raw_location == "Unknown":
+                # Strip the "Location" label itself before passing to cleaner
+                raw_location = re.sub(r"(?i)^location\s*", "", line).strip()
 
         title = self.clean_title(raw_title)
         location = self.clean_location(raw_location)

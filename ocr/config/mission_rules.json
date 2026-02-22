@@ -10,6 +10,6 @@
     { "target_contains": "jaguar",       "comment": "No jaguar burners"      },
     { "location_contains": "j0c-",       "comment": "System too far"         },
     { "location_contains": "p33-",       "comment": "System too far"         },
-    { "location_contains": "-t2i",       "comment": "System too far"         }
+    { "location_contains": "dw-t2i",       "comment": "System too far"         }
   ]
 }
