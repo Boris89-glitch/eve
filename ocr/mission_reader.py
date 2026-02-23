@@ -226,25 +226,18 @@ class EVEMissionReader:
         raw_objective = "Unknown"
         raw_location = "Unknown"
 
-        # Find title by mission keyword
         for i, line in enumerate(lines[:15]):
             lower = line.lower()
             for kws in self.mission_keywords.values():
                 if any(kw in lower for kw in kws):
                     raw_title = line
+                    if i + 3 < len(lines):
+                        raw_objective = lines[i + 3]
+                    if i + 5 < len(lines):
+                        raw_location = lines[i + 5]
                     break
             if raw_title != "Unknown":
                 break
-
-        # Find objective and location by their own keywords — don't rely on
-        # fixed line offsets which break when OCR merges or drops lines.
-        for line in lines:
-            lower = line.lower()
-            if lower.startswith("destroy") or "destroy the" in lower:
-                raw_objective = line
-            if "location" in lower and raw_location == "Unknown":
-                # Strip the "Location" label itself before passing to cleaner
-                raw_location = re.sub(r"(?i)^location\s*", "", line).strip()
 
         title = self.clean_title(raw_title)
         location = self.clean_location(raw_location)
@@ -278,6 +271,30 @@ class EVEMissionReader:
         return "OTHER"
 
     # ------------------------------------------------------------------
+    # Dialog detection — pixel colour check
+    # ------------------------------------------------------------------
+
+    def is_mission_dialog_open(self, text: str) -> bool:
+        """
+        Returns True if the OCR text looks like a mission dialog.
+        Checks for:
+          - Agent name line: two capitalised words followed by "Level"
+            e.g. "Lara Mesi Level 4" (OCR may merge to "LaraMesi")
+          - OR the word "Location" anywhere in the text
+          - OR the word "Objective" anywhere in the text
+        """
+        lower = text.lower()
+
+        if "location" in lower or "objective" in lower:
+            return True
+
+        # Agent name pattern: two runs of letters (possibly merged) + "level"
+        if re.search(r"[A-Za-z]{2,}\s?[A-Za-z]{2,}\s*(level|lvl)", lower):
+            return True
+
+        return False
+
+    # ------------------------------------------------------------------
     # Main entry
     # ------------------------------------------------------------------
 
@@ -285,9 +302,13 @@ class EVEMissionReader:
         image = self.capture_region(x, y, width, height)
         if not image:
             return None
+
         text = self.extract_text(image)
         if not text:
             return None
+
+        if not self.is_mission_dialog_open(text):
+            return None  # no mission dialog detected in OCR text
         return self.parse_mission_details(text)
 
 

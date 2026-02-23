@@ -55,7 +55,6 @@ public class ClientManager {
     private void loadCalibratedCoordinates() {
         // Try config/ directory first, then project root
         List<Path> candidates = List.of(
-                Paths.get("ocr", "config", "mission_coordinates.json"),
                 Paths.get("config", "mission_coordinates.json"),
                 Paths.get("mission_coordinates.json")
         );
@@ -168,9 +167,12 @@ public class ClientManager {
         //Rectangle missionArea = getMissionAreaForClient(clientId);
         Mission mission = missionProcessor.readMission(window);
 
-        if (mission != null && mission.getTitle() != null
-                && !mission.getTitle().equals("Unknown")) {
-            System.out.println("[" + clientId + "] Mission dialog detected: " + mission.getTitle());
+        if (mission != null) {
+            // Transition to CHECKING_MISSIONS for any detected mission — even
+            // unknowns. missionConfig.evaluate() defaults to DECLINE for
+            // unrecognised titles, so OTHER missions get declined correctly.
+            String title = mission.getTitle() != null ? mission.getTitle() : "Unknown";
+            System.out.println("[" + clientId + "] Mission dialog detected: " + title);
             stateManager.getState(clientId).setCurrentMission(mission);
             stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
         }
