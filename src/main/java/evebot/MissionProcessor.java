@@ -1,115 +1,96 @@
-// src/main/java/evebot/MissionProcessor.java
 package evebot;
 
-import com.google.gson.Gson;
-import com.google.gson.JsonObject;
 import evebot.models.Mission;
-
 import java.awt.Rectangle;
-import java.nio.file.*;
-import java.util.List;
 
+/**
+ * MissionProcessor is the single point of contact between the Java state
+ * machine and the Python automation layer.
+ *
+ * All UI interactions (template matching + clicking) are delegated to
+ * eve_automation.py via OCRBridge.  The Java side only calls named actions
+ * and receives typed results — it never hard-codes pixel coordinates.
+ *
+ * Public API used by ClientManager:
+ *
+ *   // IDLE phase
+ *   clickRequestMission()          — click "Request Mission" if visible
+ *   Mission readMission(window)    — OCR the mission dialog area
+ *
+ *   // CHECKING_MISSIONS phase
+ *   acceptMission()                — click Accept button
+ *   clickTrack()                   — click Track button
+ *   closeDialog()                  — click X (close active window)
+ *   declineMission()               — click Decline button
+ */
 public class MissionProcessor {
-    private final OCRBridge ocrBridge;
-    private final Rectangle missionRect;
 
-    private static final Rectangle FALLBACK_RECT = new Rectangle(440, 92, 988, 336);
+    private final OCRBridge ocrBridge;
 
     public MissionProcessor() {
-        this.ocrBridge   = new OCRBridge();
-        this.missionRect = loadCalibratedRect();
+        this.ocrBridge = new OCRBridge();
     }
 
-    private Rectangle loadCalibratedRect() {
-        List<Path> candidates = List.of(
-                Paths.get("ocr", "config", "mission_coordinates.json"),
-                Paths.get("config", "mission_coordinates.json"),
-                Paths.get("mission_coordinates.json")
-        );
+    // -----------------------------------------------------------------------
+    // IDLE phase actions
+    // -----------------------------------------------------------------------
 
-        Gson gson = new Gson();
-        for (Path path : candidates) {
-            if (Files.exists(path)) {
-                try {
-                    String content = new String(Files.readAllBytes(path));
-                    JsonObject json = gson.fromJson(content, JsonObject.class);
-                    JsonObject area = json.getAsJsonObject("mission_area");
-                    if (area != null) {
-                        Rectangle rect = new Rectangle(
-                                area.get("x").getAsInt(),
-                                area.get("y").getAsInt(),
-                                area.get("width").getAsInt(),
-                                area.get("height").getAsInt()
-                        );
-                        System.out.println("[MissionProcessor] Loaded coordinates from " + path + ": " + rect);
-                        return rect;
-                    }
-                } catch (Exception e) {
-                    System.err.println("[MissionProcessor] Error reading coordinates: " + e.getMessage());
-                }
-            }
-        }
-
-        System.out.println("[MissionProcessor] No coordinate file found — using fallback " + FALLBACK_RECT);
-        return FALLBACK_RECT;
-    }
-    //TODO: clientWindow isn't used?
-    public Mission readMission(ClientWindowInfo clientWindow) {
-        System.out.printf("[MissionProcessor] Reading mission at (%d,%d) %dx%d%n",
-                missionRect.x, missionRect.y, missionRect.width, missionRect.height);
-
-        return ocrBridge.readMission(
-                missionRect.x, missionRect.y,
-                missionRect.width, missionRect.height
-        );
+    /**
+     * Asks the Python automation layer to find and click the "Request Mission"
+     * button if it is currently visible on screen.
+     * Safe to call when the button is not present — it becomes a no-op.
+     */
+    public void clickRequestMission() {
+        ocrBridge.clickTemplate("request_mission");
     }
 
-    public boolean evaluateMission(Mission mission) {
-        if (mission == null) return false;
-
-        // 1. Filter by title type
-        String title = mission.getTitle().toLowerCase();
-        boolean validType = title.contains("anomic") ||
-                title.contains("recon") ||
-                title.contains("annihilation");
-        if (!validType) {
-            System.out.println("Reject: title not matching criteria");
-            return false;
-        }
-
-        // 2. Filter by location (too-far systems)
-        String location = mission.getLocation().toLowerCase();
-        if (location.contains("j0c-") || location.contains("p33-") || (location.contains("-t2i"))) {
-            System.out.println("Reject: system too far");
-            return false;
-        }
-
-        // 3. Filter burner missions by target ship
-        if (mission.getType() == Mission.MissionType.BURNER) {
-            String target = mission.getTarget() != null
-                    ? mission.getTarget().toLowerCase() : "";
-            if (target.contains("serpentis") || target.contains("jaguar")) {
-                System.out.println("Reject: unwanted burner ship – " + mission.getTarget());
-                return false;
-            }
-        }
-
-        System.out.println("Accepting mission: " + mission.getTitle());
-        return true;
+    /**
+     * OCR-reads the mission dialog area derived from the given window bounds.
+     * Returns a populated {@link Mission} or {@code null} if no dialog is open
+     * or the OCR produced no usable text.
+     */
+    public Mission readMission(ClientWindowInfo window) {
+        Rectangle area = calculateMissionDialogRect(window.getBounds());
+        return ocrBridge.readMission(area.x, area.y, area.width, area.height);
     }
 
-    public void acceptMission(Rectangle windowRect) {
-        clickRelative(windowRect, 0.6, 0.8);
+    // -----------------------------------------------------------------------
+    // CHECKING_MISSIONS phase actions
+    // -----------------------------------------------------------------------
+
+    /** Click the Accept button (template match). */
+    public void acceptMission() {
+        ocrBridge.clickTemplate("accept");
     }
 
-    public void declineMission(Rectangle windowRect) {
-        clickRelative(windowRect, 0.4, 0.8);
+    /** Click the Track button that appears after accepting. */
+    public void clickTrack() {
+        ocrBridge.clickTemplate("track");
     }
 
-    private void clickRelative(Rectangle windowRect, double relX, double relY) {
-        int x = windowRect.x + (int) (windowRect.width  * relX);
-        int y = windowRect.y + (int) (windowRect.height * relY);
-        // TODO: Implement actual mouse click
-        System.out.println("Clicking at: " + x + ", " + y);
+    /** Close the mission dialog via the X button. */
+    public void closeDialog() {
+        ocrBridge.clickTemplate("close");
+    }
+
+    /** Click the Decline button (template match). */
+    public void declineMission() {
+        ocrBridge.clickTemplate("decline");
+    }
+
+    // -----------------------------------------------------------------------
+    // Helper
+    // -----------------------------------------------------------------------
+
+    /**
+     * Derives the mission text area from the containing EVE window.
+     * Adjust the multipliers here if the OCR region drifts after a UI resize.
+     */
+    private Rectangle calculateMissionDialogRect(Rectangle windowRect) {
+        int x      = windowRect.x + (int)(windowRect.width  * 0.3);
+        int y      = windowRect.y + (int)(windowRect.height * 0.2);
+        int width  = (int)(windowRect.width  * 0.4);
+        int height = (int)(windowRect.height * 0.6);
+        return new Rectangle(x, y, width, height);
     }
 }

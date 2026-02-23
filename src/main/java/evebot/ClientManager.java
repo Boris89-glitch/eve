@@ -14,6 +14,16 @@ import java.util.concurrent.ConcurrentHashMap;
  * ClientManager discovers EVE Online client windows, tracks each one by a
  * stable clientId, and drives the per-client state machine during
  * monitorClients() calls.
+ *
+ * Mission flow:
+ *   IDLE
+ *     └─► Clicks "Request Mission" button if visible (template match).
+ *         Then OCR-reads the dialog. If a mission is found → CHECKING_MISSIONS.
+ *
+ *   CHECKING_MISSIONS
+ *     └─► Evaluates accept/decline rules.
+ *         ACCEPT  → Accept → Track → Close → ACCEPTED
+ *         DECLINE → Decline → IDLE
  */
 public class ClientManager {
 
@@ -41,10 +51,10 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     public ClientManager(StateManager stateManager) {
-        this.stateManager    = stateManager;
+        this.stateManager     = stateManager;
         this.missionProcessor = new MissionProcessor();
-        this.missionConfig   = new MissionConfig();
-        this.gson            = new Gson();
+        this.missionConfig    = new MissionConfig();
+        this.gson             = new Gson();
         loadCalibratedCoordinates();
     }
 
@@ -53,7 +63,6 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void loadCalibratedCoordinates() {
-        // Try config/ directory first, then project root
         List<Path> candidates = List.of(
                 Paths.get("config", "mission_coordinates.json"),
                 Paths.get("mission_coordinates.json")
@@ -90,16 +99,11 @@ public class ClientManager {
     // Core monitor loop  (called by the scheduler every 2 seconds)
     // -----------------------------------------------------------------------
 
-    /**
-     * Called repeatedly by the scheduler.  Skips all work when the bot is
-     * paused so the hotkey toggle immediately halts activity.
-     */
     public void monitorClients() {
         if (!stateManager.isBotRunning()) {
-            return; // bot is paused — do nothing
+            return;
         }
 
-        // Discover / refresh EVE windows
         refreshClientWindows();
 
         if (clientWindows.isEmpty()) {
@@ -107,7 +111,6 @@ public class ClientManager {
             return;
         }
 
-        // Drive state machine for each known client
         clientWindows.forEach((clientId, windowInfo) ->
                 processClient(clientId, windowInfo));
     }
@@ -121,19 +124,16 @@ public class ClientManager {
 
         switch (state) {
             case IDLE:
-                // Waiting for a mission offer to appear — poll for it
                 handleIdle(clientId, window);
                 break;
 
             case CHECKING_MISSIONS:
-                // Mission screen is open — read and decide
                 handleCheckingMissions(clientId, window);
                 break;
 
             case ACCEPTED:
-                // Mission was accepted — placeholder for undock / travel logic
+                // TODO: ship selection + undock (Phase 2)
                 System.out.println("[" + clientId + "] Mission accepted — waiting for undock trigger (TODO).");
-                // For now transition back to IDLE so we don't loop forever
                 stateManager.setState(clientId, ClientState.State.IDLE);
                 break;
 
@@ -156,21 +156,27 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // IDLE handler — detect mission offer panel
+    // IDLE handler
     // -----------------------------------------------------------------------
 
+    /**
+     * Two-stage idle handler:
+     *
+     *  1. Click "Request Mission" button if it's visible on screen (no-op when
+     *     the dialog is already open or the button isn't there yet).
+     *
+     *  2. OCR-read the mission dialog area. If a mission is found store it and
+     *     advance to CHECKING_MISSIONS. Otherwise stay IDLE quietly.
+     */
     private void handleIdle(String clientId, ClientWindowInfo window) {
-        // TODO: Use OCR or pixel-colour check to detect if a mission dialog is
-        //       open in this client window.  For now we attempt an OCR read; if
-        //       it returns a non-null mission we assume the dialog is open.
+        // Stage 1 — click Request Mission button if present (template match)
+        missionProcessor.clickRequestMission();
 
-        //Rectangle missionArea = getMissionAreaForClient(clientId);
+        // Stage 2 — OCR read; passes the full ClientWindowInfo so
+        // MissionProcessor can derive the correct screen region internally
         Mission mission = missionProcessor.readMission(window);
 
         if (mission != null) {
-            // Transition to CHECKING_MISSIONS for any detected mission — even
-            // unknowns. missionConfig.evaluate() defaults to DECLINE for
-            // unrecognised titles, so OTHER missions get declined correctly.
             String title = mission.getTitle() != null ? mission.getTitle() : "Unknown";
             System.out.println("[" + clientId + "] Mission dialog detected: " + title);
             stateManager.getState(clientId).setCurrentMission(mission);
@@ -180,15 +186,21 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // CHECKING_MISSIONS handler — evaluate and announce decision
+    // CHECKING_MISSIONS handler
     // -----------------------------------------------------------------------
 
+    /**
+     * Evaluates the stored mission against the rule config and executes the
+     * appropriate click action via the automation layer (template matching).
+     *
+     * ACCEPT:  Accept → Track → Close dialog → state ACCEPTED
+     * DECLINE: Decline → state IDLE
+     */
     private void handleCheckingMissions(String clientId, ClientWindowInfo window) {
         Mission mission = stateManager.getState(clientId).getCurrentMission();
 
         if (mission == null) {
-            // Somehow we got here without a mission — re-read
-            //Rectangle missionArea = getMissionAreaForClient(clientId);
+            // Re-read in case we arrived here without a stored mission
             mission = missionProcessor.readMission(window);
             stateManager.getState(clientId).setCurrentMission(mission);
         }
@@ -201,18 +213,16 @@ public class ClientManager {
 
         MissionConfig.Decision decision = missionConfig.evaluate(mission);
 
-        Rectangle windowRect = window.getBounds();
-
         if (decision == MissionConfig.Decision.ACCEPT) {
-            // ---- ACCEPT ----
             System.out.println(">>> [" + clientId + "] ACTION: ACCEPT — " + mission.getTitle());
-            missionProcessor.acceptMission(windowRect);  // currently prints coords
+            missionProcessor.acceptMission();  // template click: Accept button
+            missionProcessor.clickTrack();     // template click: Track button
+            missionProcessor.closeDialog();    // template click: X button
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
 
         } else {
-            // ---- DECLINE ----
             System.out.println(">>> [" + clientId + "] ACTION: DECLINE — " + mission.getTitle());
-            missionProcessor.declineMission(windowRect); // currently prints coords
+            missionProcessor.declineMission(); // template click: Decline button
             stateManager.setState(clientId, ClientState.State.IDLE);
         }
     }
@@ -222,28 +232,18 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     /**
-     * Refreshes the map of known EVE client windows.
-     *
-     * On Windows this would use JNA + EnumWindows to find all windows whose
-     * title contains "EVE".  The stub below creates a single fake window at
-     * the default screen position so the rest of the state machine can run
-     * and be tested without a live EVE client.
-     *
-     * Replace the body of this method with real JNA window enumeration when
-     * you are ready to run against actual clients.
+     * Stub — replace with real JNA EnumWindows enumeration when running
+     * against live EVE clients.
      */
     private void refreshClientWindows() {
-        // ----------------------------------------------------------------
-        // STUB — replace with real JNA enumeration
-        // ----------------------------------------------------------------
         if (clientWindows.isEmpty()) {
             Rectangle defaultArea = clientMissionAreas.getOrDefault("default",
                     new Rectangle(440, 92, 988, 336));
 
             ClientWindowInfo stub = new ClientWindowInfo(
-                    "EVE - Character Name",   // window title
-                    "ExeFile",                // window class
-                    0L,                       // HWND (unknown in stub)
+                    "EVE - Character Name",
+                    "ExeFile",
+                    0L,
                     defaultArea.x,
                     defaultArea.y,
                     defaultArea.width,
@@ -252,7 +252,6 @@ public class ClientManager {
             clientWindows.put(stub.getClientId(), stub);
             System.out.println("[ClientManager] Registered stub EVE client: " + stub.getClientId());
         }
-        // ----------------------------------------------------------------
     }
 
     // -----------------------------------------------------------------------
