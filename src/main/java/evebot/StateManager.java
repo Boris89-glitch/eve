@@ -9,31 +9,41 @@ import java.io.*;
 import java.lang.reflect.Type;
 import java.nio.file.*;
 import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * StateManager tracks the current state of all EVE clients in memory and
- * persists that state to disk so the bot can resume after a restart.
+ * StateManager tracks the current state of all EVE clients in memory.
  *
- * Hotkey: Ctrl+Shift+O toggles the bot on/off (registered via a background
- * thread that polls the keyboard — no native hook library required).
+ * Testing convenience: new clients start in CHECKING_MISSIONS instead of IDLE
+ * so the bot immediately evaluates whatever mission dialog is on screen.
+ * Change DEFAULT_START_STATE back to IDLE for production.
+ *
+ * State persistence (saveStates / loadStates) is disabled during testing —
+ * re-enable the commented lines in Main.java when ready.
  */
 public class StateManager {
+
+    // -----------------------------------------------------------------------
+    // Testing convenience — change to IDLE for production
+    // -----------------------------------------------------------------------
+    private static final ClientState.State DEFAULT_START_STATE = ClientState.State.CHECKING_MISSIONS;
 
     // -----------------------------------------------------------------------
     // Fields
     // -----------------------------------------------------------------------
 
-    /** Live state map: clientId → ClientState */
     private final Map<String, ClientState> states = new ConcurrentHashMap<>();
-
-    /** Whether the bot loop is currently active */
     private volatile boolean botRunning = false;
 
-    /** Path where state is persisted between runs */
+    /**
+     * Track button only appears on the very first mission accept per agent session.
+     * Once we've attempted it once, skip it on all future accepts.
+     */
+    private volatile boolean trackAttempted = false;
     private static final Path STATE_FILE = Paths.get("config", "bot_state.json");
-
+    private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss");
     private final Gson gson;
 
     // -----------------------------------------------------------------------
@@ -43,8 +53,7 @@ public class StateManager {
     public StateManager() {
         this.gson = new GsonBuilder()
                 .setPrettyPrinting()
-                .registerTypeAdapter(LocalDateTime.class,
-                        new LocalDateTimeAdapter())
+                .registerTypeAdapter(LocalDateTime.class, new LocalDateTimeAdapter())
                 .create();
 
         loadStates();
@@ -55,50 +64,30 @@ public class StateManager {
     // Bot on/off toggle
     // -----------------------------------------------------------------------
 
-    /** Returns true when the bot should be actively working. */
-    public boolean isBotRunning() {
-        return botRunning;
-    }
+    public boolean isBotRunning() { return botRunning; }
 
-    /** Toggle the running flag and print a clear status message. */
     public void toggleBot() {
         botRunning = !botRunning;
-        System.out.println("==============================================");
-        System.out.println("  BOT " + (botRunning ? "STARTED ▶" : "PAUSED ■"));
-        System.out.println("==============================================");
-
-        if (botRunning) {
-            // Print a summary of current states so the operator knows
-            // where each client will resume.
-            printStatesSummary();
-        }
+        log("==============================================");
+        log("  BOT " + (botRunning ? "STARTED ▶" : "PAUSED ■"));
+        log("==============================================");
+        if (botRunning) printStatesSummary();
     }
 
-    /**
-     * Registers a background thread that listens for Ctrl+Shift+O using
-     * Java's Robot/AWT polling approach (no JNI required).
-     *
-     * We use com.sun.jna (already in pom.xml) to check key state on Windows,
-     * but fall back to a console-based "press ENTER to toggle" if JNA is
-     * unavailable so the code always compiles cross-platform.
-     */
+    public boolean isTrackAttempted()        { return trackAttempted; }
+    public void    setTrackAttempted(boolean v) { this.trackAttempted = v; }
+
     private void registerHotkey() {
-        // Primary: JNA-based global hotkey on Windows
         if (tryRegisterJnaHotkey()) {
-            System.out.println("[Hotkey] Ctrl+Shift+O registered (JNA).");
+            log("[Hotkey] Ctrl+Shift+O registered (JNA).");
             return;
         }
-
-        // Fallback: read lines from stdin — type 'toggle' and press Enter
         Thread fallback = new Thread(() -> {
-            System.out.println("[Hotkey] JNA unavailable. Type 'toggle' + Enter to start/pause bot.");
-            try (BufferedReader reader = new BufferedReader(
-                    new InputStreamReader(System.in))) {
+            log("[Hotkey] JNA unavailable. Type 'toggle' + Enter to start/pause bot.");
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    if ("toggle".equalsIgnoreCase(line.trim())) {
-                        toggleBot();
-                    }
+                    if ("toggle".equalsIgnoreCase(line.trim())) toggleBot();
                 }
             } catch (IOException e) {
                 System.err.println("[Hotkey] stdin reader error: " + e.getMessage());
@@ -108,23 +97,13 @@ public class StateManager {
         fallback.start();
     }
 
-    /**
-     * Attempts to set up a polling thread using JNA User32 to detect
-     * Ctrl+Shift+O globally.  Returns false if JNA is not available.
-     */
     private boolean tryRegisterJnaHotkey() {
         try {
-            // Dynamic class lookup so this compiles even without JNA at compile-time
             Class<?> user32Class = Class.forName("com.sun.jna.platform.win32.User32");
             Object user32 = user32Class.getField("INSTANCE").get(null);
             java.lang.reflect.Method getAsyncKeyState =
                     user32Class.getMethod("GetAsyncKeyState", int.class);
-
-            // VK codes
-            final int VK_CONTROL = 0x11;
-            final int VK_SHIFT   = 0x10;
-            final int VK_O       = 0x4F;
-
+            final int VK_CONTROL = 0x11, VK_SHIFT = 0x10, VK_O = 0x4F;
             Thread hotkeyThread = new Thread(() -> {
                 boolean wasPressed = false;
                 while (true) {
@@ -132,29 +111,21 @@ public class StateManager {
                         short ctrl  = (short) getAsyncKeyState.invoke(user32, VK_CONTROL);
                         short shift = (short) getAsyncKeyState.invoke(user32, VK_SHIFT);
                         short o     = (short) getAsyncKeyState.invoke(user32, VK_O);
-
                         boolean pressed = (ctrl & 0x8000) != 0
                                 && (shift & 0x8000) != 0
-                                && (o & 0x8000) != 0;
-
-                        if (pressed && !wasPressed) {
-                            toggleBot();
-                        }
+                                && (o    & 0x8000) != 0;
+                        if (pressed && !wasPressed) toggleBot();
                         wasPressed = pressed;
                         Thread.sleep(100);
-                    } catch (Exception e) {
-                        // If anything goes wrong, exit the thread silently
-                        break;
-                    }
+                    } catch (Exception e) { break; }
                 }
             }, "hotkey-jna");
             hotkeyThread.setDaemon(true);
             hotkeyThread.start();
             return true;
-
         } catch (ClassNotFoundException | NoSuchFieldException |
                  NoSuchMethodException | IllegalAccessException e) {
-            return false; // JNA not available
+            return false;
         }
     }
 
@@ -163,35 +134,40 @@ public class StateManager {
     // -----------------------------------------------------------------------
 
     /**
-     * Returns the state for a given client, creating a fresh IDLE state if
-     * none exists (e.g. first run, no persisted data).
+     * Returns the state for a client, creating one at DEFAULT_START_STATE if
+     * none exists. During testing this means CHECKING_MISSIONS — the bot
+     * immediately evaluates whatever dialog is on screen without waiting for
+     * an IDLE → dialog-detect cycle.
      */
     public ClientState getState(String clientId) {
-        return states.computeIfAbsent(clientId, ClientState::new);
+        return states.computeIfAbsent(clientId, id -> {
+            ClientState cs = new ClientState(id);
+            cs.setState(DEFAULT_START_STATE);
+            log("[StateManager] New client '" + id + "' starting in " + DEFAULT_START_STATE);
+            return cs;
+        });
     }
 
-    /** Overwrite the full state for a client and save immediately. */
     public void setState(String clientId, ClientState.State newState) {
         ClientState cs = getState(clientId);
         ClientState.State old = cs.getState();
         cs.setState(newState);
-        System.out.printf("[State] %s: %s → %s%n", clientId, old, newState);
-        saveStates(); // persist every transition
+        System.out.printf("[%s] [State] %s: %s → %s%n",
+                LocalDateTime.now().format(TS), clientId, old, newState);
+        // saveStates(); // disabled during testing — re-enable for production
     }
 
-    /** Convenience: get just the enum value for a client. */
     public ClientState.State getStateEnum(String clientId) {
         return getState(clientId).getState();
     }
 
     // -----------------------------------------------------------------------
-    // Persistence
+    // Persistence (disabled during testing — called from Main.java when enabled)
     // -----------------------------------------------------------------------
 
-    /** Load persisted states from disk (called at startup). */
     private void loadStates() {
         if (!Files.exists(STATE_FILE)) {
-            System.out.println("[StateManager] No saved state found — starting fresh.");
+            log("[StateManager] No saved state found — starting fresh.");
             return;
         }
         try {
@@ -204,8 +180,7 @@ public class StateManager {
                     cs.setState(dto.state);
                     states.put(id, cs);
                 });
-                System.out.printf("[StateManager] Loaded %d client state(s) from disk.%n",
-                        states.size());
+                log("[StateManager] Loaded " + states.size() + " client state(s) from disk.");
                 printStatesSummary();
             }
         } catch (Exception e) {
@@ -213,13 +188,11 @@ public class StateManager {
         }
     }
 
-    /** Write all current states to disk. */
     public void saveStates() {
         try {
             Files.createDirectories(STATE_FILE.getParent());
             Map<String, ClientStateDto> dtos = new LinkedHashMap<>();
-            states.forEach((id, cs) ->
-                    dtos.put(id, new ClientStateDto(cs.getState())));
+            states.forEach((id, cs) -> dtos.put(id, new ClientStateDto(cs.getState())));
             String json = gson.toJson(dtos);
             Files.write(STATE_FILE, json.getBytes(),
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
@@ -232,12 +205,16 @@ public class StateManager {
     // Helpers
     // -----------------------------------------------------------------------
 
+    private void log(String msg) {
+        System.out.printf("[%s] %s%n", LocalDateTime.now().format(TS), msg);
+    }
+
     private void printStatesSummary() {
         if (states.isEmpty()) {
-            System.out.println("[StateManager] No client states in memory — waiting for mission screen.");
+            log("[StateManager] No client states in memory.");
             return;
         }
-        System.out.println("[StateManager] Current client states:");
+        log("[StateManager] Current client states:");
         states.forEach((id, cs) ->
                 System.out.printf("  %-30s %s%n", id, cs.getState()));
     }
@@ -246,16 +223,11 @@ public class StateManager {
     // Inner classes
     // -----------------------------------------------------------------------
 
-    /** Lightweight DTO used only for JSON serialisation. */
     private static class ClientStateDto {
         ClientState.State state;
         ClientStateDto(ClientState.State state) { this.state = state; }
     }
 
-    /**
-     * Gson type adapter for LocalDateTime because Gson doesn't handle it
-     * out of the box.
-     */
     private static class LocalDateTimeAdapter
             implements com.google.gson.JsonSerializer<LocalDateTime>,
             com.google.gson.JsonDeserializer<LocalDateTime> {

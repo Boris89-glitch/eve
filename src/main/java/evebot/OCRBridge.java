@@ -14,12 +14,13 @@ import java.nio.file.*;
  * Two Python scripts are used:
  *
  *  mission_reader.py   — OCR only; called with (x y w h), returns JSON Mission
- *  eve_automation.py   — template matching + clicking; called with an action name
+ *  eve_automation.py   — template matching + clicking; called with action flags
  *
  * Public API:
  *
- *   Mission readMission(x, y, w, h)   — OCR read
- *   void    clickTemplate(String key) — find & click a named UI element
+ *   Mission readMission(x, y, w, h)        — OCR read a screen region
+ *   void    clickTemplate(String key)       — find & left-click a template on screen
+ *   void    rightClickTemplate(String key)  — find & right-click a template on screen
  */
 public class OCRBridge {
 
@@ -48,7 +49,7 @@ public class OCRBridge {
                 return path;
             }
         }
-        System.err.println("[OCRBridge] WARNING: " + filename + " not found.");
+        System.err.printf("[%s] [OCRBridge] WARNING: " + filename + " not found.%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")));
         return "ocr/" + filename;
     }
 
@@ -65,6 +66,7 @@ public class OCRBridge {
 
             Process process = pb.start();
 
+            // Stream stderr to console in background
             Thread stderrThread = new Thread(() -> {
                 try (BufferedReader err = new BufferedReader(
                         new InputStreamReader(process.getErrorStream(), "UTF-8"))) {
@@ -92,15 +94,41 @@ public class OCRBridge {
             }
 
             String result = output.toString().trim();
-            if (result.isEmpty()) {
-                System.err.println("[OCRBridge] Python produced no output.");
-                return null;
-            }
-            return result;
+            // Click commands exit cleanly with no stdout — that is normal.
+            // Only treat empty output as an error for OCR reads (caller checks null).
+            return result.isEmpty() ? "" : result;
 
         } catch (Exception e) {
             System.err.println("[OCRBridge] Error running Python: " + e.getMessage());
             return null;
+        }
+    }
+
+    /** Like runPython but returns the process exit code instead of stdout. -1 on exception. */
+    private int runPythonExitCode(String... args) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(args);
+            pb.environment().put("PYTHONIOENCODING", "utf-8");
+            pb.environment().put("PYTHONUNBUFFERED", "1");
+            pb.redirectErrorStream(false);
+            Process process = pb.start();
+            Thread stderrThread = new Thread(() -> {
+                try (BufferedReader err = new BufferedReader(
+                        new InputStreamReader(process.getErrorStream(), "UTF-8"))) {
+                    String line;
+                    while ((line = err.readLine()) != null) {
+                        System.err.println("[OCR stderr] " + line);
+                    }
+                } catch (IOException ignored) {}
+            }, "ocr-stderr");
+            stderrThread.setDaemon(true);
+            stderrThread.start();
+            // drain stdout
+            process.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
+            return process.waitFor();
+        } catch (Exception e) {
+            System.err.println("[OCRBridge] Error running Python: " + e.getMessage());
+            return -1;
         }
     }
 
@@ -112,12 +140,13 @@ public class OCRBridge {
         String json = runPython("python", missionReaderPath,
                 String.valueOf(x), String.valueOf(y),
                 String.valueOf(width), String.valueOf(height));
+        if (json == null || json.isEmpty()) return null;
         return parseMissionJson(json);
     }
 
     private Mission parseMissionJson(String jsonString) {
         if (jsonString == null || jsonString.isEmpty()) return null;
-        System.out.println("[OCRBridge] Raw OCR output: " + jsonString);
+        System.out.printf("[%s] [OCRBridge] Raw OCR output: %s%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")), jsonString);
         try {
             JsonObject json = gson.fromJson(jsonString, JsonObject.class);
             if (json.has("error")) {
@@ -152,15 +181,47 @@ public class OCRBridge {
     // -----------------------------------------------------------------------
 
     /**
-     * Asks eve_automation.py to find the named template on screen and click it.
-     * Known keys: request_mission, accept, decline, track, close
+     * Left-click: find the named template on screen and click its centre.
      *
-     * Fire-and-forget — the Python script handles wait/timeout internally.
-     * Errors are logged but not propagated so the state machine keeps running.
+     * eve_automation.py --click <key>
+     *   exit 0 = clicked successfully
+     *   exit 1 = template not found within timeout
+     *
+     * Errors are logged but not propagated — the state machine continues.
      */
     public void clickTemplate(String key) {
         System.out.println("[OCRBridge] clickTemplate: " + key);
         runPython("python", automationScriptPath, "--click", key);
+    }
+
+    /**
+     * Right-click: find the named template on screen and right-click its centre.
+     *
+     * eve_automation.py --right-click <key>
+     *
+     * This requires the --right-click flag to be handled by eve_automation.py
+     * (see cmd_right_click in that script).
+     */
+    public void rightClickTemplate(String key) {
+        System.out.println("[OCRBridge] rightClickTemplate: " + key);
+        runPython("python", automationScriptPath, "--right-click", key);
+    }
+
+    /**
+     * Wait up to timeoutSeconds for a template to appear. Returns true if found.
+     */
+    public boolean waitForTemplate(String key, int timeoutSeconds) {
+        System.out.printf("[%s] [OCRBridge] waitForTemplate: " + key + " (" + timeoutSeconds + "s)%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")));
+        int code = runPythonExitCode("python", automationScriptPath,
+                "--wait", key, "--timeout", String.valueOf(timeoutSeconds));
+        return code == 0;
+    }
+
+    public boolean waitForTemplateGone(String key, int timeoutSeconds) {
+        System.out.printf("[%s] [OCRBridge] waitForTemplateGone: " + key + " (" + timeoutSeconds + "s)%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")));
+        int code = runPythonExitCode("python", automationScriptPath,
+                "--wait-gone", key, "--timeout", String.valueOf(timeoutSeconds));
+        return code == 0;
     }
 
     // -----------------------------------------------------------------------

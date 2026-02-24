@@ -6,6 +6,7 @@
   "decline": [
     { "title_contains": "anomic base",    "comment": "Burner team missions"   },
     { "target_contains": "serpentis",    "comment": "No serpentis burners"   },
+    { "target_contains": "serpentisbumer",    "comment": "No serpentis burners"   },
     { "target_contains": "jaguar",       "comment": "No jaguar burners"      },
     { "location_contains": "j0c-",       "comment": "System too far"         },
     { "location_contains": "p33-",       "comment": "System too far"         },
