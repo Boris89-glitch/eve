@@ -16,16 +16,6 @@ import java.util.concurrent.ConcurrentHashMap;
  * ClientManager discovers EVE Online client windows, tracks each one by a
  * stable clientId, and drives the per-client state machine during
  * monitorClients() calls (now every 1 second).
- *
- * State machine changes (v0.2):
- *   DECLINING   — new state: dialog is open on a declined mission, waiting to
- *                 re-request.  After requesting, go back to CHECKING_MISSIONS.
- *   ACCEPTED    — after clicking Accept:
- *                   1. Wait for the mission to appear as tracked in the journal
- *                   2. Only then close the dialog
- *                   3. Transition to REPAIRING
- *   REPAIRING   — open hangar, double-click correct ship, repair flow,
- *                 then transition to IN_COMBAT (or IDLE on error)
  */
 public class ClientManager {
 
@@ -33,7 +23,7 @@ public class ClientManager {
     // Dependencies
     // -----------------------------------------------------------------------
 
-    private final StateManager    stateManager;
+    private final StateManager     stateManager;
     private final MissionProcessor missionProcessor;
     private final MissionConfig    missionConfig;
     private final Gson             gson;
@@ -42,11 +32,8 @@ public class ClientManager {
     // Window / area tracking
     // -----------------------------------------------------------------------
 
-    /** Mission-panel coordinates per client (or "default"). */
-    private final Map<String, Rectangle> clientMissionAreas = new ConcurrentHashMap<>();
-
-    /** Known EVE windows currently on screen. */
-    private final Map<String, ClientWindowInfo> clientWindows = new ConcurrentHashMap<>();
+    private final Map<String, Rectangle>        clientMissionAreas = new ConcurrentHashMap<>();
+    private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
 
     // -----------------------------------------------------------------------
     // Constructor
@@ -102,9 +89,7 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     public void monitorClients() {
-        if (!stateManager.isBotRunning()) {
-            return;
-        }
+        if (!stateManager.isBotRunning()) return;
 
         refreshClientWindows();
 
@@ -124,50 +109,31 @@ public class ClientManager {
         ClientState.State state = stateManager.getStateEnum(clientId);
 
         switch (state) {
-
-            case IDLE:
-                handleIdle(clientId, window);
-                break;
-
-            case CHECKING_MISSIONS:
-                handleCheckingMissions(clientId, window);
-                break;
-
-            case DECLINING:
-                // Mission was declined — request a new one immediately
-                handleDeclining(clientId, window);
-                break;
-
-            case ACCEPTED:
-                // Mission accepted — wait for journal tracking, then close dialog
-                handleAccepted(clientId, window);
-                break;
-
-            case REPAIRING:
-                // Open hangar, select ship, run repair flow
-                handleRepairing(clientId, window);
-                break;
-
+            case IDLE:              handleIdle(clientId, window);             break;
+            case CHECKING_MISSIONS: handleCheckingMissions(clientId, window); break;
+            case DECLINING:         handleDeclining(clientId, window);        break;
+            case ACCEPTED:          handleAccepted(clientId, window);         break;
+            case REPAIRING:         handleRepairing(clientId, window);        break;
             case IN_COMBAT:
                 log(clientId, "In combat — TODO: monitor combat state.");
                 break;
-
             case RETURNING:
                 log(clientId, "Returning — TODO: monitor warp/dock.");
                 break;
-
             case COMPLETING:
                 log(clientId, "Completing mission — TODO: turn-in click.");
                 stateManager.setState(clientId, ClientState.State.IDLE);
                 break;
-
             default:
                 System.out.println("[" + clientId + "] Unknown state: " + state);
         }
     }
 
     // -----------------------------------------------------------------------
-    // IDLE — detect mission offer panel
+    // IDLE — open agent dialog if needed, then move to CHECKING_MISSIONS
+    //
+    // If no mission window is visible, double-click the agent icon to open
+    // the agent dialog first, then wait briefly before OCR-reading.
     // -----------------------------------------------------------------------
 
     private void handleIdle(String clientId, ClientWindowInfo window) {
@@ -176,8 +142,17 @@ public class ClientManager {
 
         if (mission != null && mission.getTitle() != null
                 && !mission.getTitle().equals("Unknown")) {
-            System.out.println("[" + clientId + "] Mission dialog detected: " + mission.getTitle());
+            // Mission dialog already open — jump straight to evaluation
+            log(clientId, "Mission dialog detected: " + mission.getTitle());
             stateManager.getState(clientId).setCurrentMission(mission);
+            stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+        } else {
+            // No mission window visible — double-click agent icon to open the dialog,
+            // then transition to CHECKING_MISSIONS so the next tick reads it.
+            log(clientId, "No mission window visible — double-clicking agent icon to open dialog.");
+            missionProcessor.doubleClickAgentIcon();
+            // Clear any stale mission and let CHECKING_MISSIONS do the OCR read
+            stateManager.getState(clientId).setCurrentMission(null);
             stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
         }
     }
@@ -196,7 +171,9 @@ public class ClientManager {
         }
 
         if (mission == null) {
-            log(clientId, "No mission data — returning to IDLE.");
+            // Dialog may not have opened yet — go back to IDLE so it tries
+            // the agent icon double-click again on the next tick.
+            log(clientId, "No mission data yet — returning to IDLE to retry agent icon.");
             stateManager.setState(clientId, ClientState.State.IDLE);
             return;
         }
@@ -204,17 +181,12 @@ public class ClientManager {
         MissionConfig.Decision decision = missionConfig.evaluate(mission);
 
         if (decision == MissionConfig.Decision.ACCEPT) {
-            // ---- ACCEPT ----
             System.out.println(">>> [" + clientId + "] ACTION: ACCEPT — " + mission.getTitle());
-            missionProcessor.clickAcceptButton(); // template match — full screen
-            // Do NOT close the dialog yet — wait for tracking in ACCEPTED state
+            missionProcessor.clickAcceptButton();
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
-
         } else {
-            // ---- DECLINE ----
             System.out.println(">>> [" + clientId + "] ACTION: DECLINE — " + mission.getTitle());
-            missionProcessor.clickDeclineButton(); // template match — full screen
-            // Transition to DECLINING so the next tick will request a new mission
+            missionProcessor.clickDeclineButton();
             stateManager.setState(clientId, ClientState.State.DECLINING);
         }
     }
@@ -226,24 +198,19 @@ public class ClientManager {
     private void handleDeclining(String clientId, ClientWindowInfo window) {
         log(clientId, "DECLINING — waiting for offer dialog to close...");
 
-        // Step 1: confirm old dialog is gone (Python waits up to 5s internally)
         if (!missionProcessor.waitForDialogClosed()) {
             log(clientId, "Dialog still visible — will retry next tick.");
             return;
         }
 
-        // Step 2: ask agent for a new mission
         log(clientId, "Dialog closed — requesting new mission.");
         missionProcessor.clickRequestMission();
 
-        // Step 3: wait for new offer dialog (Python waits up to 8s internally)
         if (!missionProcessor.waitForNewOffer()) {
             log(clientId, "New offer not visible yet — will retry next tick.");
             return;
         }
 
-        // Step 4: OCR and immediately go to CHECKING_MISSIONS regardless of title.
-        // Even "Unknown" title is safe — no accept rule will match it, so it gets declined.
         stateManager.getState(clientId).setCurrentMission(null);
         Rectangle missionArea = getMissionAreaForClient(clientId);
         Mission newMission = missionProcessor.readMission(missionArea);
@@ -255,18 +222,10 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // ACCEPTED — wait for journal tracking, then close dialog
+    // ACCEPTED — click Track (first time only), close dialog, go to REPAIRING
     // -----------------------------------------------------------------------
 
-    /**
-     * After clicking Accept:
-     *   1. Click Track (registers in journal) — safe no-op if already tracked
-     *   2. Close the dialog
-     *   3. Transition to REPAIRING
-     */
     private void handleAccepted(String clientId, ClientWindowInfo window) {
-        // Track button only appears on the first accept — skip it on subsequent ones
-        // to avoid a 6-second wait scanning for a button that won't be there.
         if (!stateManager.isTrackAttempted()) {
             log(clientId, "First accept — clicking Track (will skip on future accepts).");
             missionProcessor.clickTrack();
@@ -277,8 +236,9 @@ public class ClientManager {
         missionProcessor.closeMissionDialog();
         stateManager.setState(clientId, ClientState.State.REPAIRING);
     }
+
     // -----------------------------------------------------------------------
-    // REPAIRING — hangar + ship selection + repair
+    // REPAIRING — template-based ship repair + activation, then undock
     // -----------------------------------------------------------------------
 
     private void handleRepairing(String clientId, ClientWindowInfo window) {
@@ -302,7 +262,6 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void refreshClientWindows() {
-        // STUB — replace with real JNA enumeration when running against live clients
         if (clientWindows.isEmpty()) {
             Rectangle defaultArea = clientMissionAreas.getOrDefault("default",
                     new Rectangle(440, 92, 988, 336));
@@ -332,12 +291,10 @@ public class ClientManager {
 
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss");
 
-    /** Log with timestamp and client prefix. */
     private void log(String clientId, String msg) {
         System.out.printf("[%s] [%s] %s%n", LocalDateTime.now().format(TS), clientId, msg);
     }
 
-    /** Log with timestamp, no client prefix. */
     private void log(String msg) {
         System.out.printf("[%s] %s%n", LocalDateTime.now().format(TS), msg);
     }

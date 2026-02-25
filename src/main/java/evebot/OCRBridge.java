@@ -18,9 +18,11 @@ import java.nio.file.*;
  *
  * Public API:
  *
- *   Mission readMission(x, y, w, h)        — OCR read a screen region
- *   void    clickTemplate(String key)       — find & left-click a template on screen
- *   void    rightClickTemplate(String key)  — find & right-click a template on screen
+ *   Mission readMission(x, y, w, h)               — OCR read a screen region
+ *   void    clickTemplate(String key)              — find & left-click a template
+ *   void    doubleClickTemplate(String key)        — find & double-click a template
+ *   void    rightClickTemplate(String key)         — find & right-click a template
+ *   boolean repairShip(String missionTitle)        — repair + activate ship for mission
  */
 public class OCRBridge {
 
@@ -44,12 +46,13 @@ public class OCRBridge {
                 Paths.get(filename).toAbsolutePath().toString()
         };
         for (String path : candidates) {
-            if (new File(path).exists()) {
+            if (new java.io.File(path).exists()) {
                 System.out.println("[OCRBridge] Found " + filename + " at: " + path);
                 return path;
             }
         }
-        System.err.printf("[%s] [OCRBridge] WARNING: " + filename + " not found.%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")));
+        System.err.printf("[%s] [OCRBridge] WARNING: %s not found.%n",
+                ts(), filename);
         return "ocr/" + filename;
     }
 
@@ -66,7 +69,6 @@ public class OCRBridge {
 
             Process process = pb.start();
 
-            // Stream stderr to console in background
             Thread stderrThread = new Thread(() -> {
                 try (BufferedReader err = new BufferedReader(
                         new InputStreamReader(process.getErrorStream(), "UTF-8"))) {
@@ -94,8 +96,6 @@ public class OCRBridge {
             }
 
             String result = output.toString().trim();
-            // Click commands exit cleanly with no stdout — that is normal.
-            // Only treat empty output as an error for OCR reads (caller checks null).
             return result.isEmpty() ? "" : result;
 
         } catch (Exception e) {
@@ -104,7 +104,7 @@ public class OCRBridge {
         }
     }
 
-    /** Like runPython but returns the process exit code instead of stdout. -1 on exception. */
+    /** Run Python and return exit code. -1 on exception. */
     private int runPythonExitCode(String... args) {
         try {
             ProcessBuilder pb = new ProcessBuilder(args);
@@ -123,7 +123,6 @@ public class OCRBridge {
             }, "ocr-stderr");
             stderrThread.setDaemon(true);
             stderrThread.start();
-            // drain stdout
             process.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
             return process.waitFor();
         } catch (Exception e) {
@@ -146,7 +145,7 @@ public class OCRBridge {
 
     private Mission parseMissionJson(String jsonString) {
         if (jsonString == null || jsonString.isEmpty()) return null;
-        System.out.printf("[%s] [OCRBridge] Raw OCR output: %s%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")), jsonString);
+        System.out.printf("[%s] [OCRBridge] Raw OCR output: %s%n", ts(), jsonString);
         try {
             JsonObject json = gson.fromJson(jsonString, JsonObject.class);
             if (json.has("error")) {
@@ -177,48 +176,73 @@ public class OCRBridge {
     }
 
     // -----------------------------------------------------------------------
-    // Template clicking — eve_automation.py --click <key>
+    // Template clicking — eve_automation.py
     // -----------------------------------------------------------------------
 
     /**
      * Left-click: find the named template on screen and click its centre.
-     *
-     * eve_automation.py --click <key>
-     *   exit 0 = clicked successfully
-     *   exit 1 = template not found within timeout
-     *
-     * Errors are logged but not propagated — the state machine continues.
+     * exit 0 = clicked, exit 1 = not found within timeout.
      */
     public void clickTemplate(String key) {
-        System.out.println("[OCRBridge] clickTemplate: " + key);
+        System.out.printf("[%s] [OCRBridge] clickTemplate: %s%n", ts(), key);
         runPython("python", automationScriptPath, "--click", key);
     }
 
     /**
+     * Double-click: find the named template on screen and double-click its centre.
+     * Used for: activating ships in hangar, opening agent dialog.
+     */
+    public void doubleClickTemplate(String key) {
+        System.out.printf("[%s] [OCRBridge] doubleClickTemplate: %s%n", ts(), key);
+        runPython("python", automationScriptPath, "--double-click", key);
+    }
+
+    /**
      * Right-click: find the named template on screen and right-click its centre.
-     *
-     * eve_automation.py --right-click <key>
-     *
-     * This requires the --right-click flag to be handled by eve_automation.py
-     * (see cmd_right_click in that script).
      */
     public void rightClickTemplate(String key) {
-        System.out.println("[OCRBridge] rightClickTemplate: " + key);
+        System.out.printf("[%s] [OCRBridge] rightClickTemplate: %s%n", ts(), key);
         runPython("python", automationScriptPath, "--right-click", key);
+    }
+
+    /**
+     * Repair + activate the correct ship for the given mission title.
+     *
+     * Calls: eve_automation.py --repair-ship "<missionTitle>"
+     *
+     * The Python script:
+     *   1. Resolves the ship template from ship_mission_map.json based on the title
+     *   2. Right-clicks the ship icon → Get Repair Quote → Repair All → Yes
+     *   3. Double-clicks the ship icon to make it the active ship
+     *
+     * @param missionTitle The accepted mission's title (used for ship lookup)
+     * @return true if repair + activation succeeded, false on failure
+     */
+    public boolean repairShip(String missionTitle) {
+        System.out.printf("[%s] [OCRBridge] repairShip for mission: %s%n", ts(), missionTitle);
+        int code = runPythonExitCode("python", automationScriptPath,
+                "--repair-ship", missionTitle != null ? missionTitle : "");
+        if (code == 0) {
+            System.out.printf("[%s] [OCRBridge] repairShip succeeded.%n", ts());
+            return true;
+        } else {
+            System.err.printf("[%s] [OCRBridge] repairShip FAILED (exit code %d).%n", ts(), code);
+            return false;
+        }
     }
 
     /**
      * Wait up to timeoutSeconds for a template to appear. Returns true if found.
      */
     public boolean waitForTemplate(String key, int timeoutSeconds) {
-        System.out.printf("[%s] [OCRBridge] waitForTemplate: " + key + " (" + timeoutSeconds + "s)%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")));
+        System.out.printf("[%s] [OCRBridge] waitForTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
         int code = runPythonExitCode("python", automationScriptPath,
                 "--wait", key, "--timeout", String.valueOf(timeoutSeconds));
         return code == 0;
     }
 
     public boolean waitForTemplateGone(String key, int timeoutSeconds) {
-        System.out.printf("[%s] [OCRBridge] waitForTemplateGone: " + key + " (" + timeoutSeconds + "s)%n", java.time.LocalDateTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")));
+        System.out.printf("[%s] [OCRBridge] waitForTemplateGone: %s (%ds)%n", ts(), key, timeoutSeconds);
         int code = runPythonExitCode("python", automationScriptPath,
                 "--wait-gone", key, "--timeout", String.valueOf(timeoutSeconds));
         return code == 0;
@@ -243,5 +267,10 @@ public class OCRBridge {
     private String str(JsonObject json, String key) {
         return (json.has(key) && !json.get(key).isJsonNull())
                 ? json.get(key).getAsString() : null;
+    }
+
+    private String ts() {
+        return java.time.LocalDateTime.now().format(
+                java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"));
     }
 }
