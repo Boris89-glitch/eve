@@ -12,10 +12,11 @@ import java.time.LocalDateTime;
  *           ├─► DECLINING      (mission did not meet criteria — re-request loop)
  *           │     └─► CHECKING_MISSIONS  (new offer arrived)
  *           ├─► ACCEPTED       (mission met accept criteria)
- *           │     └─► REPAIRING  (ship selected in hangar, repair flow)
- *           │           └─► IN_COMBAT  (undocked, fighting)
- *           │                 └─► RETURNING  (combat done)
- *           │                       └─► COMPLETING → IDLE
+ *           │     └─► REPAIRING   (ship repaired + activated, undocking)
+ *           │           └─► TRAVEL    (undocked, warping to mission site)
+ *           │                 └─► IN_COMBAT  (on grid, fighting)
+ *           │                       └─► RETURNING  (combat done, warping/docking back)
+ *           │                             └─► COMPLETING → IDLE
  *           └─► IDLE           (fallback)
  */
 public class ClientState {
@@ -26,6 +27,7 @@ public class ClientState {
         DECLINING,
         ACCEPTED,
         REPAIRING,
+        TRAVEL,       // undocked and warping to mission site
         IN_COMBAT,
         RETURNING,
         COMPLETING
@@ -62,7 +64,6 @@ public class ClientState {
     public void setState(State state) {
         this.currentState    = state;
         this.lastStateChange = LocalDateTime.now();
-        // Reset tracking flag whenever we leave the accepted/repairing cycle
         if (state == State.IDLE || state == State.CHECKING_MISSIONS || state == State.DECLINING) {
             this.missionTracked = false;
         }
@@ -75,8 +76,8 @@ public class ClientState {
         this.lastMissionCheck = LocalDateTime.now();
     }
 
-    public boolean isMissionTracked()          { return missionTracked; }
-    public void    setMissionTracked(boolean t){ this.missionTracked = t; }
+    public boolean isMissionTracked()           { return missionTracked; }
+    public void    setMissionTracked(boolean t) { this.missionTracked = t; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }
