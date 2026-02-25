@@ -180,6 +180,16 @@ public class MissionProcessor {
     }
 
     // -----------------------------------------------------------------------
+    // Mission turn-in
+    // -----------------------------------------------------------------------
+
+    public void clickCompleteMission() {
+        log("Clicking COMPLETE MISSION (template)");
+        ocrBridge.clickTemplate("complete_mission");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    // -----------------------------------------------------------------------
     // Undock
     // -----------------------------------------------------------------------
 
