@@ -77,12 +77,14 @@ TEMPLATE_FILES = {
     "accept": "accept",
     "decline": "decline",
     "track": "track",
+    "untrack": "untrack",  # visible when mission is already tracked
     "close_active_window": "close_active_window",
     "complete_mission": "complete_mission",
     # Repair flow
     "get_repair_quote": "get_repair_quote",
     "repair": "repair",
     "repair_yes": "repair_yes",
+    "already_repaired": "already_repaired",  # "nothing to repair" dialog — skip repair, proceed to activation
     # Hangar / navigation
     "undock": "undock",
     "ship_hangar": "ship_hangar",
@@ -576,9 +578,6 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             sys.exit(1)
 
     # --- Step 1: Find ship icon and lock its coordinates ---
-    # We find the match once here and reuse the SAME coordinates for both the
-    # right-click (repair) and double-click (activate) so the hangar shifting
-    # after the repair dialog closes cannot cause a different icon to be picked.
     log.info("Step 1: Locating ship icon '%s'...", ship_template)
     ship_match = matcher.wait_for(ship_template, timeout=6.0)
     if not ship_match:
@@ -601,18 +600,23 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
         log.error("'Get Repair Quote' not found in context menu")
         sys.exit(1)
 
-    # --- Step 4: Click "Repair" (Repair All) ---
-    log.info("Step 4: Clicking 'Repair'...")
-    if not matcher.wait_and_click("repair", timeout=6.0, delay=0.8):
-        log.error("'Repair' button not found in repair dialog")
-        sys.exit(1)
-
-    # --- Step 5: Confirm with "Yes" ---
-    log.info("Step 5: Clicking 'Yes' to confirm repair...")
-    if not matcher.wait_and_click("repair_yes", timeout=5.0, delay=0.6):
-        log.warning(
-            "'repair_yes' not found — repair may have completed without confirmation"
+    # --- Step 4: Click "Repair" (Repair All) — unless ship is already fully repaired ---
+    log.info("Step 4: Checking for 'already repaired' notice or 'Repair' button...")
+    if matcher.find("already_repaired"):
+        log.info(
+            "Ship already fully repaired — skipping repair steps, proceeding to activation."
         )
+    else:
+        if not matcher.wait_and_click("repair", timeout=6.0, delay=0.8):
+            log.error("'Repair' button not found in repair dialog")
+            sys.exit(1)
+
+        # --- Step 5: Confirm with "Yes" ---
+        log.info("Step 5: Clicking 'Yes' to confirm repair...")
+        if not matcher.wait_and_click("repair_yes", timeout=5.0, delay=0.6):
+            log.warning(
+                "'repair_yes' not found — repair may have completed without confirmation"
+            )
 
     log.info("Repair complete. Waiting for dialog to settle...")
     time.sleep(1.0)
@@ -709,8 +713,7 @@ class EVEAutomation:
     def step_request_mission(self) -> bool:
         """
         Try to click 'Request Mission' button.
-        If not found (e.g. after completing a mission and the agent dialog is already open),
-        fall back to double-clicking the agent_icon to re-open the conversation.
+        If not found, fall back to double-clicking the agent_icon.
         """
         log.info("-- Step 1: Looking for 'Request Mission' button ...")
         found = self._wait_click("request_mission", timeout=5.0)
@@ -721,7 +724,7 @@ class EVEAutomation:
             if not self._double_click("agent_icon", timeout=5.0):
                 log.info("   Agent icon also not found — dialog may already be open.")
             else:
-                time.sleep(1.2)  # wait for dialog to open after double-click
+                time.sleep(1.2)
         else:
             time.sleep(1.0)
         return True
@@ -764,13 +767,30 @@ class EVEAutomation:
 
     def step_accept(self, mission: Optional[dict]) -> bool:
         log.info("-- Step 4: ACCEPTING '%s'", (mission or {}).get("title", "Unknown"))
-        if not self._wait_click("accept", timeout=5.0):
-            log.error("   Accept button not found!")
-            return False
+
+        # Click Accept non-blocking — if not found, assume already accepted.
+        accepted = self._click("accept")
+        if not accepted:
+            log.info("   Accept button not found — assuming mission already accepted.")
         time.sleep(0.5)
-        log.info("-- Step 5: Clicking Track (if present) ...")
-        self._wait_click("track", timeout=6.0)
-        time.sleep(0.3)
+
+        # Track / Untrack logic:
+        #   If "untrack" is visible → already tracked, skip.
+        #   If "track" is visible   → click it.
+        #   If neither              → assume past tracking step, continue.
+        log.info("-- Step 5: Checking Track state ...")
+        screen = self.matcher.screenshot_cv()
+        if self.matcher.find("untrack", screen=screen):
+            log.info("   'untrack' visible — mission already tracked, skipping.")
+        elif self.matcher.wait_for("track", timeout=6.0):
+            log.info("   'track' visible — clicking Track.")
+            self._click("track")
+            time.sleep(0.3)
+        else:
+            log.info(
+                "   Neither 'track' nor 'untrack' found — assuming past tracking step."
+            )
+
         log.info("-- Step 6: Closing dialog ...")
         if not self._wait_click("close_active_window", timeout=4.0):
             log.warning("   Close button not found — dialog may have closed already.")

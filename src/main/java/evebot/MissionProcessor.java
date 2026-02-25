@@ -3,63 +3,36 @@ package evebot;
 import evebot.models.Mission;
 
 import java.awt.*;
-import java.awt.event.InputEvent;
 
 /**
  * MissionProcessor handles all UI interactions with EVE.
  *
- * BUTTON CLICKS — always use template matching via OCRBridge.clickTemplate().
- * OpenCV scans the full screen for the button image and clicks its centre.
- * Never hardcode pixel coordinates for buttons — the UI moves around.
+ * POST-ACCEPT FLOW (simplified):
+ *   1. repairShip() — Python scans the OPEN dialog for a ship template match,
+ *                     opens the hangar, repairs, and double-clicks to activate.
+ *                     The mission dialog and hangar are both managed inside Python.
+ *   2. Undock.
  *
- * OCR READS — use ocrBridge.readMission(x, y, w, h) only for the mission
- * dialog text area. Ship selection NO LONGER uses OCR.
+ *   The mission dialog does NOT need to be explicitly closed here — Python opens
+ *   the hangar during the repair flow which naturally pushes the dialog away, and
+ *   everything clears on undock anyway.
  *
- * SHIP SELECTION + REPAIR FLOW (new):
- *   The bot resolves the correct ship template from ship_mission_map.json
- *   based on the accepted mission title, then:
- *     1. Right-clicks the ship icon in the hangar → Get Repair Quote → Repair All → Yes
- *     2. Double-clicks the ship icon to make it the active ship
- *   This is done via ocrBridge.repairShip(missionTitle) in a single Python call.
+ *   The ship_hangar click is also NOT repeated here — Python already opened it
+ *   during repair. Clicking it again would toggle it closed.
  *
- * AGENT ICON FALLBACK:
- *   clickRequestMission() first looks for the "Request Mission" button.
- *   If absent (e.g. after completing a mission and agent dialog is already open),
- *   it falls back to doubleClickTemplate("agent_icon") to reopen the conversation.
+ * TRACK / UNTRACK logic:
+ *   If "untrack" is visible → already tracked, skip.
+ *   If "track" is visible   → click it.
+ *   If neither              → assume past tracking step, continue.
  *
- * Template keys (must match filenames in /templates/ and TEMPLATE_FILES in
- * eve_automation.py):
- *
- *   Mission dialog:
- *     "accept"               — Accept button
- *     "decline"              — Decline button
- *     "request_mission"      — Request Mission button (agent dialog)
- *     "track"                — Track button (appears after accepting)
- *     "close_active_window"  — X button to close the dialog
- *     "agent_icon"           — Agent portrait (double-click to open agent dialog)
- *
- *   Hangar / repair (all matched by ship template, not "ship_hangar"):
- *     "ship_garmur"          — Garmur ship icon
- *     "ship_daredevil"       — Daredevil ship icon
- *     "ship_worm"            — Worm ship icon
- *     "ship_venge"           — Vengeance ship icon
- *     "ship_sansha"          — Sansha ship icon
- *     "ship_angel"           — Angel ship icon
- *     "ship_sk"              — SK ship icon
- *     "get_repair_quote"     — Context menu item (right-click ship icon)
- *     "repair"               — Repair All button in repair dialog
- *     "repair_yes"           — Yes / confirm repair button
- *
- *   Undock:
- *     "undock"               — Undock button (station panel)
+ * ACCEPT logic:
+ *   Non-blocking: click Accept immediately, treat "not found" as already accepted.
  */
 public class MissionProcessor {
 
     private final OCRBridge ocrBridge;
 
     private static final int POST_CLICK_DELAY_MS = 600;
-
-    // -----------------------------------------------------------------------
 
     public MissionProcessor() {
         this.ocrBridge = new OCRBridge();
@@ -69,9 +42,6 @@ public class MissionProcessor {
     // OCR reads
     // -----------------------------------------------------------------------
 
-    /**
-     * OCR-read the mission dialog text area.
-     */
     public Mission readMission(Rectangle missionArea) {
         return ocrBridge.readMission(
                 missionArea.x, missionArea.y,
@@ -82,34 +52,19 @@ public class MissionProcessor {
     // Mission dialog — template-matched clicks
     // -----------------------------------------------------------------------
 
-    /**
-     * Click the "Request Mission" button in the agent dialog.
-     *
-     * If the "Request Mission" button is not visible (e.g. after completing a mission
-     * where the agent dialog is already open and only shows agent dialogue),
-     * falls back to double-clicking the agent_icon template to re-open the conversation.
-     */
     public void clickRequestMission() {
         log("Clicking REQUEST MISSION (template) — with agent_icon double-click fallback");
-        // Try the standard Request Mission button first.
-        // waitForTemplate returns false quickly (~1s) if the button isn't there.
         boolean found = ocrBridge.waitForTemplate("request_mission", 3);
         if (found) {
             ocrBridge.clickTemplate("request_mission");
             log("Request Mission button clicked.");
         } else {
-            // Fallback: the agent dialog is already open (e.g. after mission completion).
-            // Double-clicking the agent portrait re-opens / refreshes the conversation
-            // so the "Request Mission" button appears again.
             log("Request Mission not visible — double-clicking agent_icon as fallback.");
             ocrBridge.doubleClickTemplate("agent_icon");
         }
         sleep(POST_CLICK_DELAY_MS);
     }
 
-    /**
-     * Wait up to 5 seconds for the mission offer dialog to close.
-     */
     public boolean waitForDialogClosed() {
         log("Waiting for offer dialog to close...");
         boolean gone = ocrBridge.waitForTemplateGone("decline", 5);
@@ -118,9 +73,6 @@ public class MissionProcessor {
         return gone;
     }
 
-    /**
-     * Wait up to 8 seconds for a new mission offer dialog to appear.
-     */
     public boolean waitForNewOffer() {
         log("Waiting for new mission offer...");
         boolean visible = ocrBridge.waitForTemplate("accept", 8);
@@ -130,14 +82,15 @@ public class MissionProcessor {
         return visible;
     }
 
-    /** Click the Accept button on the mission offer dialog. */
+    /**
+     * Non-blocking accept: click immediately, treat "not found" as already accepted.
+     */
     public void clickAcceptButton() {
-        log("Clicking ACCEPT (template)");
+        log("Clicking ACCEPT (non-blocking — not found = already accepted)");
         ocrBridge.clickTemplate("accept");
         sleep(POST_CLICK_DELAY_MS);
     }
 
-    /** Click the Decline button on the mission offer dialog. */
     public void clickDeclineButton() {
         log("Clicking DECLINE (template)");
         ocrBridge.clickTemplate("decline");
@@ -145,33 +98,32 @@ public class MissionProcessor {
     }
 
     /**
-     * Click the Track button that appears after accepting.
-     * Safe to call if absent — logs a warning and returns cleanly.
+     * Track / Untrack logic:
+     *   1. "untrack" visible → already tracked, skip.
+     *   2. "track" visible   → click it.
+     *   3. Neither           → assume past tracking step, continue.
      */
     public void clickTrack() {
-        log("Clicking TRACK (template) — if present");
-        ocrBridge.clickTemplate("track");
-        sleep(POST_CLICK_DELAY_MS);
+        log("Checking Track state (looking for untrack / track)...");
+        if (ocrBridge.waitForTemplate("untrack", 2)) {
+            log("'untrack' visible — already tracked, skipping.");
+            return;
+        }
+        if (ocrBridge.waitForTemplate("track", 3)) {
+            log("'track' visible — clicking Track.");
+            ocrBridge.clickTemplate("track");
+            sleep(POST_CLICK_DELAY_MS);
+        } else {
+            log("Neither 'track' nor 'untrack' found — assuming past tracking step.");
+        }
     }
 
-    /**
-     * Double-click the agent portrait to open / re-open the agent dialog.
-     * Used when in station but no mission window is visible.
-     */
     public void doubleClickAgentIcon() {
         log("Double-clicking agent_icon to open agent dialog");
         ocrBridge.doubleClickTemplate("agent_icon");
-        sleep(1200); // give the dialog time to appear before the next OCR read
+        sleep(1200);
     }
 
-    /**
-     * Close the mission dialog by pressing F (custom EVE shortcut for close window).
-     *
-     * We intentionally avoid the close_active_window (X button) template here
-     * because its icon is identical to every other window's X button — after
-     * the hangar opens, template matching finds the hangar's X instead.
-     * The F keybind closes only the top-most active dialog, so it's unambiguous.
-     */
     public void closeMissionDialog() {
         log("Closing mission dialog (F key)");
         try {
@@ -179,69 +131,51 @@ public class MissionProcessor {
             robot.keyPress(java.awt.event.KeyEvent.VK_F);
             robot.keyRelease(java.awt.event.KeyEvent.VK_F);
         } catch (java.awt.AWTException e) {
-            log("Robot unavailable for Escape — falling back to close_active_window template");
+            log("Robot unavailable — falling back to close_active_window template");
             ocrBridge.clickTemplate("close_active_window");
         }
         sleep(POST_CLICK_DELAY_MS);
     }
 
     // -----------------------------------------------------------------------
-    // Post-accept flow: repair ship → activate ship → undock
+    // Post-accept flow
     //
-    // OLD flow (removed):
-    //   open Ship Hangar → OCR hangar list → double-click row → right-click active ship icon
+    // Sequence:
+    //   1. repairShip() — Python identifies ship from open dialog, opens hangar,
+    //                     repairs, double-clicks to activate. Dialog and hangar
+    //                     are fully managed inside Python.
+    //   2. Undock.
     //
-    // NEW flow:
-    //   1. Open Ship Hangar (ship_hangar template — sidebar icon)
-    //   2. repairShip(missionTitle) — Python resolves ship template from mission title,
-    //      right-clicks ship icon → repair → double-clicks to activate
-    //   3. Undock
+    // DO NOT close the mission dialog or click ship_hangar here:
+    //   - The dialog is already gone after Python opens the hangar.
+    //   - Clicking ship_hangar again would close it.
     // -----------------------------------------------------------------------
 
-    /**
-     * Full post-accept sequence:
-     *   1. Open Ship Hangar (sidebar template)
-     *   2. Repair + activate the correct ship (template-based, no OCR)
-     *   3. Undock
-     *
-     * @param windowRect  Unused (kept for API compatibility). All clicks use full-screen
-     *                    template matching.
-     * @param mission     The accepted mission; title drives ship template lookup.
-     * @return true if the sequence completed, false on critical failure
-     */
     public boolean performPostAcceptFlow(Rectangle windowRect, Mission mission) {
-        log("=== Starting post-accept flow (template-based) ===");
+        log("=== Starting post-accept flow ===");
 
-        // Ship selection is based on target (the enemy ship to destroy), not the mission title.
-        // Title OCR is noisy (agent name bleeds in); target is a cleaner single token.
-        // Fallback chain: target → title → empty string
         String missionTarget = (mission != null && mission.getTarget() != null
                 && !mission.getTarget().equals("Unknown"))
                 ? mission.getTarget() : "";
-        String missionTitle  = (mission != null && mission.getTitle()  != null)
-                ? mission.getTitle()  : "";
+        String missionTitle = (mission != null && mission.getTitle() != null)
+                ? mission.getTitle() : "";
         String lookup = !missionTarget.isEmpty() ? missionTarget : missionTitle;
-        log("Ship lookup — target: '" + missionTarget + "'  title: '" + missionTitle + "'  using: '" + lookup + "'");
+        log("Ship OCR fallback: target='" + missionTarget + "' title='" + missionTitle + "' using='" + lookup + "'");
 
-        // 1 — Open Ship Hangar (sidebar icon)
-        log("Opening Ship Hangar (template: ship_hangar)");
-        ocrBridge.clickTemplate("ship_hangar");
-        sleep(1200); // wait for hangar panel to load and ship icons to render
-
-        // 2 — Repair + activate ship (right-click → repair → double-click to make active)
-        //     Python resolves which ship template to use from ship_mission_map.json
-        log("Repairing and activating ship for target: '" + lookup + "'");
+        // 1 — Identify ship from open dialog + repair + activate (all in Python)
+        log("Step 1: Repair + activate ship");
         boolean repaired = ocrBridge.repairShip(lookup);
         if (!repaired) {
-            System.err.println("[MissionProcessor] repairShip failed — aborting post-accept flow.");
+            System.err.println("[MissionProcessor] repairShip failed — aborting.");
             return false;
         }
-        sleep(1000); // let the ship activation settle
+        sleep(500);
 
-        // 3 — Undock
+        // 2 — Undock (hangar already open, dialog already gone)
+        log("Step 2: Undocking");
         clickUndock();
 
-        log("=== Post-accept flow complete — undocking ===");
+        log("=== Post-accept flow complete ===");
         return true;
     }
 
@@ -249,7 +183,6 @@ public class MissionProcessor {
     // Undock
     // -----------------------------------------------------------------------
 
-    /** Click the Undock button via template matching. */
     public void clickUndock() {
         log("Clicking UNDOCK (template)");
         ocrBridge.clickTemplate("undock");
