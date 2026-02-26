@@ -987,6 +987,12 @@ Examples:
     parser.add_argument(
         "--wait-gone", metavar="KEY", help="Wait for template to disappear, then exit"
     )
+    parser.add_argument(
+        "--find-any",
+        nargs="+",
+        metavar="KEY",
+        help="Take one screenshot, check keys in order, print first match and exit 0; exit 1 if none found",
+    )
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--threshold", type=float, default=0.80)
     args = parser.parse_args()
@@ -1016,6 +1022,15 @@ Examples:
             args.repair_ship, dry_run=args.dry_run, threshold=args.threshold
         )
         return
+
+    if getattr(args, "find_any", None):
+        matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)
+        screen = matcher.screenshot_cv()
+        for key in args.find_any:
+            if matcher.find(key, screen=screen):
+                print(key)
+                sys.exit(0)
+        sys.exit(1)
 
     if args.wait:
         matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)

@@ -7,6 +7,8 @@ import evebot.models.Mission;
 
 import java.io.*;
 import java.nio.file.*;
+import java.util.ArrayList;
+import java.util.List;
 
 /**
  * OCRBridge — Java ↔ Python bridge.
@@ -229,6 +231,22 @@ public class OCRBridge {
             System.err.printf("[%s] [OCRBridge] repairShip FAILED (exit code %d).%n", ts(), code);
             return false;
         }
+    }
+
+    /**
+     * Take ONE screenshot and check keys in order; returns the first matched key name,
+     * or null if none found. Single Python process — use this instead of chaining
+     * multiple waitForTemplate calls.
+     */
+    public String findAnyTemplate(String... keys) {
+        System.out.printf("[%s] [OCRBridge] findAnyTemplate: %s%n", ts(), java.util.Arrays.toString(keys));
+        List<String> cmd = new ArrayList<>();
+        cmd.add("python");
+        cmd.add(automationScriptPath);
+        cmd.add("--find-any");
+        for (String key : keys) cmd.add(key);
+        String result = runPython(cmd.toArray(new String[0]));
+        return (result != null && !result.isBlank()) ? result.trim() : null;
     }
 
     /**

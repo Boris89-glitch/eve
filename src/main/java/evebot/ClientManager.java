@@ -126,41 +126,42 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleIdle(String clientId, ClientWindowInfo window) {
-        // Step 1: Template check — fast, reliable. Only double-click agent if dialog
-        // is genuinely absent; avoids spamming agent when OCR just fails to parse.
-        if (!missionProcessor.isMissionDialogVisible()) {
-            int attempt = agentRetries.merge(clientId, 1, Integer::sum);
-            if (attempt > MAX_AGENT_RETRIES) {
-                log(clientId, "No mission dialog after " + MAX_AGENT_RETRIES
-                        + " agent clicks — waiting.");
-                agentRetries.put(clientId, 0);
-                return;
+        // Single Python call for all dialog state detection — replaces the old
+        // chain of 3-6 sequential waitForTemplate calls (was ~18s overhead).
+        MissionProcessor.DialogState dialogState = missionProcessor.detectDialog();
+
+        switch (dialogState) {
+            case NONE: {
+                int attempt = agentRetries.merge(clientId, 1, Integer::sum);
+                if (attempt > MAX_AGENT_RETRIES) {
+                    log(clientId, "No mission dialog after " + MAX_AGENT_RETRIES
+                            + " agent clicks — waiting.");
+                    agentRetries.put(clientId, 0);
+                    return;
+                }
+                log(clientId, "No mission dialog — double-clicking agent icon (attempt "
+                        + attempt + "/" + MAX_AGENT_RETRIES + ").");
+                missionProcessor.doubleClickAgentIcon();
+                stateManager.getState(clientId).setCurrentMission(null);
+                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                break;
             }
-            log(clientId, "No mission dialog — double-clicking agent icon (attempt "
-                    + attempt + "/" + MAX_AGENT_RETRIES + ").");
-            missionProcessor.doubleClickAgentIcon();
-            stateManager.getState(clientId).setCurrentMission(null);
-            stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
-            return;
+            case ALREADY_ACCEPTED: {
+                agentRetries.put(clientId, 0);
+                log(clientId, "Mission already accepted (complete_mission visible) — skipping to COMPLETING.");
+                stateManager.setState(clientId, ClientState.State.COMPLETING);
+                break;
+            }
+            default: { // OFFER
+                agentRetries.put(clientId, 0);
+                log(clientId, "Mission offer dialog confirmed — reading via OCR.");
+                Rectangle missionArea = getMissionAreaForClient(clientId);
+                Mission mission = missionProcessor.readMission(missionArea);
+                stateManager.getState(clientId).setCurrentMission(mission);
+                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                break;
+            }
         }
-
-        // Step 2: Dialog confirmed open.
-        agentRetries.put(clientId, 0);
-
-        // If complete_mission is visible (no accept/decline), mission was already
-        // accepted before this session started — skip evaluation, go to COMPLETING.
-        if (missionProcessor.isAlreadyAccepted()) {
-            log(clientId, "Mission already accepted (complete_mission visible) — skipping to COMPLETING.");
-            stateManager.setState(clientId, ClientState.State.COMPLETING);
-            return;
-        }
-
-        // Normal offer dialog — run OCR to read content.
-        log(clientId, "Mission offer dialog confirmed — reading via OCR.");
-        Rectangle missionArea = getMissionAreaForClient(clientId);
-        Mission mission = missionProcessor.readMission(missionArea);
-        stateManager.getState(clientId).setCurrentMission(mission);
-        stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
     // -----------------------------------------------------------------------

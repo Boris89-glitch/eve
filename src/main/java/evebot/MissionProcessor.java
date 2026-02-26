@@ -65,29 +65,37 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
-    /**
-     * Quick template-based check: is a mission offer dialog currently on screen?
-     * Checks for accept OR decline (offer dialog) OR complete_mission (already accepted).
-     * Uses a 1s timeout (one scan attempt) so it returns fast during the IDLE poll loop.
-     */
-    public boolean isMissionDialogVisible() {
-        log("Checking for mission dialog via template (accept/decline/complete_mission)");
-        boolean visible = ocrBridge.waitForTemplate("accept", 1)
-                       || ocrBridge.waitForTemplate("decline", 1)
-                       || ocrBridge.waitForTemplate("complete_mission", 1);
-        log("Mission dialog visible: " + visible);
-        return visible;
-    }
+    public enum DialogState { NONE, OFFER, ALREADY_ACCEPTED }
 
     /**
-     * Check if a mission is already accepted — complete_mission button is visible
-     * but accept/decline are not. Happens on bot restart mid-session.
+     * Single-call dialog detection — one Python process, one screenshot, checks
+     * accept / decline / complete_mission in that order.
+     *
+     * Returns:
+     *   OFFER            — accept or decline button visible (fresh mission offer)
+     *   ALREADY_ACCEPTED — complete_mission visible but no accept/decline
+     *                      (bot restarted mid-session with mission active)
+     *   NONE             — no dialog buttons found
      */
-    public boolean isAlreadyAccepted() {
-        boolean hasComplete  = ocrBridge.waitForTemplate("complete_mission", 1);
-        boolean hasOffer     = ocrBridge.waitForTemplate("accept", 1)
-                            || ocrBridge.waitForTemplate("decline", 1);
-        return hasComplete && !hasOffer;
+    public DialogState detectDialog() {
+        log("Detecting dialog state (single template scan)...");
+        // Check accept/decline first so an offer dialog is never mistaken for ALREADY_ACCEPTED.
+        String found = ocrBridge.findAnyTemplate("accept", "decline", "complete_mission");
+        if (found == null) {
+            log("Dialog state: NONE");
+            return DialogState.NONE;
+        }
+        if ("complete_mission".equals(found)) {
+            log("Dialog state: ALREADY_ACCEPTED");
+            return DialogState.ALREADY_ACCEPTED;
+        }
+        log("Dialog state: OFFER (" + found + ")");
+        return DialogState.OFFER;
+    }
+
+    /** Convenience wrapper used in CHECKING_MISSIONS retry logic. */
+    public boolean isMissionDialogVisible() {
+        return detectDialog() != DialogState.NONE;
     }
 
     public boolean waitForDialogClosed() {
