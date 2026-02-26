@@ -126,16 +126,9 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleIdle(String clientId, ClientWindowInfo window) {
-        Rectangle missionArea = getMissionAreaForClient(clientId);
-        Mission mission = missionProcessor.readMission(missionArea);
-
-        if (mission != null && mission.getTitle() != null
-                && !mission.getTitle().equals("Unknown")) {
-            agentRetries.put(clientId, 0);
-            log(clientId, "Mission dialog detected: " + mission.getTitle());
-            stateManager.getState(clientId).setCurrentMission(mission);
-            stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
-        } else {
+        // Step 1: Template check — fast, reliable. Only double-click agent if dialog
+        // is genuinely absent; avoids spamming agent when OCR just fails to parse.
+        if (!missionProcessor.isMissionDialogVisible()) {
             int attempt = agentRetries.merge(clientId, 1, Integer::sum);
             if (attempt > MAX_AGENT_RETRIES) {
                 log(clientId, "No mission dialog after " + MAX_AGENT_RETRIES
@@ -143,12 +136,21 @@ public class ClientManager {
                 agentRetries.put(clientId, 0);
                 return;
             }
-            log(clientId, "No mission window — double-clicking agent icon (attempt "
+            log(clientId, "No mission dialog — double-clicking agent icon (attempt "
                     + attempt + "/" + MAX_AGENT_RETRIES + ").");
             missionProcessor.doubleClickAgentIcon();
             stateManager.getState(clientId).setCurrentMission(null);
             stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+            return;
         }
+
+        // Step 2: Dialog is confirmed open — run OCR to read content.
+        agentRetries.put(clientId, 0);
+        log(clientId, "Mission dialog confirmed — reading via OCR.");
+        Rectangle missionArea = getMissionAreaForClient(clientId);
+        Mission mission = missionProcessor.readMission(missionArea);
+        stateManager.getState(clientId).setCurrentMission(mission);
+        stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
     // -----------------------------------------------------------------------
@@ -165,7 +167,13 @@ public class ClientManager {
         }
 
         if (mission == null) {
-            log(clientId, "No mission data yet — returning to IDLE to retry.");
+            // OCR failed — if dialog is still visible keep retrying OCR (stay in
+            // CHECKING_MISSIONS). Only fall back to IDLE if dialog is gone.
+            if (missionProcessor.isMissionDialogVisible()) {
+                log(clientId, "OCR returned null but dialog still visible — retrying OCR next tick.");
+                return;
+            }
+            log(clientId, "No mission data and dialog gone — returning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
             return;
         }

@@ -65,6 +65,19 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    /**
+     * Quick template-based check: is a mission offer dialog currently on screen?
+     * Checks for accept OR decline button — both are always present in an offer dialog.
+     * Uses a 1s timeout (one scan attempt) so it returns fast during the IDLE poll loop.
+     */
+    public boolean isMissionDialogVisible() {
+        log("Checking for mission dialog via template (accept/decline)");
+        boolean visible = ocrBridge.waitForTemplate("accept", 1)
+                       || ocrBridge.waitForTemplate("decline", 1);
+        log("Mission dialog visible: " + visible);
+        return visible;
+    }
+
     public boolean waitForDialogClosed() {
         log("Waiting for offer dialog to close...");
         boolean gone = ocrBridge.waitForTemplateGone("decline", 5);
