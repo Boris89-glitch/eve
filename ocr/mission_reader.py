@@ -74,7 +74,7 @@ class EVEMissionReader:
         image = image.filter(ImageFilter.SHARPEN)
         img_cv = np.array(image)
         _, img_cv = cv2.threshold(img_cv, 150, 255, cv2.THRESH_BINARY)
-        img_cv = cv2.medianBlur(img_cv, 1)
+        img_cv = cv2.medianBlur(img_cv, 3)
         return Image.fromarray(img_cv)
 
     # ------------------------------------------------------------------
@@ -128,31 +128,22 @@ class EVEMissionReader:
         return title.strip()
 
     def clean_location(self, raw: str) -> str:
-        raw = self.clean_line(raw)
-        sec_match = re.search(r"-?\d\.\d", raw)
-        security = sec_match.group(0) if sec_match else None
-        sec_label = ""
-        if re.search(r"low\s*sec", raw, re.I):
-            sec_label = "LowSec"
-        elif re.search(r"null\s*sec", raw, re.I):
-            sec_label = "NullSec"
-        elif re.search(r"high\s*sec", raw, re.I):
-            sec_label = "HighSec"
-        stripped = re.sub(r"-?0\.\d+", "", raw)
-        stripped = re.sub(
-            r"(?i)(low|null|high|sec|warning|location|lacation|division|security)",
-            "",
-            stripped,
+        upper = self.clean_line(raw).upper()
+        # Strip noise words and security decimal
+        upper = re.sub(
+            r"\b(LOW|NULL|HIGH|SEC|WARNING|LOCATION|LACATION|DIVISION|SECURITY)\b",
+            " ", upper,
         )
-        stripped = re.sub(r"[^A-Z0-9\-\s]", "", stripped)
-        stripped = re.sub(r"\s+", " ", stripped).strip()
-        sys_match = re.search(
-            r"\b([A-Z0-9]{2,6}-[A-Z0-9]{1,4})\b|([A-Z][a-z]{2,15})\b",
-            stripped,
-        )
-        system = (sys_match.group(1) or sys_match.group(2)) if sys_match else "Unknown"
-        parts = [p for p in [system, security, sec_label] if p]
-        return " ".join(parts)
+        upper = re.sub(r"-?\d+\.\d+", " ", upper)
+        upper = re.sub(r"[^A-Z0-9\-\s]", " ", upper)
+        upper = re.sub(r"\s+", " ", upper).strip()
+        # Null-sec system name: e.g. J0C-E, P33-LV
+        null_match = re.search(r"\b([A-Z0-9]{2,6}-[A-Z0-9]{1,4})\b", upper)
+        if null_match:
+            return null_match.group(1)
+        # Named system: e.g. JITA, AMARR
+        named_match = re.search(r"\b([A-Z]{3,})\b", upper)
+        return named_match.group(1) if named_match else "Unknown"
 
     def extract_ship_target(self, text: str) -> Optional[str]:
         pattern = re.compile(r"(?i)des[a-z]{0,5}(?:\s+the\s+|\s+|the)([A-Z][a-zA-Z]+)")
@@ -197,11 +188,14 @@ class EVEMissionReader:
             if re.search(r"level\s*\d", line, re.I):
                 if i + 1 < len(lines):
                     title = self.extract_title_from_line(lines[i + 1])
-                # Location is typically 4-5 lines after the agent line
-                for offset in range(3, 7):
+                # Location: find line with "location"/"lacation" keyword; decimal as fallback
+                for offset in range(2, 9):
                     if i + offset < len(lines):
                         candidate = lines[i + offset]
-                        if re.search(r"\d\.\d", candidate):  # has a security value
+                        if re.search(r"locat", candidate, re.I):
+                            location = self.clean_location(candidate)
+                            break
+                        if re.search(r"\d\.\d", candidate):
                             location = self.clean_location(candidate)
                             break
                 # Objective is typically 3 lines after agent line

@@ -26,6 +26,9 @@ public class ClientManager {
 
     private final Map<String, Rectangle>        clientMissionAreas = new ConcurrentHashMap<>();
     private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
+    private final Map<String, Integer>          agentRetries       = new ConcurrentHashMap<>();
+
+    private static final int MAX_AGENT_RETRIES = 3;
 
     public ClientManager(StateManager stateManager) {
         this.stateManager     = stateManager;
@@ -111,9 +114,7 @@ public class ClientManager {
                 log(clientId, "Returning to station.");
                 break;
             case COMPLETING:
-                // TODO: turn-in click → IDLE
-                log(clientId, "Completing mission.");
-                stateManager.setState(clientId, ClientState.State.IDLE);
+                handleCompleting(clientId);
                 break;
             default:
                 System.out.println("[" + clientId + "] Unknown state: " + state);
@@ -130,11 +131,20 @@ public class ClientManager {
 
         if (mission != null && mission.getTitle() != null
                 && !mission.getTitle().equals("Unknown")) {
+            agentRetries.put(clientId, 0);
             log(clientId, "Mission dialog detected: " + mission.getTitle());
             stateManager.getState(clientId).setCurrentMission(mission);
             stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
         } else {
-            log(clientId, "No mission window visible — double-clicking agent icon.");
+            int attempt = agentRetries.merge(clientId, 1, Integer::sum);
+            if (attempt > MAX_AGENT_RETRIES) {
+                log(clientId, "No mission dialog after " + MAX_AGENT_RETRIES
+                        + " agent clicks — waiting.");
+                agentRetries.put(clientId, 0);
+                return;
+            }
+            log(clientId, "No mission window — double-clicking agent icon (attempt "
+                    + attempt + "/" + MAX_AGENT_RETRIES + ").");
             missionProcessor.doubleClickAgentIcon();
             stateManager.getState(clientId).setCurrentMission(null);
             stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
@@ -160,6 +170,7 @@ public class ClientManager {
             return;
         }
 
+        agentRetries.put(clientId, 0);
         MissionConfig.Decision decision = missionConfig.evaluate(mission);
 
         if (decision == MissionConfig.Decision.ACCEPT) {
@@ -238,6 +249,16 @@ public class ClientManager {
             System.err.println("[" + clientId + "] Repair/undock flow failed — returning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // COMPLETING — click turn-in button, then return to IDLE
+    // -----------------------------------------------------------------------
+
+    private void handleCompleting(String clientId) {
+        log(clientId, "Clicking Complete Mission (turn-in).");
+        missionProcessor.clickCompleteMission();
+        stateManager.setState(clientId, ClientState.State.IDLE);
     }
 
     // -----------------------------------------------------------------------
