@@ -8,8 +8,9 @@
     { "title_contains": "anomic base",    "comment": "Burner team missions"   },
     { "title_contains": "recon (2 of",    "comment": "recon 2"   },
     { "target_contains": "serpentis",    "comment": "No serpentis burners"   },
+    { "target_contains": "blood raider",    "comment": "No blood raider burners"   },
+    { "target_contains": "bloodraiderbumer",    "comment": "No blood raider burners"   },
     { "target_contains": "serpentisbumer",    "comment": "No serpentis burners"   },
-    { "target_contains": "jaguar",       "comment": "No jaguar burners"      },
     { "location_contains": "j0c-",       "comment": "System too far"         },
     { "location_contains": "p33-",       "comment": "System too far"         },
     { "location_contains": "dw-t2i",       "comment": "System too far"         }

@@ -11,40 +11,32 @@
     {
       "ship_template": "ship_garmur",
       "ship_display": "ship_garmur (Garmur hull)",
-      "title_contains": ["garmur", "dramiel", "cruor", "succubus", "anomic team", "burner team"],
+      "title_contains": ["anomic team", "burner team", "jaguar", "enyo", "hawk"],
       "comment": "Garmur hull for all other Anomic Team missions"
     },
     {
       "ship_template": "ship_worm",
       "ship_display": "ship_worm (Daredevil hull)",
-      "title_contains": ["worm"],
+      "title_contains": ["worm", "guristas"],
       "comment": "Worm target solo burner"
     },
         {
       "ship_template": "ship_sansha",
       "ship_display": "ship_sansha (Daredevil hull)",
-      "title_contains": ["sansha"],
+      "title_contains": ["sansha", "sansa"],
       "comment": "Sansha target solo burner"
     },
         {
       "ship_template": "ship_angel",
       "ship_display": "ship_angel (Daredevil hull)",
-      "title_contains": ["angel"],
+      "title_contains": ["angel", "dramiel"],
       "comment": "Angel target solo burner"
-    },
-    {
-      "ship_template": "ship_daredevil",
-      "ship_display": "ship_daredevil (Daredevil hull)",
-      "title_contains": ["enyo", "ishkur", "hawk", "harpy", "wolf", "retribution", "daredevil"],
-      "comment": "All other solo burners use ship_daredevil"
     },
     {
       "ship_template": "ship_sk",
       "ship_display": "ship_sk (Daredevil hull)",
-      "title_contains": ["infested ruins", "recon (1 of", "recon 1 of"],
-      "comment": "SK template for Infested Ruins and Recon part 1 — matched on title since no ship target"
+      "title_contains": ["infested", "ruins", "recon (1 of", "recon 1 of"], 
+      "comment": "SK template for Infested Ruins and Recon part 1 , later maybe anni"
     }
-  ],
-  "default_ship_template": "ship_daredevil",
-  "_comment3": "Default Daredevil covers any unrecognised solo burner."
+  ]
 }
