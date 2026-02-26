@@ -67,15 +67,27 @@ public class MissionProcessor {
 
     /**
      * Quick template-based check: is a mission offer dialog currently on screen?
-     * Checks for accept OR decline button — both are always present in an offer dialog.
+     * Checks for accept OR decline (offer dialog) OR complete_mission (already accepted).
      * Uses a 1s timeout (one scan attempt) so it returns fast during the IDLE poll loop.
      */
     public boolean isMissionDialogVisible() {
-        log("Checking for mission dialog via template (accept/decline)");
+        log("Checking for mission dialog via template (accept/decline/complete_mission)");
         boolean visible = ocrBridge.waitForTemplate("accept", 1)
-                       || ocrBridge.waitForTemplate("decline", 1);
+                       || ocrBridge.waitForTemplate("decline", 1)
+                       || ocrBridge.waitForTemplate("complete_mission", 1);
         log("Mission dialog visible: " + visible);
         return visible;
+    }
+
+    /**
+     * Check if a mission is already accepted — complete_mission button is visible
+     * but accept/decline are not. Happens on bot restart mid-session.
+     */
+    public boolean isAlreadyAccepted() {
+        boolean hasComplete  = ocrBridge.waitForTemplate("complete_mission", 1);
+        boolean hasOffer     = ocrBridge.waitForTemplate("accept", 1)
+                            || ocrBridge.waitForTemplate("decline", 1);
+        return hasComplete && !hasOffer;
     }
 
     public boolean waitForDialogClosed() {

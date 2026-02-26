@@ -144,9 +144,19 @@ public class ClientManager {
             return;
         }
 
-        // Step 2: Dialog is confirmed open — run OCR to read content.
+        // Step 2: Dialog confirmed open.
         agentRetries.put(clientId, 0);
-        log(clientId, "Mission dialog confirmed — reading via OCR.");
+
+        // If complete_mission is visible (no accept/decline), mission was already
+        // accepted before this session started — skip evaluation, go to COMPLETING.
+        if (missionProcessor.isAlreadyAccepted()) {
+            log(clientId, "Mission already accepted (complete_mission visible) — skipping to COMPLETING.");
+            stateManager.setState(clientId, ClientState.State.COMPLETING);
+            return;
+        }
+
+        // Normal offer dialog — run OCR to read content.
+        log(clientId, "Mission offer dialog confirmed — reading via OCR.");
         Rectangle missionArea = getMissionAreaForClient(clientId);
         Mission mission = missionProcessor.readMission(missionArea);
         stateManager.getState(clientId).setCurrentMission(mission);
