@@ -74,7 +74,7 @@ class EVEMissionReader:
         image = image.filter(ImageFilter.SHARPEN)
         img_cv = np.array(image)
         _, img_cv = cv2.threshold(img_cv, 150, 255, cv2.THRESH_BINARY)
-        img_cv = cv2.medianBlur(img_cv, 3)
+        img_cv = cv2.medianBlur(img_cv, 1)
         return Image.fromarray(img_cv)
 
     # ------------------------------------------------------------------
@@ -137,8 +137,8 @@ class EVEMissionReader:
         upper = re.sub(r"-?\d+\.\d+", " ", upper)
         upper = re.sub(r"[^A-Z0-9\-\s]", " ", upper)
         upper = re.sub(r"\s+", " ", upper).strip()
-        # Null-sec system name: e.g. J0C-E, P33-LV
-        null_match = re.search(r"\b([A-Z0-9]{2,6}-[A-Z0-9]{1,4})\b", upper)
+        # Null-sec system name: e.g. J0C-E, P33-LV, R-7DMUI (single-char prefix)
+        null_match = re.search(r"\b([A-Z0-9]{1,6}-[A-Z0-9]{1,6})\b", upper)
         if null_match:
             return null_match.group(1)
         # Named system: e.g. JITA, AMARR
@@ -181,30 +181,43 @@ class EVEMissionReader:
         title = "Unknown"
         location = "Unknown"
         objective = "Unknown"
+        anchor_idx = -1
 
-        # Find the agent name line: contains "Level" followed by a digit.
-        # The very next line contains "AgentName MissionTitleObjectives".
+        # Primary anchor: line ending with "Objectives" / "Objective"
+        # e.g. "laraMesi AnomicAgentObjectives" — the title is embedded in this line.
         for i, line in enumerate(lines):
-            if re.search(r"level\s*\d", line, re.I):
-                if i + 1 < len(lines):
-                    title = self.extract_title_from_line(lines[i + 1])
-                # Location: find line with "location"/"lacation" keyword; decimal as fallback
-                for offset in range(2, 9):
-                    if i + offset < len(lines):
-                        candidate = lines[i + offset]
-                        if re.search(r"locat", candidate, re.I):
-                            location = self.clean_location(candidate)
-                            break
-                        if re.search(r"\d\.\d", candidate):
-                            location = self.clean_location(candidate)
-                            break
-                # Objective is typically 3 lines after agent line
-                if i + 3 < len(lines):
-                    objective = self.clean_line(lines[i + 3])
+            if re.search(r"objectives?\s*$", line, re.I):
+                title = self.extract_title_from_line(line)
+                anchor_idx = i
                 break
 
+        # Fallback anchor: line containing "Level N" — title is the NEXT line.
         if title == "Unknown":
-            return None  # couldn't find agent line at all
+            for i, line in enumerate(lines):
+                if re.search(r"level\s*\d", line, re.I):
+                    if i + 1 < len(lines):
+                        title = self.extract_title_from_line(lines[i + 1])
+                    anchor_idx = i + 1
+                    break
+
+        if title == "Unknown":
+            return None  # couldn't find title line at all
+
+        # Scan forward from anchor for location (locat keyword or security decimal)
+        for offset in range(1, 10):
+            idx = anchor_idx + offset
+            if idx < len(lines):
+                candidate = lines[idx]
+                if re.search(r"locat", candidate, re.I):
+                    location = self.clean_location(candidate)
+                    break
+                if re.search(r"\d\.\d", candidate):
+                    location = self.clean_location(candidate)
+                    break
+
+        # Objective is typically 3 lines after anchor
+        if anchor_idx + 3 < len(lines):
+            objective = self.clean_line(lines[anchor_idx + 3])
 
         target = self.extract_ship_target(text) or "Unknown"
         mission_type = self.classify_mission(title)
@@ -242,10 +255,11 @@ class EVEMissionReader:
         if not image:
             return None
         text = self.extract_text(image)
+        print(f"[OCR raw text]:\n{text}", file=sys.stderr)
         if not text:
             return None
-        if not self.is_mission_dialog_open(text):
-            return None
+        # is_mission_dialog_open() check removed — template matching already
+        # confirmed the dialog is open before OCR is called.
         return self.parse_mission_details(text)
 
 
@@ -255,8 +269,8 @@ class EVEMissionReader:
 
 
 def main():
-    if len(sys.argv) != 5:
-        print(json.dumps({"error": "Usage: mission_reader.py x y width height"}))
+    if len(sys.argv) not in (5, 6):
+        print(json.dumps({"error": "Usage: mission_reader.py x y width height [debug]"}))
         sys.exit(1)
     try:
         x, y, width, height = map(int, sys.argv[1:5])
