@@ -622,9 +622,9 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
 
     log.info("Step 6b: Clicking 'Board Ship'...")
-    if not matcher.wait_and_click("board_ship", timeout=5.0, delay=0.6):
+    if not matcher.wait_and_click("board_ship", timeout=1.0, delay=0.6):
         log.warning("'Board Ship' not found in context menu — falling back to 'Undock'")
-        if not matcher.wait_and_click("undock", timeout=5.0, delay=0.6):
+        if not matcher.wait_and_click("undock", timeout=1.0, delay=0.6):
             log.error("'Undock' not found either — cannot activate ship")
             sys.exit(1)
 
