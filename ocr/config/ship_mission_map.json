@@ -3,8 +3,8 @@
   "_comment2": "title_contains matched against mission target first, title as fallback. First match wins.",
   "ship_missions": [
     {
-      "ship_template": "ship_daredevil",
-      "ship_display": "ship_daredevil (Daredevil hull)",
+      "ship_template": "ship_vengeance",
+      "ship_display": "ship_vengeance (Daredevil hull)",
       "title_contains": ["vengeance"],
       "comment": "Vengeance Anomic Team — must be first so it wins before generic anomic team rule"
     },

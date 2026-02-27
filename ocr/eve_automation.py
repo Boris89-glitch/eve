@@ -94,7 +94,7 @@ TEMPLATE_FILES = {
     # Mission dialog detection templates — crop these from the mission dialog window.
     # Name them mission_<target>.png. They are matched against the open dialog to
     # identify the mission type without relying on OCR text parsing.
-    "mission_vengeance": "mission_vengeance",  # → ship_daredevil/ship_garmur
+    "mission_vengeance": "mission_vengeance",  # → ship_vengeance/ship_garmur
     "mission_enyo": "mission_enyo",  # → ship_garmur
     "mission_hawk": "mission_hawk",  # → ship_garmur
     "mission_jaguar": "mission_jaguar",  # → ship_garmur
@@ -108,7 +108,6 @@ TEMPLATE_FILES = {
     "mission_recon1": "mission_recon1",  # → ship_sk  (Recon part 1)
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
-    "ship_daredevil": "ship_daredevil",
     "ship_vengeance": "ship_vengeance",
     "ship_worm": "ship_worm",
     "ship_sansha": "ship_sansha",
@@ -180,7 +179,7 @@ def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
                     pattern,
                 )
                 return entry["ship_template"]
-    default = ship_map.get("default_ship_template", "ship_daredevil")
+    default = ship_map.get("default_ship_template", "ship_vengeance")
     log.info("No OCR rule matched '%s' — using default: %s", mission_target, default)
     return default
 
