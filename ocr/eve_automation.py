@@ -110,6 +110,8 @@ TEMPLATE_FILES = {
     "mission_angel": "mission_angel",  # → ship_angel
     "mission_infested": "mission_infested",  # → ship_sk  (Infested Ruins)
     "mission_recon1": "mission_recon1",  # → ship_sk  (Recon part 1)
+    # Context menu items
+    "board_ship": "board_ship",  # right-click context menu → activate ship
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
     "ship_daredevil": "ship_daredevil",
@@ -565,7 +567,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
                 cy,
             )
             log.info(
-                "[DRY RUN] Would then double-click '%s' at (%d,%d) to activate",
+                "[DRY RUN] Would then right-click '%s' at (%d,%d) and click 'Board Ship' to activate",
                 ship_template,
                 cx,
                 cy,
@@ -621,13 +623,19 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     log.info("Repair complete. Waiting for dialog to settle...")
     time.sleep(1.0)
 
-    # --- Step 6: Double-click the SAME locked coordinates to activate the ship ---
+    # --- Step 6: Right-click ship icon → click "Board Ship" to activate ---
     log.info(
-        "Step 6: Double-clicking ship icon at (%d,%d) to make it active...",
+        "Step 6: Right-clicking ship icon at (%d,%d) to open context menu...",
         ship_cx,
         ship_cy,
     )
-    matcher._do_double_click(ship_cx, ship_cy, delay=0.5)
+    matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
+    board_match = matcher.wait_for("board_ship", timeout=2.0)
+    if board_match:
+        log.info("'Board Ship' found — clicking to activate...")
+        matcher._do_click(*matcher.center(board_match), delay=0.5)
+    else:
+        log.info("'Board Ship' not in context menu — ship already active, proceeding to undock.")
 
     log.info("=== Ship repaired and activated successfully ===")
     sys.exit(0)
