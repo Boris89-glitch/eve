@@ -13,7 +13,7 @@ Called from Java OCRBridge via:
   python eve_automation.py --right-click <key>       right-click action
   python eve_automation.py --double-click <key>      double-click action
   python eve_automation.py --repair-ship <title>     find ship for mission title, repair it,
-                                                     then double-click to make active
+                                                     then right-click → Board Ship to activate
 """
 
 import sys
@@ -85,6 +85,7 @@ TEMPLATE_FILES = {
     "repair": "repair",
     "repair_yes": "repair_yes",
     "already_repaired": "already_repaired",  # "nothing to repair" dialog — skip repair, proceed to activation
+    "board_ship": "board_ship",  # context menu item — right-click ship → Board Ship
     # Hangar / navigation
     "undock": "undock",
     "ship_hangar": "ship_hangar",
@@ -516,7 +517,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     Full ship select + repair flow for the ship matching mission_title:
       1. Find ship icon via template matching (right half of screen = hangar area)
       2. Right-click ship icon → Get Repair Quote → Repair All → Yes
-      3. Double-click ship icon to make it the active ship
+      3. Right-click ship icon → Board Ship to make it the active ship
     Exit 0 = success, 1 = ship template not found.
     """
     matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
@@ -556,7 +557,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
                 cy,
             )
             log.info(
-                "[DRY RUN] Would then double-click '%s' at (%d,%d) to activate",
+                "[DRY RUN] Would then right-click '%s' at (%d,%d) → Board Ship to activate",
                 ship_template,
                 cx,
                 cy,
@@ -612,13 +613,18 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     log.info("Repair complete. Waiting for dialog to settle...")
     time.sleep(1.0)
 
-    # --- Step 6: Double-click the SAME locked coordinates to activate the ship ---
+    # --- Step 6: Right-click the SAME locked coordinates → Board Ship ---
     log.info(
-        "Step 6: Double-clicking ship icon at (%d,%d) to make it active...",
+        "Step 6: Right-clicking ship icon at (%d,%d) to open context menu...",
         ship_cx,
         ship_cy,
     )
-    matcher._do_double_click(ship_cx, ship_cy, delay=0.5)
+    matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
+
+    log.info("Step 6b: Clicking 'Board Ship'...")
+    if not matcher.wait_and_click("board_ship", timeout=5.0, delay=0.6):
+        log.error("'Board Ship' not found in context menu — cannot activate ship")
+        sys.exit(1)
 
     log.info("=== Ship repaired and activated successfully ===")
     sys.exit(0)

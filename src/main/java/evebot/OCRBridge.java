@@ -215,7 +215,7 @@ public class OCRBridge {
      * The Python script:
      *   1. Resolves the ship template from ship_mission_map.json based on the title
      *   2. Right-clicks the ship icon → Get Repair Quote → Repair All → Yes
-     *   3. Double-clicks the ship icon to make it the active ship
+     *   3. Right-clicks the ship icon → Board Ship to make it the active ship
      *
      * @param missionTitle The accepted mission's title (used for ship lookup)
      * @return true if repair + activation succeeded, false on failure
