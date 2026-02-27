@@ -93,18 +93,13 @@ TEMPLATE_FILES = {
     # Mission dialog detection templates — crop these from the mission dialog window.
     # Name them mission_<target>.png. They are matched against the open dialog to
     # identify the mission type without relying on OCR text parsing.
-    "mission_vengeance": "mission_vengeance",  # → ship_daredevil
-    "mission_enyo": "mission_enyo",  # → ship_daredevil
-    "mission_ishkur": "mission_ishkur",  # → ship_daredevil
-    "mission_hawk": "mission_hawk",  # → ship_worm
-    "mission_harpy": "mission_harpy",  # → ship_worm
-    "mission_wolf": "mission_wolf",  # → ship_daredevil
-    "mission_retribution": "mission_retribution",  # → ship_daredevil
-    "mission_daredevil": "mission_daredevil",  # → ship_daredevil
+    "mission_vengeance": "mission_vengeance",  # → ship_daredevil/ship_garmur
+    "mission_enyo": "mission_enyo",  # → ship_garmur
+    "mission_hawk": "mission_hawk",  # → ship_garmur
+    "mission_jaguar": "mission_jaguar",  # → ship_garmur
     "mission_worm": "mission_worm",  # → ship_worm
     "mission_garmur": "mission_garmur",  # → ship_garmur
-    "mission_dramiel": "mission_dramiel",  # → ship_garmur
-    "mission_cruor": "mission_cruor",  # → ship_garmur
+    "mission_dramiel": "mission_dramiel",  # → ship_angel
     "mission_succubus": "mission_succubus",  # → ship_garmur
     "mission_sansha": "mission_sansha",  # → ship_sansha
     "mission_angel": "mission_angel",  # → ship_angel
@@ -113,6 +108,7 @@ TEMPLATE_FILES = {
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
     "ship_daredevil": "ship_daredevil",
+    "ship_vengeance": "ship_vengeance",
     "ship_worm": "ship_worm",
     "ship_sansha": "ship_sansha",
     "ship_angel": "ship_angel",
@@ -122,19 +118,14 @@ TEMPLATE_FILES = {
 # Maps mission dialog template keys → ship template keys.
 # Checked in order; first match wins.
 MISSION_TEMPLATE_TO_SHIP = [
-    ("mission_vengeance", "ship_daredevil"),
-    ("mission_enyo", "ship_daredevil"),
-    ("mission_ishkur", "ship_daredevil"),
-    ("mission_hawk", "ship_worm"),
-    ("mission_harpy", "ship_worm"),
-    ("mission_wolf", "ship_daredevil"),
-    ("mission_retribution", "ship_daredevil"),
-    ("mission_daredevil", "ship_daredevil"),
+    ("mission_vengeance", "ship_vengeance"),# can we do this in garmur?
+    ("mission_jaguar", "ship_garmur"),
+    ("mission_enyo", "ship_garmur"),
+    ("mission_hawk", "ship_garmur"),
     ("mission_worm", "ship_worm"),
     ("mission_garmur", "ship_garmur"),
-    ("mission_dramiel", "ship_garmur"),
-    ("mission_cruor", "ship_garmur"),
-    ("mission_succubus", "ship_garmur"),
+    ("mission_dramiel", "ship_angel"),
+    ("mission_succubus", "ship_sansha"),
     ("mission_sansha", "ship_sansha"),
     ("mission_angel", "ship_angel"),
     ("mission_infested", "ship_sk"),
