@@ -7,11 +7,13 @@ Standalone usage:
   python eve_automation.py --loop                    continuous production loop
   python eve_automation.py --click accept            find + left-click template, exit
   python eve_automation.py --right-click ship_hangar find + right-click template, exit
+  python eve_automation.py --e-click stargate        find + hold-E left-click template, exit
 
 Called from Java OCRBridge via:
   python eve_automation.py --click <key>             left-click action
   python eve_automation.py --right-click <key>       right-click action
   python eve_automation.py --double-click <key>      double-click action
+  python eve_automation.py --e-click <key>           hold-E + left-click action
   python eve_automation.py --repair-ship <title>     find ship for mission title, repair it,
                                                      then right-click → Board Ship to activate
 """
@@ -89,6 +91,13 @@ TEMPLATE_FILES = {
     # Hangar / navigation
     "undock": "undock",
     "ship_hangar": "ship_hangar",
+    # Travel / returning
+    "set_destination": "set_destination",
+    "stargate": "stargate",
+    "warp_to_location": "warp_to_location",
+    "activate_gate": "activate_gate",
+    "dock": "dock",
+    "ok": "ok",
     # Agent interaction
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
     # Mission dialog detection templates — crop these from the mission dialog window.
@@ -339,6 +348,31 @@ class TemplateMatcher:
             log.info("pyautogui double-clicked at (%d,%d)", cx, cy)
         time.sleep(delay)
 
+    def _do_e_click(self, cx: int, cy: int, delay: float = 1.5):
+        """Hold E, left-click at (cx, cy), release E. Used for jump/warp interactions."""
+        VK_E = 0x45
+        try:
+            import win32api, win32con
+
+            win32api.SetCursorPos((cx, cy))
+            time.sleep(0.05)
+            win32api.keybd_event(VK_E, 0, 0, 0)          # key down
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_E, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
+            log.info("win32 E+left-clicked at (%d,%d)", cx, cy)
+        except ImportError:
+            pyautogui.keyDown('e')
+            pyautogui.moveTo(cx, cy, duration=0.1)
+            time.sleep(0.05)
+            pyautogui.click(cx, cy)
+            pyautogui.keyUp('e')
+            log.info("pyautogui E+left-clicked at (%d,%d)", cx, cy)
+        time.sleep(delay)
+
     # -- click helpers ---------------------------------------------------------
 
     def click(self, key: str, screen=None, threshold=None, delay: float = 0.3) -> bool:
@@ -431,6 +465,36 @@ class TemplateMatcher:
             self._do_click(cx, cy, button="right", delay=delay)
             return True
         log.warning("Could not right-click '%s' within %.1fs — not found", key, timeout)
+        return False
+
+    def e_click(self, key: str, screen=None, threshold=None, delay: float = 1.5) -> bool:
+        """Find template and hold-E left-click its centre."""
+        match = self.find(key, screen=screen, threshold=threshold)
+        if match:
+            cx, cy = self.center(match)
+            log.info("E+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_e_click(cx, cy, delay=delay)
+            return True
+        log.warning("'%s' not found on screen — cannot E+click", key)
+        return False
+
+    def wait_and_e_click(
+        self,
+        key: str,
+        timeout: float = 10.0,
+        interval: float = 0.5,
+        delay: float = 1.5,
+        threshold=None,
+    ) -> bool:
+        match = self.wait_for(
+            key, timeout=timeout, interval=interval, threshold=threshold
+        )
+        if match:
+            cx, cy = self.center(match)
+            log.info("E+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_e_click(cx, cy, delay=delay)
+            return True
+        log.warning("Could not E+click '%s' within %.1fs — not found", key, timeout)
         return False
 
 
@@ -940,6 +1004,23 @@ def cmd_right_click(key: str, dry_run: bool, threshold: float):
         sys.exit(0 if ok else 1)
 
 
+def cmd_e_click(key: str, dry_run: bool, threshold: float):
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    if dry_run:
+        match = matcher.wait_for(key, timeout=6.0)
+        if match:
+            log.info(
+                "[DRY RUN] Would E+left-click '%s' at %s", key, matcher.center(match)
+            )
+            sys.exit(0)
+        else:
+            log.warning("[DRY RUN] Template '%s' not found", key)
+            sys.exit(1)
+    else:
+        ok = matcher.wait_and_e_click(key, timeout=6.0)
+        sys.exit(0 if ok else 1)
+
+
 # -----------------------------------------------------------------------------
 # CLI entry point
 # -----------------------------------------------------------------------------
@@ -973,6 +1054,9 @@ Examples:
     )
     parser.add_argument(
         "--right-click", metavar="KEY", help="Right-click a template then exit"
+    )
+    parser.add_argument(
+        "--e-click", metavar="KEY", help="Hold E + left-click a template then exit"
     )
     parser.add_argument(
         "--repair-ship",
@@ -1013,6 +1097,10 @@ Examples:
         cmd_right_click(
             args.right_click, dry_run=args.dry_run, threshold=args.threshold
         )
+        return
+
+    if getattr(args, "e_click", None):
+        cmd_e_click(args.e_click, dry_run=args.dry_run, threshold=args.threshold)
         return
 
     if getattr(args, "repair_ship", None):

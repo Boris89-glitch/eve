@@ -44,6 +44,9 @@ public class ClientState {
     /** True once the accepted mission has been registered in the journal / tracking. */
     private boolean missionTracked = false;
 
+    /** True once set_destination has been clicked for the current travel/returning leg. */
+    private boolean destinationSet = false;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -67,6 +70,9 @@ public class ClientState {
         if (state == State.IDLE || state == State.CHECKING_MISSIONS || state == State.DECLINING) {
             this.missionTracked = false;
         }
+        if (state == State.TRAVEL || state == State.RETURNING) {
+            this.destinationSet = false;
+        }
     }
 
     public Mission getCurrentMission() { return currentMission; }
@@ -78,6 +84,9 @@ public class ClientState {
 
     public boolean isMissionTracked()           { return missionTracked; }
     public void    setMissionTracked(boolean t) { this.missionTracked = t; }
+
+    public boolean isDestinationSet()           { return destinationSet; }
+    public void    setDestinationSet(boolean v) { this.destinationSet = v; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

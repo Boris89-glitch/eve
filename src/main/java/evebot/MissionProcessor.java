@@ -233,6 +233,66 @@ public class MissionProcessor {
     }
 
     // -----------------------------------------------------------------------
+    // Travel / returning navigation
+    // -----------------------------------------------------------------------
+
+    public void eClickTemplate(String key) {
+        log("E+clicking template: " + key);
+        ocrBridge.eClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void clickSetDestination() {
+        log("Clicking SET DESTINATION (template)");
+        ocrBridge.clickTemplate("set_destination");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void clickWarpToLocation() {
+        log("Clicking WARP TO LOCATION (template)");
+        ocrBridge.clickTemplate("warp_to_location");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void clickDock() {
+        log("Clicking DOCK (template)");
+        ocrBridge.clickTemplate("dock");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void clickOk() {
+        log("Clicking OK (template)");
+        ocrBridge.clickTemplate("ok");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /**
+     * Single screenshot scan for travel UI elements.
+     * Returns: "activate_gate", "warp_to_location", "stargate", or null.
+     * Priority order: activate_gate first (mission entrance), then warp_to_location,
+     * then stargate (still in transit).
+     */
+    public String detectTravelUI() {
+        return ocrBridge.findAnyTemplate("activate_gate", "warp_to_location", "stargate");
+    }
+
+    /**
+     * Single screenshot scan for returning UI elements.
+     * Returns: "dock", "stargate", or null.
+     */
+    public String detectReturningUI() {
+        return ocrBridge.findAnyTemplate("dock", "stargate");
+    }
+
+    /**
+     * Returns true if set_destination is currently visible on screen.
+     * Used in IN_COMBAT to detect mission completion.
+     */
+    public boolean isSetDestinationVisible() {
+        return ocrBridge.findAnyTemplate("set_destination") != null;
+    }
+
+    // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
 

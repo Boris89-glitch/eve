@@ -100,19 +100,9 @@ public class ClientManager {
             case DECLINING:         handleDeclining(clientId, window);        break;
             case ACCEPTED:          handleAccepted(clientId, window);         break;
             case REPAIRING:         handleRepairing(clientId, window);        break;
-            case TRAVEL:
-                // Waiting to arrive at mission site — nothing to do yet.
-                // TODO: detect arrival (e.g. overview enemies visible) → IN_COMBAT
-                log(clientId, "Travelling to mission site — waiting for arrival.");
-                break;
-            case IN_COMBAT:
-                // TODO: monitor combat state → RETURNING when site clear
-                log(clientId, "In combat.");
-                break;
-            case RETURNING:
-                // TODO: monitor warp/dock → COMPLETING
-                log(clientId, "Returning to station.");
-                break;
+            case TRAVEL:    handleTravel(clientId, window);    break;
+            case IN_COMBAT: handleInCombat(clientId, window);  break;
+            case RETURNING: handleReturning(clientId, window); break;
             case COMPLETING:
                 handleCompleting(clientId);
                 break;
@@ -271,12 +261,118 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // COMPLETING — click turn-in button, then return to IDLE
+    // TRAVEL — set destination once, then E+click stargates until at mission site
+    //
+    // Each tick (non-blocking):
+    //   1. First entry: click set_destination, mark done, return.
+    //   2. Scan for:  activate_gate → E+click → IN_COMBAT
+    //                 warp_to_location → click it (warp to mission pocket)
+    //                 stargate → E+click (jump through gate in transit)
+    //                 null → still warping, wait next tick.
+    // -----------------------------------------------------------------------
+
+    private void handleTravel(String clientId, ClientWindowInfo window) {
+        ClientState cs = stateManager.getState(clientId);
+
+        if (!cs.isDestinationSet()) {
+            log(clientId, "TRAVEL: clicking set_destination.");
+            missionProcessor.clickSetDestination();
+            cs.setDestinationSet(true);
+            return;
+        }
+
+        String found = missionProcessor.detectTravelUI();
+        if (found == null) {
+            log(clientId, "TRAVEL: warping — nothing to click yet.");
+            return;
+        }
+
+        switch (found) {
+            case "activate_gate":
+                log(clientId, "TRAVEL: activate_gate visible — E+clicking, entering combat.");
+                missionProcessor.eClickTemplate("activate_gate");
+                cs.setDestinationSet(false);
+                stateManager.setState(clientId, ClientState.State.IN_COMBAT);
+                break;
+            case "warp_to_location":
+                log(clientId, "TRAVEL: warp_to_location visible — clicking.");
+                missionProcessor.clickWarpToLocation();
+                break;
+            case "stargate":
+                log(clientId, "TRAVEL: stargate visible — E+clicking to jump.");
+                missionProcessor.eClickTemplate("stargate");
+                break;
+            default:
+                log(clientId, "TRAVEL: unexpected UI element '" + found + "' — ignoring.");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // IN_COMBAT — stand by; transition to RETURNING when set_destination appears
+    //             (signals mission objective complete).
+    //             Target-specific combat logic to be added here later.
+    // -----------------------------------------------------------------------
+
+    private void handleInCombat(String clientId, ClientWindowInfo window) {
+        if (missionProcessor.isSetDestinationVisible()) {
+            log(clientId, "IN_COMBAT: set_destination detected — mission complete, transitioning to RETURNING.");
+            stateManager.setState(clientId, ClientState.State.RETURNING);
+        } else {
+            log(clientId, "IN_COMBAT: standing by.");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // RETURNING — set destination once, then E+click stargates until dock visible
+    //
+    // Each tick (non-blocking):
+    //   1. First entry: click set_destination (back to agent station), mark done, return.
+    //   2. Scan for:  dock → click → COMPLETING
+    //                 stargate → E+click (jump through gate)
+    //                 null → still warping, wait next tick.
+    // -----------------------------------------------------------------------
+
+    private void handleReturning(String clientId, ClientWindowInfo window) {
+        ClientState cs = stateManager.getState(clientId);
+
+        if (!cs.isDestinationSet()) {
+            log(clientId, "RETURNING: clicking set_destination.");
+            missionProcessor.clickSetDestination();
+            cs.setDestinationSet(true);
+            return;
+        }
+
+        String found = missionProcessor.detectReturningUI();
+        if (found == null) {
+            log(clientId, "RETURNING: warping — nothing to click yet.");
+            return;
+        }
+
+        switch (found) {
+            case "dock":
+                log(clientId, "RETURNING: dock visible — docking.");
+                missionProcessor.clickDock();
+                cs.setDestinationSet(false);
+                stateManager.setState(clientId, ClientState.State.COMPLETING);
+                break;
+            case "stargate":
+                log(clientId, "RETURNING: stargate visible — E+clicking to jump.");
+                missionProcessor.eClickTemplate("stargate");
+                break;
+            default:
+                log(clientId, "RETURNING: unexpected UI element '" + found + "' — ignoring.");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // COMPLETING — turn in mission, collect rewards, return to IDLE
     // -----------------------------------------------------------------------
 
     private void handleCompleting(String clientId) {
-        log(clientId, "Clicking Complete Mission (turn-in).");
+        log(clientId, "COMPLETING: clicking Complete Mission.");
         missionProcessor.clickCompleteMission();
+        log(clientId, "COMPLETING: clicking OK to collect rewards.");
+        missionProcessor.clickOk();
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
 

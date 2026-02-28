@@ -208,6 +208,15 @@ public class OCRBridge {
     }
 
     /**
+     * E+left-click: hold the E key while left-clicking the template centre.
+     * Used for stargate jumps and activate-gate interactions.
+     */
+    public void eClickTemplate(String key) {
+        System.out.printf("[%s] [OCRBridge] eClickTemplate: %s%n", ts(), key);
+        runPython("python", automationScriptPath, "--e-click", key);
+    }
+
+    /**
      * Repair + activate the correct ship for the given mission title.
      *
      * Calls: eve_automation.py --repair-ship "<missionTitle>"
