@@ -275,6 +275,36 @@ public class OCRBridge {
         return code == 0;
     }
 
+    /**
+     * Poll for any of the given templates in one subprocess; returns the first
+     * matched key name, or null on timeout. Single Python process — one screenshot
+     * per poll cycle checks all keys.
+     */
+    public String waitForAnyTemplate(int timeoutSeconds, String... keys) {
+        System.out.printf("[%s] [OCRBridge] waitForAnyTemplate: %s (%ds)%n",
+                ts(), java.util.Arrays.toString(keys), timeoutSeconds);
+        List<String> cmd = new ArrayList<>();
+        cmd.add("python");
+        cmd.add(automationScriptPath);
+        cmd.add("--wait-any");
+        for (String key : keys) cmd.add(key);
+        cmd.add("--timeout");
+        cmd.add(String.valueOf(timeoutSeconds));
+        String result = runPython(cmd.toArray(new String[0]));
+        return (result != null && !result.isBlank()) ? result.trim() : null;
+    }
+
+    /**
+     * Wait for a template to appear then click it, all in one subprocess.
+     * Returns true on success, false on timeout.
+     */
+    public boolean waitAndClickTemplate(String key, int timeoutSeconds) {
+        System.out.printf("[%s] [OCRBridge] waitAndClickTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
+        int code = runPythonExitCode("python", automationScriptPath,
+                "--wait-click", key, "--timeout", String.valueOf(timeoutSeconds));
+        return code == 0;
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------

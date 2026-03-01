@@ -54,11 +54,8 @@ public class MissionProcessor {
 
     public void clickRequestMission() {
         log("Clicking REQUEST MISSION (template) — with agent_icon double-click fallback");
-        boolean found = ocrBridge.waitForTemplate("request_mission", 3);
-        if (found) {
-            ocrBridge.clickTemplate("request_mission");
-            log("Request Mission button clicked.");
-        } else {
+        boolean found = ocrBridge.waitAndClickTemplate("request_mission", 3);
+        if (!found) {
             log("Request Mission not visible — double-clicking agent_icon as fallback.");
             ocrBridge.doubleClickTemplate("agent_icon");
         }
@@ -108,11 +105,10 @@ public class MissionProcessor {
 
     public boolean waitForNewOffer() {
         log("Waiting for new mission offer...");
-        boolean visible = ocrBridge.waitForTemplate("accept", 8);
-        if (!visible) visible = ocrBridge.waitForTemplate("decline", 3);
-        if (visible) log("New offer dialog visible.");
-        else         log("No new offer appeared within timeout.");
-        return visible;
+        String found = ocrBridge.waitForAnyTemplate(8, "accept", "decline");
+        if (found != null) log("New offer dialog visible (" + found + ").");
+        else               log("No new offer appeared within timeout.");
+        return found != null;
     }
 
     /**
@@ -138,11 +134,10 @@ public class MissionProcessor {
      */
     public void clickTrack() {
         log("Checking Track state (looking for untrack / track)...");
-        if (ocrBridge.waitForTemplate("untrack", 2)) {
+        String found = ocrBridge.waitForAnyTemplate(3, "untrack", "track");
+        if ("untrack".equals(found)) {
             log("'untrack' visible — already tracked, skipping.");
-            return;
-        }
-        if (ocrBridge.waitForTemplate("track", 3)) {
+        } else if ("track".equals(found)) {
             log("'track' visible — clicking Track.");
             ocrBridge.clickTemplate("track");
             sleep(POST_CLICK_DELAY_MS);

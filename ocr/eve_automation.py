@@ -287,7 +287,7 @@ class TemplateMatcher:
         self,
         key: str,
         timeout: float = 10.0,
-        interval: float = 0.5,
+        interval: float = 0.2,
         threshold: Optional[float] = None,
     ) -> Optional[Tuple[int, int, int, int]]:
         deadline = time.time() + timeout
@@ -298,6 +298,23 @@ class TemplateMatcher:
             time.sleep(interval)
         log.debug("Timeout waiting for '%s'", key)
         return None
+
+    def wait_for_any(
+        self,
+        keys: list,
+        timeout: float = 10.0,
+        interval: float = 0.2,
+    ):
+        """Poll for any of several templates; return (key, match) for the first hit."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            screen = self.screenshot_cv()
+            for key in keys:
+                match = self.find(key, screen=screen)
+                if match:
+                    return key, match
+            time.sleep(interval)
+        return None, None
 
     # -- low-level click -------------------------------------------------------
 
@@ -1083,6 +1100,17 @@ Examples:
         metavar="KEY",
         help="Take one screenshot, check keys in order, print first match and exit 0; exit 1 if none found",
     )
+    parser.add_argument(
+        "--wait-any",
+        nargs="+",
+        metavar="KEY",
+        help="Poll for any of the given templates; print matched key and exit 0; exit 1 on timeout",
+    )
+    parser.add_argument(
+        "--wait-click",
+        metavar="KEY",
+        help="Wait for template to appear then left-click it; exit 0 on success, 1 on timeout",
+    )
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--threshold", type=float, default=0.80)
     args = parser.parse_args()
@@ -1143,8 +1171,27 @@ Examples:
             if matcher.find(args.wait_gone) is None:
                 log.info("'%s' is gone from screen.", args.wait_gone)
                 sys.exit(0)
-            time.sleep(0.4)
+            time.sleep(0.2)
         log.warning("'%s' still visible after %.1fs.", args.wait_gone, args.timeout)
+        sys.exit(1)
+
+    if getattr(args, "wait_any", None):
+        matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)
+        key, _ = matcher.wait_for_any(args.wait_any, timeout=args.timeout)
+        if key:
+            print(key)
+            sys.exit(0)
+        log.warning("None of %s appeared within %.1fs.", args.wait_any, args.timeout)
+        sys.exit(1)
+
+    if getattr(args, "wait_click", None):
+        matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)
+        match = matcher.wait_for(args.wait_click, timeout=args.timeout)
+        if match:
+            cx, cy = matcher.center(match)
+            matcher._do_click(cx, cy)
+            sys.exit(0)
+        log.warning("'%s' did not appear within %.1fs.", args.wait_click, args.timeout)
         sys.exit(1)
 
     bot = EVEAutomation(dry_run=args.dry_run)
