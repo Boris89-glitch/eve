@@ -528,6 +528,7 @@ class RuleEngine:
         for rule_key, field in [
             ("title_contains", "title"),
             ("target_contains", "target"),
+            ("objective_contains", "objective"),
             ("location_contains", "location"),
             ("security_contains", "security"),
         ]:

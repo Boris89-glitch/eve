@@ -128,12 +128,13 @@ public class MissionConfig {
         arr.forEach(el -> {
             JsonObject obj = el.getAsJsonObject();
             Rule rule = new Rule();
-            rule.titleContains    = getString(obj, "title_contains");
-            rule.targetContains   = getString(obj, "target_contains");
-            rule.locationContains = getString(obj, "location_contains");
-            rule.securityContains = getString(obj, "security_contains");
-            rule.type             = getString(obj, "type");
-            rule.comment          = getString(obj, "comment");
+            rule.titleContains     = getString(obj, "title_contains");
+            rule.targetContains    = getString(obj, "target_contains");
+            rule.objectiveContains = getString(obj, "objective_contains");
+            rule.locationContains  = getString(obj, "location_contains");
+            rule.securityContains  = getString(obj, "security_contains");
+            rule.type              = getString(obj, "type");
+            rule.comment           = getString(obj, "comment");
             target.add(rule);
         });
     }
@@ -174,6 +175,7 @@ public class MissionConfig {
     private static class Rule {
         String titleContains;
         String targetContains;
+        String objectiveContains;
         String locationContains;
         String securityContains;
         String type;
@@ -185,6 +187,9 @@ public class MissionConfig {
                 return false;
             if (targetContains != null
                     && !safe(m.getTarget()).contains(targetContains.toLowerCase()))
+                return false;
+            if (objectiveContains != null
+                    && !safe(m.getObjective()).contains(objectiveContains.toLowerCase()))
                 return false;
             if (locationContains != null
                     && !safe(m.getLocation()).contains(locationContains.toLowerCase()))

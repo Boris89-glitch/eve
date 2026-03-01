@@ -176,6 +176,13 @@ public class StateManager {
             Map<String, ClientStateDto> dtos = gson.fromJson(json, mapType);
             if (dtos != null) {
                 dtos.forEach((id, dto) -> {
+                    // Discard old position-based IDs (eve_client_X_Y) — title-based IDs
+                    // (eve_CharacterName) are now used. Old entries would never match a
+                    // discovered window and would pollute the state summary indefinitely.
+                    if (id.matches("eve_client_-?\\d+_-?\\d+")) {
+                        log("[StateManager] Discarding legacy state ID '" + id + "'");
+                        return;
+                    }
                     ClientState cs = new ClientState(id);
                     cs.setState(dto.state);
                     states.put(id, cs);
