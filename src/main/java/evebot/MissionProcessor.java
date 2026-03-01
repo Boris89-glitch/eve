@@ -204,9 +204,19 @@ public class MissionProcessor {
         }
         sleep(500);
 
-        // 2 — Undock (hangar already open, dialog already gone)
+        // 2 — Undock: Python boards the ship; Java clicks the main Undock button.
+        //     If Python already triggered undock via context menu, clickUndock will
+        //     fail to find the button (already gone) — that's fine, flow continues.
         log("Step 2: Undocking");
         clickUndock();
+        sleep(10_000); // wait for undock animation to complete
+
+        // 3 — Close any open mission/dialog windows so travel templates are visible.
+        log("Step 3: Closing open windows");
+        ocrBridge.clickTemplate("close_active_window");
+        sleep(500);
+        ocrBridge.clickTemplate("close_active_window");
+        sleep(500);
 
         log("=== Post-accept flow complete ===");
         return true;
@@ -274,6 +284,14 @@ public class MissionProcessor {
      */
     public String detectTravelUI() {
         return ocrBridge.findAnyTemplate("activate_gate", "warp_to_location", "stargate");
+    }
+
+    /**
+     * Scans only for activate_gate — used after warp_to_location has been clicked
+     * (we are in the mission system; no more regular stargates to jump).
+     */
+    public String detectActivateGateOnly() {
+        return ocrBridge.findAnyTemplate("activate_gate");
     }
 
     /**

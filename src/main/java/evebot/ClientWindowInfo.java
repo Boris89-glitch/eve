@@ -22,11 +22,20 @@ public class ClientWindowInfo {
         this.handle = handle;
         this.bounds = new Rectangle(x, y, width, height);
         this.isActive = false;
-        this.clientId = generateClientId(x, y);
+        this.clientId = generateClientId(title);
     }
 
-    private String generateClientId(int x, int y) {
-        return String.format("eve_client_%d_%d", x, y);
+    /**
+     * Derives a stable client ID from the window title.
+     * "EVE - CharacterName" → "eve_CharacterName"
+     * This is unique per character regardless of window position,
+     * which is critical when multiple clients are stacked at the same coordinates.
+     */
+    private String generateClientId(String title) {
+        if (title != null && title.startsWith("EVE - ")) {
+            return "eve_" + title.substring(6).trim().replace(" ", "_");
+        }
+        return String.format("eve_client_%d_%d", bounds.x, bounds.y);
     }
 
     // Getters and Setters

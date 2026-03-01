@@ -7,10 +7,12 @@ import evebot.models.Mission;
 
 import java.awt.Rectangle;
 import java.nio.file.*;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * ClientManager discovers EVE Online client windows, tracks each one by a
@@ -28,7 +30,14 @@ public class ClientManager {
     private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
     private final Map<String, Integer>          agentRetries       = new ConcurrentHashMap<>();
 
-    private static final int MAX_AGENT_RETRIES = 3;
+    /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
+    private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
+
+    private static final int  MAX_AGENT_RETRIES  = 3;
+    /** Seconds to wait after each gate jump before checking again.
+     *  Must be longer than the warp time to the next gate — gates are visible in
+     *  the overview while warping, so a short cooldown causes repeated clicks. */
+    private static final long JUMP_COOLDOWN_SECS = 30;
 
     public ClientManager(StateManager stateManager) {
         this.stateManager     = stateManager;
@@ -79,12 +88,26 @@ public class ClientManager {
 
     public void monitorClients() {
         if (!stateManager.isBotRunning()) return;
-        refreshClientWindows();
-        if (clientWindows.isEmpty()) {
-            log("[ClientManager] No EVE clients found on screen.");
-            return;
+        if (!monitorRunning.compareAndSet(false, true)) return; // skip if previous tick still running
+        try {
+            refreshClientWindows();
+            if (clientWindows.isEmpty()) {
+                log("[ClientManager] No EVE clients found on screen.");
+                return;
+            }
+
+            // Only process whichever EVE client is currently in the foreground.
+            // Clients are stacked at the same screen position, so the bot can only
+            // see one at a time. Each has its own state tracked by title-based ID.
+            ClientWindowInfo active = getForegroundClient();
+            if (active == null) {
+                log("[ClientManager] No EVE client in foreground — skipping tick.");
+                return;
+            }
+            processClient(active.getClientId(), active);
+        } finally {
+            monitorRunning.set(false);
         }
-        clientWindows.forEach(this::processClient);
     }
 
     // -----------------------------------------------------------------------
@@ -281,6 +304,27 @@ public class ClientManager {
             return;
         }
 
+        // Wait after each jump before checking again
+        long secsSinceJump = Duration.between(cs.getLastTravelAction(), LocalDateTime.now()).getSeconds();
+        if (secsSinceJump < JUMP_COOLDOWN_SECS) {
+            log(clientId, "TRAVEL: jump cooldown (" + secsSinceJump + "/" + JUMP_COOLDOWN_SECS + "s).");
+            return;
+        }
+
+        // After warp_to_location was clicked we are in the mission system — only activate_gate matters
+        if (cs.isWarpedToLocation()) {
+            String gate = missionProcessor.detectActivateGateOnly();
+            if (gate == null) {
+                log(clientId, "TRAVEL: in mission system — waiting for activate_gate.");
+                return;
+            }
+            log(clientId, "TRAVEL: activate_gate visible — E+clicking, entering combat.");
+            cs.setDestinationSet(false);
+            stateManager.setState(clientId, ClientState.State.IN_COMBAT);
+            new Thread(() -> missionProcessor.eClickTemplate("activate_gate")).start();
+            return;
+        }
+
         String found = missionProcessor.detectTravelUI();
         if (found == null) {
             log(clientId, "TRAVEL: warping — nothing to click yet.");
@@ -290,17 +334,20 @@ public class ClientManager {
         switch (found) {
             case "activate_gate":
                 log(clientId, "TRAVEL: activate_gate visible — E+clicking, entering combat.");
-                missionProcessor.eClickTemplate("activate_gate");
                 cs.setDestinationSet(false);
                 stateManager.setState(clientId, ClientState.State.IN_COMBAT);
+                new Thread(() -> missionProcessor.eClickTemplate("activate_gate")).start();
                 break;
             case "warp_to_location":
-                log(clientId, "TRAVEL: warp_to_location visible — clicking.");
-                missionProcessor.clickWarpToLocation();
+                log(clientId, "TRAVEL: warp_to_location visible — clicking, entering mission system.");
+                cs.setWarpedToLocation(true);
+                cs.setLastTravelAction(LocalDateTime.now());
+                new Thread(() -> missionProcessor.clickWarpToLocation()).start();
                 break;
             case "stargate":
                 log(clientId, "TRAVEL: stargate visible — E+clicking to jump.");
-                missionProcessor.eClickTemplate("stargate");
+                cs.setLastTravelAction(LocalDateTime.now());
+                new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
                 break;
             default:
                 log(clientId, "TRAVEL: unexpected UI element '" + found + "' — ignoring.");
@@ -342,6 +389,13 @@ public class ClientManager {
             return;
         }
 
+        // Wait after each jump before checking again
+        long secsSinceJump = Duration.between(cs.getLastTravelAction(), LocalDateTime.now()).getSeconds();
+        if (secsSinceJump < JUMP_COOLDOWN_SECS) {
+            log(clientId, "RETURNING: jump cooldown (" + secsSinceJump + "/" + JUMP_COOLDOWN_SECS + "s).");
+            return;
+        }
+
         String found = missionProcessor.detectReturningUI();
         if (found == null) {
             log(clientId, "RETURNING: warping — nothing to click yet.");
@@ -357,7 +411,8 @@ public class ClientManager {
                 break;
             case "stargate":
                 log(clientId, "RETURNING: stargate visible — E+clicking to jump.");
-                missionProcessor.eClickTemplate("stargate");
+                cs.setLastTravelAction(LocalDateTime.now());
+                new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
                 break;
             default:
                 log(clientId, "RETURNING: unexpected UI element '" + found + "' — ignoring.");
@@ -377,20 +432,98 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // Window discovery
+    // Window focus detection
+    // -----------------------------------------------------------------------
+
+    /**
+     * Returns the ClientWindowInfo whose HWND matches the current foreground window,
+     * or null if no registered EVE client is in the foreground.
+     */
+    private ClientWindowInfo getForegroundClient() {
+        try {
+            com.sun.jna.platform.win32.User32 user32 =
+                    com.sun.jna.platform.win32.User32.INSTANCE;
+            com.sun.jna.platform.win32.WinDef.HWND fg = user32.GetForegroundWindow();
+            if (fg == null) return null;
+            long fgHwnd = com.sun.jna.Pointer.nativeValue(fg.getPointer());
+            for (ClientWindowInfo info : clientWindows.values()) {
+                if (info.getHandle() == fgHwnd) return info;
+            }
+        } catch (Exception e) {
+            // JNA unavailable — fall back to first registered client
+        }
+        // Fallback: return first client (single-client or testing mode)
+        return clientWindows.values().stream().findFirst().orElse(null);
+    }
+
+    // -----------------------------------------------------------------------
+    // Window discovery — real EVE client enumeration via JNA
     // -----------------------------------------------------------------------
 
     private void refreshClientWindows() {
-        if (clientWindows.isEmpty()) {
-            Rectangle defaultArea = clientMissionAreas.getOrDefault("default",
-                    new Rectangle(440, 92, 988, 336));
-            ClientWindowInfo stub = new ClientWindowInfo(
-                    "EVE - Character Name", "ExeFile", 0L,
-                    defaultArea.x, defaultArea.y,
-                    defaultArea.width, defaultArea.height
-            );
-            clientWindows.put(stub.getClientId(), stub);
-            System.out.println("[ClientManager] Registered stub EVE client: " + stub.getClientId());
+        Set<String> seenIds = new HashSet<>();
+        try {
+            com.sun.jna.platform.win32.User32 user32 =
+                    com.sun.jna.platform.win32.User32.INSTANCE;
+
+            user32.EnumWindows((hWnd, data) -> {
+                // Skip minimized-to-taskbar windows; do NOT skip by IsWindowVisible —
+                // background EVE clients in a stacked setup may report not-visible.
+                int style = user32.GetWindowLong(hWnd, com.sun.jna.platform.win32.WinUser.GWL_STYLE);
+                if ((style & com.sun.jna.platform.win32.WinUser.WS_MINIMIZE) != 0) return true;
+
+                char[] titleBuf = new char[512];
+                user32.GetWindowText(hWnd, titleBuf, titleBuf.length);
+                String windowTitle = com.sun.jna.Native.toString(titleBuf);
+
+                if (windowTitle.startsWith("EVE - ")) {
+                    com.sun.jna.platform.win32.WinDef.RECT rect =
+                            new com.sun.jna.platform.win32.WinDef.RECT();
+                    user32.GetWindowRect(hWnd, rect);
+
+                    int x = rect.left;
+                    int y = rect.top;
+                    int w = rect.right - rect.left;
+                    int h = rect.bottom - rect.top;
+
+                    long hwnd = com.sun.jna.Pointer.nativeValue(hWnd.getPointer());
+                    // Build a temporary info to get the title-based ID
+                    ClientWindowInfo info = new ClientWindowInfo(windowTitle, "ExeFile", hwnd, x, y, w, h);
+                    String id = info.getClientId(); // title-based, e.g. "eve_Gravitar"
+                    seenIds.add(id);
+
+                    if (!clientWindows.containsKey(id)) {
+                        clientWindows.put(id, info);
+                        log("[ClientManager] EVE client discovered: '" + windowTitle
+                                + "' id=" + id + " at " + x + "," + y + " " + w + "x" + h);
+                    } else {
+                        clientWindows.get(id).updateBounds(x, y, w, h);
+                    }
+                }
+                return true; // continue enumeration
+            }, null);
+
+            // Remove any clients that were not seen this pass (closed windows, stale stubs)
+            clientWindows.keySet().removeIf(id -> !seenIds.contains(id));
+
+            if (clientWindows.isEmpty()) {
+                log("[ClientManager] No EVE windows found.");
+            }
+
+        } catch (Exception e) {
+            // JNA unavailable or enumeration failed — use stub for single-client testing
+            if (clientWindows.isEmpty()) {
+                Rectangle defaultArea = clientMissionAreas.getOrDefault("default",
+                        new Rectangle(440, 92, 988, 336));
+                ClientWindowInfo stub = new ClientWindowInfo(
+                        "EVE - Character Name", "ExeFile", 0L,
+                        defaultArea.x, defaultArea.y,
+                        defaultArea.width, defaultArea.height
+                );
+                clientWindows.put(stub.getClientId(), stub);
+                log("[ClientManager] JNA unavailable — registered stub client: "
+                        + stub.getClientId());
+            }
         }
     }
 

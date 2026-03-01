@@ -578,7 +578,8 @@ def load_mission_area() -> Tuple[int, int, int, int]:
 def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     """
     Full ship select + repair flow for the ship matching mission_title:
-      1. Find ship icon via template matching (right half of screen = hangar area)
+      0. Click Ship Hangar to open the hangar view
+      1. Find ship icon via template matching
       2. Right-click ship icon → Get Repair Quote → Repair All → Yes
       3. Right-click ship icon → Board Ship to make it the active ship
     Exit 0 = success, 1 = ship template not found.
@@ -631,6 +632,12 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
                 "[DRY RUN] Ship template '%s' not found on screen", ship_template
             )
             sys.exit(1)
+
+    # --- Step 0: Open Ship Hangar ---
+    log.info("Step 0: Clicking 'Ship Hangar' to open hangar view...")
+    if not matcher.wait_and_click("ship_hangar", timeout=5.0, delay=1.0):
+        log.error("'Ship Hangar' not found — cannot open hangar")
+        sys.exit(1)
 
     # --- Step 1: Find ship icon and lock its coordinates ---
     log.info("Step 1: Locating ship icon '%s'...", ship_template)

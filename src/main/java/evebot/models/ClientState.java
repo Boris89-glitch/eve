@@ -47,6 +47,12 @@ public class ClientState {
     /** True once set_destination has been clicked for the current travel/returning leg. */
     private boolean destinationSet = false;
 
+    /** True once warp_to_location has been clicked — bot is in the mission system, activate_gate only. */
+    private boolean warpedToLocation = false;
+
+    /** Timestamp of the last stargate jump click during TRAVEL or RETURNING. */
+    private LocalDateTime lastTravelAction = LocalDateTime.MIN;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -71,7 +77,9 @@ public class ClientState {
             this.missionTracked = false;
         }
         if (state == State.TRAVEL || state == State.RETURNING) {
-            this.destinationSet = false;
+            this.destinationSet   = false;
+            this.warpedToLocation = false;
+            this.lastTravelAction = LocalDateTime.MIN;
         }
     }
 
@@ -87,6 +95,12 @@ public class ClientState {
 
     public boolean isDestinationSet()           { return destinationSet; }
     public void    setDestinationSet(boolean v) { this.destinationSet = v; }
+
+    public boolean isWarpedToLocation()           { return warpedToLocation; }
+    public void    setWarpedToLocation(boolean v) { this.warpedToLocation = v; }
+
+    public LocalDateTime getLastTravelAction()           { return lastTravelAction; }
+    public void          setLastTravelAction(LocalDateTime t) { this.lastTravelAction = t; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

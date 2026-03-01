@@ -3,10 +3,11 @@
     { "title_contains": "anomic",        "comment": "Burner missions (solo)" },
     { "title_contains": "anomic team",    "comment": "Burner team missions"   },
     { "title_contains": "the infested ruins",    "comment": "the infested ruins"   },
-    { "title_contains": "recon (1 of",         "comment": "Recon missions"         }],
+    { "title_contains": "infested",    "comment": "the infested ruins"   },
+    { "title_contains": "Recon1of3",         "comment": "Recon missions"         }],
   "decline": [
     { "title_contains": "anomic base",    "comment": "Burner team missions"   },
-    { "title_contains": "recon (2 of",    "comment": "recon 2"   },
+    { "title_contains": "Recon2of3",    "comment": "recon 2"   },
     { "target_contains": "serpentis",    "comment": "No serpentis burners"   },
     { "target_contains": "blood raider",    "comment": "No blood raider burners"   },
     { "target_contains": "bloodraiderbumer",    "comment": "No blood raider burners"   },
