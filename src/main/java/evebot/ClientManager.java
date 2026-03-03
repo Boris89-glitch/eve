@@ -97,6 +97,21 @@ public class ClientManager {
 
             checkUndockTimers();
             ClientWindowInfo active = getForegroundClient();
+
+            // If the foreground client is UNDOCKING there is nothing to do for it —
+            // switch focus to another client that can actually be processed.
+            if (active != null && stateManager.getStateEnum(active.getClientId()) == ClientState.State.UNDOCKING) {
+                ClientWindowInfo other = findNonUndockingClient(active.getClientId());
+                if (other != null) {
+                    log(active.getClientId(), "UNDOCKING — switching focus to " + other.getClientId());
+                    bringToForeground(other);
+                    active = other;
+                } else {
+                    log(active.getClientId(), "UNDOCKING — no other client ready, waiting.");
+                    return;
+                }
+            }
+
             if (active == null) {
                 log("[ClientManager] No EVE client in foreground — skipping tick.");
                 return;
@@ -456,6 +471,40 @@ public class ClientManager {
                     stateManager.setState(id, ClientState.State.TRAVEL);
                 }
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Window focus switching
+    // -----------------------------------------------------------------------
+
+    /** Returns the first registered client that is not UNDOCKING and is not {@code excludeId}. */
+    private ClientWindowInfo findNonUndockingClient(String excludeId) {
+        for (ClientWindowInfo info : clientWindows.values()) {
+            if (!info.getClientId().equals(excludeId) &&
+                    stateManager.getStateEnum(info.getClientId()) != ClientState.State.UNDOCKING) {
+                return info;
+            }
+        }
+        return null;
+    }
+
+    /** Brings the given window to the foreground using SetForegroundWindow. */
+    private void bringToForeground(ClientWindowInfo window) {
+        try {
+            com.sun.jna.platform.win32.User32 user32 =
+                    com.sun.jna.platform.win32.User32.INSTANCE;
+            com.sun.jna.platform.win32.WinDef.HWND hwnd =
+                    new com.sun.jna.platform.win32.WinDef.HWND(
+                            com.sun.jna.Pointer.createConstant(window.getHandle()));
+            // Windows blocks SetForegroundWindow unless the process has foreground rights.
+            // Simulating an Alt keypress via Robot grants those rights (standard workaround).
+            java.awt.Robot robot = new java.awt.Robot();
+            robot.keyPress(java.awt.event.KeyEvent.VK_ALT);
+            user32.SetForegroundWindow(hwnd);
+            robot.keyRelease(java.awt.event.KeyEvent.VK_ALT);
+        } catch (Exception e) {
+            log("[ClientManager] Failed to bring '" + window.getTitle() + "' to foreground: " + e.getMessage());
         }
     }
 
