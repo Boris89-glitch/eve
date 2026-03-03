@@ -35,7 +35,8 @@ public class ClientManager {
     /** Seconds to wait after each gate jump before checking again.
      *  Must be longer than the warp time to the next gate — gates are visible in
      *  the overview while warping, so a short cooldown causes repeated clicks. */
-    private static final long JUMP_COOLDOWN_SECS = 30;
+    private static final long JUMP_COOLDOWN_SECS  = 30;
+    private static final long UNDOCK_WAIT_SECS    = 13;
 
     public ClientManager(StateManager stateManager) {
         this.stateManager     = stateManager;
@@ -94,6 +95,7 @@ public class ClientManager {
                 return;
             }
 
+            checkUndockTimers();
             ClientWindowInfo active = getForegroundClient();
             if (active == null) {
                 log("[ClientManager] No EVE client in foreground — skipping tick.");
@@ -118,6 +120,7 @@ public class ClientManager {
             case DECLINING:         handleDeclining(clientId, window);        break;
             case ACCEPTED:          handleAccepted(clientId, window);         break;
             case REPAIRING:         handleRepairing(clientId, window);        break;
+            case UNDOCKING: /* timer-driven — handled by checkUndockTimers() */ break;
             case TRAVEL:    handleTravel(clientId, window);    break;
             case IN_COMBAT: handleInCombat(clientId, window);  break;
             case RETURNING: handleReturning(clientId, window); break;
@@ -260,7 +263,7 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // REPAIRING — repair + activate ship, then undock → TRAVEL
+    // REPAIRING — repair + activate ship, click Undock → UNDOCKING
     // -----------------------------------------------------------------------
 
     private void handleRepairing(String clientId, ClientWindowInfo window) {
@@ -268,11 +271,11 @@ public class ClientManager {
         log(clientId, "Starting repair + undock flow for: "
                 + (mission != null ? mission.getTitle() : "unknown mission"));
 
-        boolean success = missionProcessor.performPostAcceptFlow(window.getBounds(), mission);
+        boolean success = missionProcessor.performUndockStart(mission);
 
         if (success) {
-            log(clientId, "Undocked — transitioning to TRAVEL.");
-            stateManager.setState(clientId, ClientState.State.TRAVEL);
+            stateManager.getState(clientId).setUndockStartTime(LocalDateTime.now());
+            stateManager.setState(clientId, ClientState.State.UNDOCKING);
         } else {
             System.err.println("[" + clientId + "] Repair/undock flow failed — returning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
@@ -294,6 +297,8 @@ public class ClientManager {
         ClientState cs = stateManager.getState(clientId);
 
         if (!cs.isDestinationSet()) {
+            log(clientId, "TRAVEL: closing any open dialogs from undock.");
+            missionProcessor.closeAllDialogs();
             log(clientId, "TRAVEL: pressing Ctrl+R to reload modules.");
             missionProcessor.pressCtrlR();
             log(clientId, "TRAVEL: clicking set_destination.");
@@ -427,6 +432,31 @@ public class ClientManager {
         log(clientId, "COMPLETING: clicking OK to collect rewards.");
         missionProcessor.clickOk();
         stateManager.setState(clientId, ClientState.State.IDLE);
+    }
+
+    // -----------------------------------------------------------------------
+    // UNDOCKING timer
+    // -----------------------------------------------------------------------
+
+    /**
+     * Checks all registered clients for an expired UNDOCKING timer.
+     * No screen interaction — just transitions the state to TRAVEL.
+     * closeAllDialogs() runs on the first tick of handleTravel() when the
+     * client is back in focus.
+     */
+    private void checkUndockTimers() {
+        for (ClientWindowInfo window : clientWindows.values()) {
+            String id = window.getClientId();
+            if (stateManager.getStateEnum(id) == ClientState.State.UNDOCKING) {
+                long elapsed = Duration.between(
+                        stateManager.getState(id).getUndockStartTime(), LocalDateTime.now()
+                ).getSeconds();
+                if (elapsed >= UNDOCK_WAIT_SECS) {
+                    log(id, "UNDOCKING: 15s elapsed — transitioning to TRAVEL.");
+                    stateManager.setState(id, ClientState.State.TRAVEL);
+                }
+            }
+        }
     }
 
     // -----------------------------------------------------------------------

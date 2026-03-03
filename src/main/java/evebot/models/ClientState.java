@@ -12,11 +12,12 @@ import java.time.LocalDateTime;
  *           ├─► DECLINING      (mission did not meet criteria — re-request loop)
  *           │     └─► CHECKING_MISSIONS  (new offer arrived)
  *           ├─► ACCEPTED       (mission met accept criteria)
- *           │     └─► REPAIRING   (ship repaired + activated, undocking)
- *           │           └─► TRAVEL    (undocked, warping to mission site)
- *           │                 └─► IN_COMBAT  (on grid, fighting)
- *           │                       └─► RETURNING  (combat done, warping/docking back)
- *           │                             └─► COMPLETING → IDLE
+ *           │     └─► REPAIRING   (ship repaired + activated, undock clicked)
+ *           │           └─► UNDOCKING  (waiting 15s for undock animation)
+ *           │                 └─► TRAVEL    (undocked, warping to mission site)
+ *           │                       └─► IN_COMBAT  (on grid, fighting)
+ *           │                             └─► RETURNING  (combat done, warping/docking back)
+ *           │                                   └─► COMPLETING → IDLE
  *           └─► IDLE           (fallback)
  */
 public class ClientState {
@@ -27,6 +28,7 @@ public class ClientState {
         DECLINING,
         ACCEPTED,
         REPAIRING,
+        UNDOCKING,    // undock clicked, waiting 15s for animation to complete
         TRAVEL,       // undocked and warping to mission site
         IN_COMBAT,
         RETURNING,
@@ -52,6 +54,9 @@ public class ClientState {
 
     /** Timestamp of the last stargate jump click during TRAVEL or RETURNING. */
     private LocalDateTime lastTravelAction = LocalDateTime.MIN;
+
+    /** Timestamp when Undock was clicked — used to track the 15s undock animation wait. */
+    private LocalDateTime undockStartTime = LocalDateTime.MIN;
 
     // -----------------------------------------------------------------------
 
@@ -99,8 +104,11 @@ public class ClientState {
     public boolean isWarpedToLocation()           { return warpedToLocation; }
     public void    setWarpedToLocation(boolean v) { this.warpedToLocation = v; }
 
-    public LocalDateTime getLastTravelAction()           { return lastTravelAction; }
+    public LocalDateTime getLastTravelAction()                { return lastTravelAction; }
     public void          setLastTravelAction(LocalDateTime t) { this.lastTravelAction = t; }
+
+    public LocalDateTime getUndockStartTime()                { return undockStartTime; }
+    public void          setUndockStartTime(LocalDateTime t) { this.undockStartTime = t; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

@@ -181,21 +181,19 @@ public class MissionProcessor {
     }
 
     // -----------------------------------------------------------------------
-    // Post-accept flow
+    // Post-accept flow (split into start + finish for non-blocking UNDOCKING state)
     //
-    // Sequence:
-    //   1. repairShip() — Python identifies ship from open dialog, opens hangar,
-    //                     repairs, double-clicks to activate. Dialog and hangar
-    //                     are fully managed inside Python.
-    //   2. Undock.
+    // performUndockStart  — steps 1 + 2: repair ship, click Undock, return.
+    //                       Caller transitions to UNDOCKING and records timestamp.
+    // performUndockFinish — step 3: close dialogs once the 15s timer expires.
     //
     // DO NOT close the mission dialog or click ship_hangar here:
     //   - The dialog is already gone after Python opens the hangar.
     //   - Clicking ship_hangar again would close it.
     // -----------------------------------------------------------------------
 
-    public boolean performPostAcceptFlow(Rectangle windowRect, Mission mission) {
-        log("=== Starting post-accept flow ===");
+    public boolean performUndockStart(Mission mission) {
+        log("=== Starting undock sequence ===");
 
         String missionTarget = (mission != null && mission.getTarget() != null
                 && !mission.getTarget().equals("Unknown"))
@@ -217,18 +215,18 @@ public class MissionProcessor {
         // 2 — Undock: Python boards the ship; Java clicks the main Undock button.
         //     If Python already triggered undock via context menu, clickUndock will
         //     fail to find the button (already gone) — that's fine, flow continues.
-        log("Step 2: Undocking");
+        log("Step 2: Clicking Undock");
         clickUndock();
-        sleep(15_000); // wait for undock animation to complete
+        // No sleep — ClientManager transitions to UNDOCKING and waits via timestamp timer.
 
-        // 3 — Close any open mission/dialog windows so travel templates are visible.
-        log("Step 3: Closing open windows");
-        closeAllDialogs();
-
-        log("=== Post-accept flow complete ===");
+        log("=== Undock clicked — entering UNDOCKING state ===");
         return true;
     }
 
+    /**
+     * Step 3 of the post-accept flow: close any lingering dialogs so travel
+     * templates are visible. Called by ClientManager once the 15s undock timer expires.
+     */
     // -----------------------------------------------------------------------
     // Mission turn-in
     // -----------------------------------------------------------------------
