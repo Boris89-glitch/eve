@@ -15,9 +15,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * ClientManager discovers EVE Online client windows, tracks each one by a
- * stable clientId, and drives the per-client state machine during
- * monitorClients() calls (every 1 second).
+ * Removed switching clients for now, only when in focus
  */
 public class ClientManager {
 
@@ -96,9 +94,6 @@ public class ClientManager {
                 return;
             }
 
-            // Only process whichever EVE client is currently in the foreground.
-            // Clients are stacked at the same screen position, so the bot can only
-            // see one at a time. Each has its own state tracked by title-based ID.
             ClientWindowInfo active = getForegroundClient();
             if (active == null) {
                 log("[ClientManager] No EVE client in foreground — skipping tick.");
@@ -439,8 +434,11 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     /**
-     * Returns the ClientWindowInfo whose HWND matches the current foreground window,
+     * Returns the ClientWindowInfo whose title matches the current foreground window,
      * or null if no registered EVE client is in the foreground.
+     * Title-based matching is used because HWND pointer comparison across JNA calls
+     * is unreliable — the same window can produce different pointer values depending
+     * on how the HWND was obtained.
      */
     private ClientWindowInfo getForegroundClient() {
         try {
@@ -448,15 +446,16 @@ public class ClientManager {
                     com.sun.jna.platform.win32.User32.INSTANCE;
             com.sun.jna.platform.win32.WinDef.HWND fg = user32.GetForegroundWindow();
             if (fg == null) return null;
-            long fgHwnd = com.sun.jna.Pointer.nativeValue(fg.getPointer());
+            char[] titleBuf = new char[512];
+            user32.GetWindowText(fg, titleBuf, titleBuf.length);
+            String fgTitle = com.sun.jna.Native.toString(titleBuf);
             for (ClientWindowInfo info : clientWindows.values()) {
-                if (info.getHandle() == fgHwnd) return info;
+                if (fgTitle.equals(info.getTitle())) return info;
             }
         } catch (Exception e) {
-            // JNA unavailable — fall back to first registered client
+            // JNA unavailable — no fallback, null means skip this tick
         }
-        // Fallback: return first client (single-client or testing mode)
-        return clientWindows.values().stream().findFirst().orElse(null);
+        return null;
     }
 
     // -----------------------------------------------------------------------
