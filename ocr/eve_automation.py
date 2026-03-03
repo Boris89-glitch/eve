@@ -653,13 +653,13 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
 
     # --- Step 0: Open Ship Hangar ---
     log.info("Step 0: Clicking 'Ship Hangar' to open hangar view...")
-    if not matcher.wait_and_click("ship_hangar", timeout=5.0, delay=1.0):
+    if not matcher.wait_and_click("ship_hangar", timeout=1.0, delay=1.0):
         log.error("'Ship Hangar' not found — cannot open hangar")
         sys.exit(1)
 
     # --- Step 1: Find ship icon and lock its coordinates ---
     log.info("Step 1: Locating ship icon '%s'...", ship_template)
-    ship_match = matcher.wait_for(ship_template, timeout=6.0)
+    ship_match = matcher.wait_for(ship_template, timeout=2.0)
     if not ship_match:
         log.error("Ship icon '%s' not found — cannot repair", ship_template)
         sys.exit(1)
@@ -676,7 +676,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
 
     # --- Step 3: Click "Get Repair Quote" ---
     log.info("Step 3: Clicking 'Get Repair Quote'...")
-    if not matcher.wait_and_click("get_repair_quote", timeout=5.0, delay=1.2):
+    if not matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=1.2):
         log.error("'Get Repair Quote' not found in context menu")
         sys.exit(1)
 
@@ -687,13 +687,13 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             "Ship already fully repaired — skipping repair steps, proceeding to activation."
         )
     else:
-        if not matcher.wait_and_click("repair", timeout=6.0, delay=0.8):
+        if not matcher.wait_and_click("repair", timeout=2.0, delay=0.8):
             log.error("'Repair' button not found in repair dialog")
             sys.exit(1)
 
         # --- Step 5: Confirm with "Yes" ---
         log.info("Step 5: Clicking 'Yes' to confirm repair...")
-        if not matcher.wait_and_click("repair_yes", timeout=5.0, delay=0.6):
+        if not matcher.wait_and_click("repair_yes", timeout=2.0, delay=0.6):
             log.warning(
                 "'repair_yes' not found — repair may have completed without confirmation"
             )
@@ -803,12 +803,12 @@ class EVEAutomation:
         If not found, fall back to double-clicking the agent_icon.
         """
         log.info("-- Step 1: Looking for 'Request Mission' button ...")
-        found = self._wait_click("request_mission", timeout=5.0)
+        found = self._wait_click("request_mission", timeout=1.0)
         if not found:
             log.info(
                 "   'Request Mission' not visible — trying agent_icon double-click fallback..."
             )
-            if not self._double_click("agent_icon", timeout=5.0):
+            if not self._double_click("agent_icon", timeout=1.0):
                 log.info("   Agent icon also not found — dialog may already be open.")
             else:
                 time.sleep(1.2)
@@ -869,7 +869,7 @@ class EVEAutomation:
         screen = self.matcher.screenshot_cv()
         if self.matcher.find("untrack", screen=screen):
             log.info("   'untrack' visible — mission already tracked, skipping.")
-        elif self.matcher.wait_for("track", timeout=6.0):
+        elif self.matcher.wait_for("track", timeout=1.0):
             log.info("   'track' visible — clicking Track.")
             self._click("track")
             time.sleep(0.3)
@@ -885,7 +885,7 @@ class EVEAutomation:
 
     def step_decline(self, mission: Optional[dict]) -> bool:
         log.info("-- Step 4: DECLINING '%s'", (mission or {}).get("title", "Unknown"))
-        if not self._wait_click("decline", timeout=5.0):
+        if not self._wait_click("decline", timeout=1.0):
             log.error("   Decline button not found!")
             return False
         return True
@@ -981,7 +981,7 @@ def cmd_check(threshold: float):
 def cmd_click(key: str, dry_run: bool, threshold: float):
     matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
     if dry_run:
-        match = matcher.wait_for(key, timeout=6.0)
+        match = matcher.wait_for(key, timeout=2.0)
         if match:
             log.info(
                 "[DRY RUN] Would left-click '%s' at %s", key, matcher.center(match)
@@ -991,14 +991,14 @@ def cmd_click(key: str, dry_run: bool, threshold: float):
             log.warning("[DRY RUN] Template '%s' not found", key)
             sys.exit(1)
     else:
-        ok = matcher.wait_and_click(key, timeout=6.0)
+        ok = matcher.wait_and_click(key, timeout=2.0)
         sys.exit(0 if ok else 1)
 
 
 def cmd_double_click(key: str, dry_run: bool, threshold: float):
     matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
     if dry_run:
-        match = matcher.wait_for(key, timeout=6.0)
+        match = matcher.wait_for(key, timeout=2.0)
         if match:
             log.info(
                 "[DRY RUN] Would double-click '%s' at %s", key, matcher.center(match)
@@ -1008,14 +1008,14 @@ def cmd_double_click(key: str, dry_run: bool, threshold: float):
             log.warning("[DRY RUN] Template '%s' not found", key)
             sys.exit(1)
     else:
-        ok = matcher.wait_and_double_click(key, timeout=6.0)
+        ok = matcher.wait_and_double_click(key, timeout=2.0)
         sys.exit(0 if ok else 1)
 
 
 def cmd_right_click(key: str, dry_run: bool, threshold: float):
     matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
     if dry_run:
-        match = matcher.wait_for(key, timeout=6.0)
+        match = matcher.wait_for(key, timeout=2.0)
         if match:
             log.info(
                 "[DRY RUN] Would right-click '%s' at %s", key, matcher.center(match)
@@ -1025,14 +1025,14 @@ def cmd_right_click(key: str, dry_run: bool, threshold: float):
             log.warning("[DRY RUN] Template '%s' not found", key)
             sys.exit(1)
     else:
-        ok = matcher.wait_and_right_click(key, timeout=6.0)
+        ok = matcher.wait_and_right_click(key, timeout=2.0)
         sys.exit(0 if ok else 1)
 
 
 def cmd_e_click(key: str, dry_run: bool, threshold: float):
     matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
     if dry_run:
-        match = matcher.wait_for(key, timeout=6.0)
+        match = matcher.wait_for(key, timeout=2.0)
         if match:
             log.info(
                 "[DRY RUN] Would E+left-click '%s' at %s", key, matcher.center(match)
@@ -1042,7 +1042,7 @@ def cmd_e_click(key: str, dry_run: bool, threshold: float):
             log.warning("[DRY RUN] Template '%s' not found", key)
             sys.exit(1)
     else:
-        ok = matcher.wait_and_e_click(key, timeout=6.0)
+        ok = matcher.wait_and_e_click(key, timeout=2.0)
         sys.exit(0 if ok else 1)
 
 

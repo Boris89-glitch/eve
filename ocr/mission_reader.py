@@ -115,7 +115,7 @@ class EVEMissionReader:
         parts = line.split(" ", 1)
         title = parts[1] if len(parts) == 2 else parts[0]
         # Remove trailing "Objectives" or "Objective"
-        title = re.sub(r"\s*objectives?\s*$", "", title, flags=re.I).strip()
+        title = re.sub(r"\s*objectives?\s*\.?\s*$", "", title, flags=re.I).strip()
         # Insert space at every lowercase->uppercase boundary (CamelCase split)
         title = re.sub(r"([a-z])([A-Z])", r"\1 \2", title)
         # Fix OCR-merged prepositions: "Duoof" -> "Duo of", "Heartof" -> "Heart of"
@@ -186,7 +186,7 @@ class EVEMissionReader:
         # Primary anchor: line ending with "Objectives" / "Objective"
         # e.g. "laraMesi AnomicAgentObjectives" — the title is embedded in this line.
         for i, line in enumerate(lines):
-            if re.search(r"objectives?\s*$", line, re.I):
+            if re.search(r"objectives?\s*\.?\s*$", line, re.I):
                 title = self.extract_title_from_line(line)
                 anchor_idx = i
                 break

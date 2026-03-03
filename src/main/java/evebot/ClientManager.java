@@ -224,7 +224,8 @@ public class ClientManager {
         log(clientId, "DECLINING — waiting for offer dialog to close...");
 
         if (!missionProcessor.waitForDialogClosed()) {
-            log(clientId, "Dialog still visible — will retry next tick.");
+            log(clientId, "Dialog still visible — double-clicking agent icon to dismiss.");
+            missionProcessor.doubleClickAgentIcon();
             return;
         }
 
