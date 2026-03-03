@@ -152,6 +152,21 @@ public class MissionProcessor {
         sleep(1200);
     }
 
+    public void pressCtrlR() {
+        log("Pressing Ctrl+R (reload modules)");
+        ocrBridge.ctrlR();
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void closeAllDialogs() {
+        log("Closing all open dialogs (loop until X gone)");
+        while (ocrBridge.findAnyTemplate("close_active_window") != null) {
+            ocrBridge.clickTemplate("close_active_window");
+            sleep(500);
+        }
+        log("No more dialogs visible.");
+    }
+
     public void closeMissionDialog() {
         log("Closing mission dialog (F key)");
         try {
@@ -204,14 +219,11 @@ public class MissionProcessor {
         //     fail to find the button (already gone) — that's fine, flow continues.
         log("Step 2: Undocking");
         clickUndock();
-        sleep(10_000); // wait for undock animation to complete
+        sleep(15_000); // wait for undock animation to complete
 
         // 3 — Close any open mission/dialog windows so travel templates are visible.
         log("Step 3: Closing open windows");
-        ocrBridge.clickTemplate("close_active_window");
-        sleep(500);
-        ocrBridge.clickTemplate("close_active_window");
-        sleep(500);
+        closeAllDialogs();
 
         log("=== Post-accept flow complete ===");
         return true;

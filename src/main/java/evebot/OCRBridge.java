@@ -217,6 +217,14 @@ public class OCRBridge {
     }
 
     /**
+     * Hold Ctrl and press R — reloads modules in EVE.
+     */
+    public void ctrlR() {
+        System.out.printf("[%s] [OCRBridge] ctrlR (reload modules)%n", ts());
+        runPython("python", automationScriptPath, "--ctrl-r");
+    }
+
+    /**
      * Repair + activate the correct ship for the given mission title.
      *
      * Calls: eve_automation.py --repair-ship "<missionTitle>"

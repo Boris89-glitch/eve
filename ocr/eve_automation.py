@@ -1046,6 +1046,29 @@ def cmd_e_click(key: str, dry_run: bool, threshold: float):
         sys.exit(0 if ok else 1)
 
 
+def cmd_ctrl_r(dry_run: bool):
+    if dry_run:
+        log.info("[DRY RUN] Would press Ctrl+R (reload modules)")
+        sys.exit(0)
+    VK_CONTROL = 0x11
+    VK_R = 0x52
+    try:
+        import win32api, win32con
+        win32api.keybd_event(VK_CONTROL, 0, 0, 0)          # Ctrl down
+        time.sleep(0.05)
+        win32api.keybd_event(VK_R, 0, 0, 0)                # R down
+        time.sleep(0.05)
+        win32api.keybd_event(VK_R, 0, win32con.KEYEVENTF_KEYUP, 0)       # R up
+        time.sleep(0.05)
+        win32api.keybd_event(VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0) # Ctrl up
+        log.info("win32 Ctrl+R sent (reload modules)")
+    except ImportError:
+        import pyautogui
+        pyautogui.hotkey('ctrl', 'r')
+        log.info("pyautogui Ctrl+R sent (reload modules)")
+    sys.exit(0)
+
+
 # -----------------------------------------------------------------------------
 # CLI entry point
 # -----------------------------------------------------------------------------
@@ -1082,6 +1105,9 @@ Examples:
     )
     parser.add_argument(
         "--e-click", metavar="KEY", help="Hold E + left-click a template then exit"
+    )
+    parser.add_argument(
+        "--ctrl-r", action="store_true", help="Hold Ctrl and press R (reload modules), then exit"
     )
     parser.add_argument(
         "--repair-ship",
@@ -1137,6 +1163,10 @@ Examples:
 
     if getattr(args, "e_click", None):
         cmd_e_click(args.e_click, dry_run=args.dry_run, threshold=args.threshold)
+        return
+
+    if getattr(args, "ctrl_r", False):
+        cmd_ctrl_r(dry_run=args.dry_run)
         return
 
     if getattr(args, "repair_ship", None):

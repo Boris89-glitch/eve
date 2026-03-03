@@ -299,6 +299,8 @@ public class ClientManager {
         ClientState cs = stateManager.getState(clientId);
 
         if (!cs.isDestinationSet()) {
+            log(clientId, "TRAVEL: pressing Ctrl+R to reload modules.");
+            missionProcessor.pressCtrlR();
             log(clientId, "TRAVEL: clicking set_destination.");
             missionProcessor.clickSetDestination();
             cs.setDestinationSet(true);
