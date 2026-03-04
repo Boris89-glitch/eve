@@ -29,10 +29,18 @@ public class ClientState {
         ACCEPTED,
         REPAIRING,
         UNDOCKING,    // undock clicked, waiting 15s for animation to complete
-        TRAVEL,       // undocked and warping to mission site
+        TRAVEL,       // one-shot setup: close dialogs, reload modules, set destination
+        WARPING,      // in warp — polling warp_active until it disappears, then → IDLE
         IN_COMBAT,
-        RETURNING,
+        RETURNING,    // one-shot setup: set destination home
         COMPLETING
+    }
+
+    /** Tracks which leg of navigation IDLE should handle after a warp lands. */
+    public enum TravelPhase {
+        NONE,            // at station — check missions normally
+        TO_MISSION,      // en route to mission — look for stargates / warp_to_location / activate_gate
+        RETURNING_HOME   // heading back   — look for stargates / dock
     }
 
     // -----------------------------------------------------------------------
@@ -57,6 +65,15 @@ public class ClientState {
 
     /** Timestamp when Undock was clicked — used to track the 15s undock animation wait. */
     private LocalDateTime undockStartTime = LocalDateTime.MIN;
+
+    /** Timestamp when a warp action was initiated — used by WARPING state. */
+    private LocalDateTime warpStartTime = LocalDateTime.MIN;
+
+    /** Timestamp of the last warp_active template check in WARPING state. */
+    private LocalDateTime lastWarpCheck = LocalDateTime.MIN;
+
+    /** Which navigation leg is active — used by IDLE to know what to do after a warp lands. */
+    private TravelPhase travelPhase = TravelPhase.NONE;
 
     // -----------------------------------------------------------------------
 
@@ -86,6 +103,9 @@ public class ClientState {
             this.warpedToLocation = false;
             this.lastTravelAction = LocalDateTime.MIN;
         }
+        if (state == State.WARPING) {
+            this.lastWarpCheck = LocalDateTime.MIN;
+        }
     }
 
     public Mission getCurrentMission() { return currentMission; }
@@ -109,6 +129,15 @@ public class ClientState {
 
     public LocalDateTime getUndockStartTime()                { return undockStartTime; }
     public void          setUndockStartTime(LocalDateTime t) { this.undockStartTime = t; }
+
+    public LocalDateTime getWarpStartTime()                { return warpStartTime; }
+    public void          setWarpStartTime(LocalDateTime t) { this.warpStartTime = t; }
+
+    public LocalDateTime getLastWarpCheck()                { return lastWarpCheck; }
+    public void          setLastWarpCheck(LocalDateTime t) { this.lastWarpCheck = t; }
+
+    public TravelPhase getTravelPhase()              { return travelPhase; }
+    public void        setTravelPhase(TravelPhase p) { this.travelPhase = p; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

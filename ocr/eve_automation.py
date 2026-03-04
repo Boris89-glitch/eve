@@ -96,6 +96,7 @@ TEMPLATE_FILES = {
     "stargate": "stargate",
     "warp_to_location": "warp_to_location",
     "activate_gate": "activate_gate",
+    "warp_active": "warp_active",
     "dock": "dock",
     "ok": "ok",
     # Agent interaction

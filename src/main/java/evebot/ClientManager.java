@@ -135,8 +135,9 @@ public class ClientManager {
             case DECLINING:         handleDeclining(clientId, window);        break;
             case ACCEPTED:          handleAccepted(clientId, window);         break;
             case REPAIRING:         handleRepairing(clientId, window);        break;
-            case UNDOCKING: /* timer-driven — handled by checkUndockTimers() */ break;
-            case TRAVEL:    handleTravel(clientId, window);    break;
+            case UNDOCKING: /* timer-driven — handled by checkUndockTimers() */  break;
+            case TRAVEL:    handleTravel(clientId, window);                      break;
+            case WARPING:   handleWarping(clientId, window);                     break;
             case IN_COMBAT: handleInCombat(clientId, window);  break;
             case RETURNING: handleReturning(clientId, window); break;
             case COMPLETING:
@@ -152,6 +153,74 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleIdle(String clientId, ClientWindowInfo window) {
+        // 2. Phase-based navigation — handles transit after each warp lands.
+        ClientState cs = stateManager.getState(clientId);
+
+        if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION) {
+            String found = missionProcessor.detectTravelUI();
+            if (found == null) {
+                log(clientId, "IDLE[TO_MISSION]: no navigation element visible — waiting.");
+                return;
+            }
+            switch (found) {
+                case "activate_gate":
+                    log(clientId, "IDLE[TO_MISSION]: activate_gate — E+clicking, entering combat.");
+                    stateManager.setState(clientId, ClientState.State.IN_COMBAT);
+                    new Thread(() -> missionProcessor.eClickTemplate("activate_gate")).start();
+                    break;
+                case "warp_to_location":
+                    log(clientId, "IDLE[TO_MISSION]: warp_to_location — warping into mission space.");
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                    new Thread(() -> missionProcessor.clickWarpToLocation()).start();
+                    break;
+                case "stargate":
+                    log(clientId, "IDLE[TO_MISSION]: stargate — E+clicking to jump.");
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                    new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
+                    break;
+                default:
+                    log(clientId, "IDLE[TO_MISSION]: unexpected '" + found + "' — ignoring.");
+            }
+            return;
+        }
+
+        if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
+            String found = missionProcessor.detectReturningUI();
+            if (found == null) {
+                log(clientId, "IDLE[RETURNING_HOME]: no navigation element visible — waiting.");
+                return;
+            }
+            switch (found) {
+                case "dock":
+                    log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
+                    missionProcessor.clickDock();
+                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    break;
+                case "stargate":
+                    log(clientId, "IDLE[RETURNING_HOME]: stargate — E+clicking to jump.");
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                    new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
+                    break;
+                default:
+                    log(clientId, "IDLE[RETURNING_HOME]: unexpected '" + found + "' — ignoring.");
+            }
+            return;
+        }
+
+        // 3. NONE phase — check for travel UI first (handles restart mid-travel or post-UNDOCKING).
+        // If stargate / warp_to_location / activate_gate is visible, the ship is in transit —
+        // switch to TO_MISSION phase so navigation resumes correctly next tick.
+        String travelUI = missionProcessor.detectTravelUI();
+        if (travelUI != null) {
+            log(clientId, "IDLE: travel UI '" + travelUI + "' detected — resuming TO_MISSION navigation.");
+            cs.setTravelPhase(ClientState.TravelPhase.TO_MISSION);
+            return;
+        }
+
+        // Standard mission dialog logic.
         // Single Python call for all dialog state detection — replaces the old
         // chain of 3-6 sequential waitForTemplate calls (was ~18s overhead).
         MissionProcessor.DialogState dialogState = missionProcessor.detectDialog();
@@ -298,78 +367,20 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // TRAVEL — set destination once, then E+click stargates until at mission site
-    //
-    // Each tick (non-blocking):
-    //   1. First entry: click set_destination, mark done, return.
-    //   2. Scan for:  activate_gate → E+click → IN_COMBAT
-    //                 warp_to_location → click it (warp to mission pocket)
-    //                 stargate → E+click (jump through gate in transit)
-    //                 null → still warping, wait next tick.
+    // TRAVEL — one-shot setup: close dialogs, reload modules, set destination.
+    //          Navigation (stargates / warp_to_location / activate_gate) is
+    //          handled by IDLE + WARPING cycling after this.
     // -----------------------------------------------------------------------
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
-        ClientState cs = stateManager.getState(clientId);
-
-        if (!cs.isDestinationSet()) {
-            log(clientId, "TRAVEL: closing any open dialogs from undock.");
-            missionProcessor.closeAllDialogs();
-            log(clientId, "TRAVEL: pressing Ctrl+R to reload modules.");
-            missionProcessor.pressCtrlR();
-            log(clientId, "TRAVEL: clicking set_destination.");
-            missionProcessor.clickSetDestination();
-            cs.setDestinationSet(true);
-            return;
-        }
-
-        // Wait after each jump before checking again
-        long secsSinceJump = Duration.between(cs.getLastTravelAction(), LocalDateTime.now()).getSeconds();
-        if (secsSinceJump < JUMP_COOLDOWN_SECS) {
-            log(clientId, "TRAVEL: jump cooldown (" + secsSinceJump + "/" + JUMP_COOLDOWN_SECS + "s).");
-            return;
-        }
-
-        // After warp_to_location was clicked we are in the mission system — only activate_gate matters
-        if (cs.isWarpedToLocation()) {
-            String gate = missionProcessor.detectActivateGateOnly();
-            if (gate == null) {
-                log(clientId, "TRAVEL: in mission system — waiting for activate_gate.");
-                return;
-            }
-            log(clientId, "TRAVEL: activate_gate visible — E+clicking, entering combat.");
-            cs.setDestinationSet(false);
-            stateManager.setState(clientId, ClientState.State.IN_COMBAT);
-            new Thread(() -> missionProcessor.eClickTemplate("activate_gate")).start();
-            return;
-        }
-
-        String found = missionProcessor.detectTravelUI();
-        if (found == null) {
-            log(clientId, "TRAVEL: warping — nothing to click yet.");
-            return;
-        }
-
-        switch (found) {
-            case "activate_gate":
-                log(clientId, "TRAVEL: activate_gate visible — E+clicking, entering combat.");
-                cs.setDestinationSet(false);
-                stateManager.setState(clientId, ClientState.State.IN_COMBAT);
-                new Thread(() -> missionProcessor.eClickTemplate("activate_gate")).start();
-                break;
-            case "warp_to_location":
-                log(clientId, "TRAVEL: warp_to_location visible — clicking, entering mission system.");
-                cs.setWarpedToLocation(true);
-                cs.setLastTravelAction(LocalDateTime.now());
-                new Thread(() -> missionProcessor.clickWarpToLocation()).start();
-                break;
-            case "stargate":
-                log(clientId, "TRAVEL: stargate visible — E+clicking to jump.");
-                cs.setLastTravelAction(LocalDateTime.now());
-                new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
-                break;
-            default:
-                log(clientId, "TRAVEL: unexpected UI element '" + found + "' — ignoring.");
-        }
+        log(clientId, "TRAVEL: closing any open dialogs from undock.");
+        missionProcessor.closeAllDialogs();
+        log(clientId, "TRAVEL: pressing Ctrl+R to reload modules.");
+        missionProcessor.pressCtrlR();
+        log(clientId, "TRAVEL: clicking set_destination.");
+        missionProcessor.clickSetDestination();
+        stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.TO_MISSION);
+        stateManager.setState(clientId, ClientState.State.IDLE);
     }
 
     // -----------------------------------------------------------------------
@@ -388,53 +399,15 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // RETURNING — set destination once, then E+click stargates until dock visible
-    //
-    // Each tick (non-blocking):
-    //   1. First entry: click set_destination (back to agent station), mark done, return.
-    //   2. Scan for:  dock → click → COMPLETING
-    //                 stargate → E+click (jump through gate)
-    //                 null → still warping, wait next tick.
+    // RETURNING — one-shot setup: set destination home.
+    //             Navigation (stargates / dock) is handled by IDLE + WARPING cycling.
     // -----------------------------------------------------------------------
 
     private void handleReturning(String clientId, ClientWindowInfo window) {
-        ClientState cs = stateManager.getState(clientId);
-
-        if (!cs.isDestinationSet()) {
-            log(clientId, "RETURNING: clicking set_destination.");
-            missionProcessor.clickSetDestination();
-            cs.setDestinationSet(true);
-            return;
-        }
-
-        // Wait after each jump before checking again
-        long secsSinceJump = Duration.between(cs.getLastTravelAction(), LocalDateTime.now()).getSeconds();
-        if (secsSinceJump < JUMP_COOLDOWN_SECS) {
-            log(clientId, "RETURNING: jump cooldown (" + secsSinceJump + "/" + JUMP_COOLDOWN_SECS + "s).");
-            return;
-        }
-
-        String found = missionProcessor.detectReturningUI();
-        if (found == null) {
-            log(clientId, "RETURNING: warping — nothing to click yet.");
-            return;
-        }
-
-        switch (found) {
-            case "dock":
-                log(clientId, "RETURNING: dock visible — docking.");
-                missionProcessor.clickDock();
-                cs.setDestinationSet(false);
-                stateManager.setState(clientId, ClientState.State.COMPLETING);
-                break;
-            case "stargate":
-                log(clientId, "RETURNING: stargate visible — E+clicking to jump.");
-                cs.setLastTravelAction(LocalDateTime.now());
-                new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
-                break;
-            default:
-                log(clientId, "RETURNING: unexpected UI element '" + found + "' — ignoring.");
-        }
+        log(clientId, "RETURNING: clicking set_destination.");
+        missionProcessor.clickSetDestination();
+        stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
+        stateManager.setState(clientId, ClientState.State.IDLE);
     }
 
     // -----------------------------------------------------------------------
@@ -446,6 +419,7 @@ public class ClientManager {
         missionProcessor.clickCompleteMission();
         log(clientId, "COMPLETING: clicking OK to collect rewards.");
         missionProcessor.clickOk();
+        stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
 
@@ -472,6 +446,56 @@ public class ClientManager {
                 }
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // WARPING — poll warp_active until it disappears, then return to IDLE.
+    //
+    // Timeline:
+    //   0–6s   : grace period — warp_active may not have appeared yet, skip check.
+    //   5s+    : check warp_active every 20s; when gone → IDLE.
+    // -----------------------------------------------------------------------
+
+    private void handleWarping(String clientId, ClientWindowInfo window) {
+        ClientState cs = stateManager.getState(clientId);
+        long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
+
+        if (elapsed < 6) {
+            // Log only on the very first tick of the grace period to avoid spam.
+            if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
+                log(clientId, "WARPING: grace period — waiting for warp to begin.");
+                cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker (not a real check time)
+            }
+            return;
+        }
+
+        if (!isWarpCheckDue(cs)) {
+            return; // silent wait — no log spam
+        }
+
+        cs.setLastWarpCheck(LocalDateTime.now());
+        if (!missionProcessor.isWarpActive()) {
+            log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
+            stateManager.setState(clientId, ClientState.State.IDLE);
+        } else {
+            log(clientId, "WARPING: still in warp (" + elapsed + "s).");
+        }
+    }
+
+    /**
+     * Returns true if a WARPING client is due for a warp_active template check.
+     * - Returns false during the 6s grace period.
+     * - Returns true immediately after grace ends (first real check).
+     * - Returns true every 20s after the first real check.
+     *
+     * Uses LocalDateTime.MIN.plusNanos(1) as a sentinel meaning "grace logged, no real check yet".
+     */
+    private boolean isWarpCheckDue(ClientState cs) {
+        long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
+        if (elapsed < 6) return false;
+        // MIN or MIN+1ns → no real check done yet → due immediately
+        if (cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1))) return true;
+        return Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds() >= 20;
     }
 
     // -----------------------------------------------------------------------

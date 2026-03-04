@@ -212,11 +212,15 @@ public class MissionProcessor {
         }
         sleep(500);
 
-        // 2 — Undock: Python boards the ship; Java clicks the main Undock button.
-        //     If Python already triggered undock via context menu, clickUndock will
-        //     fail to find the button (already gone) — that's fine, flow continues.
-        log("Step 2: Clicking Undock");
-        clickUndock();
+        // 2 — Undock: only click the button if it is still visible.
+        //     Python may have already triggered undock via context menu during repairShip,
+        //     in which case the button is gone and there is nothing to do here.
+        log("Step 2: Clicking Undock (if visible)");
+        if (ocrBridge.findAnyTemplate("undock") != null) {
+            clickUndock();
+        } else {
+            log("Undock button not visible — Python already triggered undock, skipping.");
+        }
         // No sleep — ClientManager transitions to UNDOCKING and waits via timestamp timer.
 
         log("=== Undock clicked — entering UNDOCKING state ===");
@@ -313,6 +317,14 @@ public class MissionProcessor {
      */
     public boolean isSetDestinationVisible() {
         return ocrBridge.findAnyTemplate("set_destination") != null;
+    }
+
+    /**
+     * Returns true if the warp_active template is visible — i.e. the ship is currently in warp.
+     * Used by the WARPING state to know when warp has ended.
+     */
+    public boolean isWarpActive() {
+        return ocrBridge.findAnyTemplate("warp_active") != null;
     }
 
     // -----------------------------------------------------------------------
