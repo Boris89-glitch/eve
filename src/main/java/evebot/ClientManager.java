@@ -497,12 +497,33 @@ public class ClientManager {
             com.sun.jna.platform.win32.WinDef.HWND hwnd =
                     new com.sun.jna.platform.win32.WinDef.HWND(
                             com.sun.jna.Pointer.createConstant(window.getHandle()));
-            // Windows blocks SetForegroundWindow unless the process has foreground rights.
-            // Simulating an Alt keypress via Robot grants those rights (standard workaround).
-            java.awt.Robot robot = new java.awt.Robot();
-            robot.keyPress(java.awt.event.KeyEvent.VK_ALT);
+
+            // AttachThreadInput grants our thread foreground rights by attaching it to
+            // the input queue of whichever thread currently owns the foreground window.
+            // This is the correct Windows API approach; the old Robot Alt-key hack was
+            // unreliable because it depended on a race between the simulated keypress
+            // and SetForegroundWindow being scheduled.
+            com.sun.jna.platform.win32.WinDef.HWND fg = user32.GetForegroundWindow();
+            int fgThread = (fg != null) ? user32.GetWindowThreadProcessId(fg, null) : 0;
+            int myThread = com.sun.jna.platform.win32.Kernel32.INSTANCE.GetCurrentThreadId();
+
+            boolean attached = false;
+            if (fgThread != 0 && fgThread != myThread) {
+                attached = user32.AttachThreadInput(
+                        new com.sun.jna.platform.win32.WinDef.DWORD(myThread),
+                        new com.sun.jna.platform.win32.WinDef.DWORD(fgThread), true);
+            }
+
+            user32.BringWindowToTop(hwnd);
             user32.SetForegroundWindow(hwnd);
-            robot.keyRelease(java.awt.event.KeyEvent.VK_ALT);
+
+            if (attached) {
+                user32.AttachThreadInput(
+                        new com.sun.jna.platform.win32.WinDef.DWORD(myThread),
+                        new com.sun.jna.platform.win32.WinDef.DWORD(fgThread), false);
+            }
+
+            Thread.sleep(300); // Give the OS time to complete the focus switch
         } catch (Exception e) {
             log("[ClientManager] Failed to bring '" + window.getTitle() + "' to foreground: " + e.getMessage());
         }
