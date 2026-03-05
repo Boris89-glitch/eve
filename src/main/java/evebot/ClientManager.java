@@ -96,8 +96,15 @@ public class ClientManager {
             }
 
             checkUndockTimers();
-            ClientWindowInfo active = getForegroundClient();
 
+            // If a WARPING client is due for a check, bring it to foreground first so
+            // it can be processed and transition out of WARPING when the warp ends.
+            ClientWindowInfo warpCheckDue = findWarpingClientDueForCheck();
+            if (warpCheckDue != null) {
+                bringToForeground(warpCheckDue);
+            }
+
+            ClientWindowInfo active = (warpCheckDue != null) ? warpCheckDue : getForegroundClient();
             if (active == null) {
                 log("[ClientManager] No EVE client in foreground — skipping tick.");
                 return;
@@ -511,6 +518,19 @@ public class ClientManager {
     // Window focus switching
     // -----------------------------------------------------------------------
 
+    /** Returns a WARPING client whose warp_active check is due, or null if none. */
+    private ClientWindowInfo findWarpingClientDueForCheck() {
+        for (ClientWindowInfo info : clientWindows.values()) {
+            String id = info.getClientId();
+            if (stateManager.getStateEnum(id) == ClientState.State.WARPING) {
+                if (isWarpCheckDue(stateManager.getState(id))) {
+                    return info;
+                }
+            }
+        }
+        return null;
+    }
+
     /** Returns the first registered client that is not UNDOCKING and is not {@code excludeId}. */
     private ClientWindowInfo findNonUndockingClient(String excludeId) {
         for (ClientWindowInfo info : clientWindows.values()) {
@@ -522,44 +542,17 @@ public class ClientManager {
         return null;
     }
 
-    /** Brings the given window to the foreground using SetForegroundWindow. */
+    /**
+     * Brings the given window to the foreground by clicking its EVE-O Preview
+     * thumbnail. The template key is derived from the client ID:
+     * "eve_Meeshayl_Lancer" → "meeshayl_lancer".
+     */
     private void bringToForeground(ClientWindowInfo window) {
-        try {
-            com.sun.jna.platform.win32.User32 user32 =
-                    com.sun.jna.platform.win32.User32.INSTANCE;
-            com.sun.jna.platform.win32.WinDef.HWND hwnd =
-                    new com.sun.jna.platform.win32.WinDef.HWND(
-                            com.sun.jna.Pointer.createConstant(window.getHandle()));
-
-            // AttachThreadInput grants our thread foreground rights by attaching it to
-            // the input queue of whichever thread currently owns the foreground window.
-            // This is the correct Windows API approach; the old Robot Alt-key hack was
-            // unreliable because it depended on a race between the simulated keypress
-            // and SetForegroundWindow being scheduled.
-            com.sun.jna.platform.win32.WinDef.HWND fg = user32.GetForegroundWindow();
-            int fgThread = (fg != null) ? user32.GetWindowThreadProcessId(fg, null) : 0;
-            int myThread = com.sun.jna.platform.win32.Kernel32.INSTANCE.GetCurrentThreadId();
-
-            boolean attached = false;
-            if (fgThread != 0 && fgThread != myThread) {
-                attached = user32.AttachThreadInput(
-                        new com.sun.jna.platform.win32.WinDef.DWORD(myThread),
-                        new com.sun.jna.platform.win32.WinDef.DWORD(fgThread), true);
-            }
-
-            user32.BringWindowToTop(hwnd);
-            user32.SetForegroundWindow(hwnd);
-
-            if (attached) {
-                user32.AttachThreadInput(
-                        new com.sun.jna.platform.win32.WinDef.DWORD(myThread),
-                        new com.sun.jna.platform.win32.WinDef.DWORD(fgThread), false);
-            }
-
-            Thread.sleep(300); // Give the OS time to complete the focus switch
-        } catch (Exception e) {
-            log("[ClientManager] Failed to bring '" + window.getTitle() + "' to foreground: " + e.getMessage());
-        }
+        String templateKey = window.getClientId()
+                .replaceFirst("^eve_", "")
+                .toLowerCase();
+        log("[ClientManager] Clicking EVE-O Preview thumbnail '" + templateKey + "'");
+        missionProcessor.clickTemplate(templateKey);
     }
 
     // -----------------------------------------------------------------------

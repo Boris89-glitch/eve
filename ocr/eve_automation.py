@@ -123,6 +123,9 @@ TEMPLATE_FILES = {
     "ship_sansha": "ship_sansha",
     "ship_angel": "ship_angel",
     "ship_sk": "ship_sk",
+    # EVE-O Preview thumbnails — clicked to switch client focus
+    "gravitar": "gravitar",
+    "meeshayl_lancer": "meeshayl_lancer",
 }
 
 # Maps mission dialog template keys → ship template keys.

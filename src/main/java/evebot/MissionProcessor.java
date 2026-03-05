@@ -327,6 +327,11 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate("warp_active") != null;
     }
 
+    /** Generic left-click on any registered template. */
+    public void clickTemplate(String key) {
+        ocrBridge.clickTemplate(key);
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
