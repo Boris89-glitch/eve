@@ -24,9 +24,10 @@ public class ClientManager {
     private final MissionConfig    missionConfig;
     private final Gson             gson;
 
-    private final Map<String, Rectangle>        clientMissionAreas = new ConcurrentHashMap<>();
-    private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
-    private final Map<String, Integer>          agentRetries       = new ConcurrentHashMap<>();
+    private final Map<String, Rectangle>        clientMissionAreas  = new ConcurrentHashMap<>();
+    private final Map<String, ClientWindowInfo> clientWindows       = new ConcurrentHashMap<>();
+    private final Map<String, Integer>          agentRetries        = new ConcurrentHashMap<>();
+    private final Map<String, LocalDateTime>    checkingSwitchTime  = new ConcurrentHashMap<>();
 
     /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
     private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
@@ -97,20 +98,6 @@ public class ClientManager {
 
             checkUndockTimers();
             ClientWindowInfo active = getForegroundClient();
-
-            // If the foreground client is UNDOCKING there is nothing to do for it —
-            // switch focus to another client that can actually be processed.
-            if (active != null && stateManager.getStateEnum(active.getClientId()) == ClientState.State.UNDOCKING) {
-                ClientWindowInfo other = findNonUndockingClient(active.getClientId());
-                if (other != null) {
-                    log(active.getClientId(), "UNDOCKING — switching focus to " + other.getClientId());
-                    bringToForeground(other);
-                    active = other;
-                } else {
-                    log(active.getClientId(), "UNDOCKING — no other client ready, waiting.");
-                    return;
-                }
-            }
 
             if (active == null) {
                 log("[ClientManager] No EVE client in foreground — skipping tick.");
@@ -264,7 +251,20 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleCheckingMissions(String clientId, ClientWindowInfo window) {
-        Mission mission = stateManager.getState(clientId).getCurrentMission();
+        ClientState cs = stateManager.getState(clientId);
+        long checkingElapsed = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
+        LocalDateTime lastSwitch = checkingSwitchTime.getOrDefault(clientId, LocalDateTime.MIN);
+        if (checkingElapsed >= 40 && lastSwitch.isBefore(cs.getLastStateChange())) {
+            ClientWindowInfo other = findNonUndockingClient(clientId);
+            if (other != null) {
+                log(clientId, "CHECKING_MISSIONS: 40s elapsed without accept — switching focus to " + other.getClientId());
+                checkingSwitchTime.put(clientId, LocalDateTime.now());
+                bringToForeground(other);
+                return;
+            }
+        }
+
+        Mission mission = cs.getCurrentMission();
 
         if (mission == null) {
             Rectangle missionArea = getMissionAreaForClient(clientId);
@@ -473,11 +473,21 @@ public class ClientManager {
             return; // silent wait — no log spam
         }
 
+        boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
         cs.setLastWarpCheck(LocalDateTime.now());
         if (!missionProcessor.isWarpActive()) {
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
         } else {
+            if (firstCheck) {
+                ClientWindowInfo other = findNonUndockingClient(clientId);
+                if (other != null) {
+                    log(clientId, "WARPING: warp confirmed — switching focus to " + other.getClientId());
+                    bringToForeground(other);
+                } else {
+                    log(clientId, "WARPING: warp confirmed — no other client to switch to.");
+                }
+            }
             log(clientId, "WARPING: still in warp (" + elapsed + "s).");
         }
     }
