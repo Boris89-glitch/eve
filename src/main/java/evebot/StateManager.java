@@ -15,20 +15,10 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * StateManager tracks the current state of all EVE clients in memory.
- *
- * Testing convenience: new clients start in CHECKING_MISSIONS instead of IDLE
- * so the bot immediately evaluates whatever mission dialog is on screen.
- * Change DEFAULT_START_STATE back to IDLE for production.
- *
- * State persistence (saveStates / loadStates) is disabled during testing —
- * re-enable the commented lines in Main.java when ready.
  */
 public class StateManager {
 
-    // -----------------------------------------------------------------------
-    // Testing convenience — change to IDLE for production
-    // -----------------------------------------------------------------------
-    private static final ClientState.State DEFAULT_START_STATE = ClientState.State.CHECKING_MISSIONS;
+    private static final ClientState.State DEFAULT_START_STATE = ClientState.State.IDLE;
 
     // -----------------------------------------------------------------------
     // Fields
@@ -133,12 +123,7 @@ public class StateManager {
     // State access
     // -----------------------------------------------------------------------
 
-    /**
-     * Returns the state for a client, creating one at DEFAULT_START_STATE if
-     * none exists. During testing this means CHECKING_MISSIONS — the bot
-     * immediately evaluates whatever dialog is on screen without waiting for
-     * an IDLE → dialog-detect cycle.
-     */
+    /** Returns the state for a client, creating one at IDLE if none exists. */
     public ClientState getState(String clientId) {
         return states.computeIfAbsent(clientId, id -> {
             ClientState cs = new ClientState(id);

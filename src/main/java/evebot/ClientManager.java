@@ -24,10 +24,9 @@ public class ClientManager {
     private final MissionConfig    missionConfig;
     private final Gson             gson;
 
-    private final Map<String, Rectangle>        clientMissionAreas  = new ConcurrentHashMap<>();
-    private final Map<String, ClientWindowInfo> clientWindows       = new ConcurrentHashMap<>();
-    private final Map<String, Integer>          agentRetries        = new ConcurrentHashMap<>();
-    private final Map<String, LocalDateTime>    checkingSwitchTime  = new ConcurrentHashMap<>();
+    private final Map<String, Rectangle>        clientMissionAreas = new ConcurrentHashMap<>();
+    private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
+    private final Map<String, Integer>          agentRetries       = new ConcurrentHashMap<>();
 
     /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
     private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
@@ -253,12 +252,12 @@ public class ClientManager {
     private void handleCheckingMissions(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
         long checkingElapsed = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
-        LocalDateTime lastSwitch = checkingSwitchTime.getOrDefault(clientId, LocalDateTime.MIN);
-        if (checkingElapsed >= 40 && lastSwitch.isBefore(cs.getLastStateChange())) {
+        if (checkingElapsed >= 40) {
             ClientWindowInfo other = findNonUndockingClient(clientId);
             if (other != null) {
-                log(clientId, "CHECKING_MISSIONS: 40s elapsed without accept — switching focus to " + other.getClientId());
-                checkingSwitchTime.put(clientId, LocalDateTime.now());
+                log(clientId, "CHECKING_MISSIONS: 40s elapsed without accept — returning to IDLE and switching focus to " + other.getClientId());
+                cs.setCurrentMission(null);
+                stateManager.setState(clientId, ClientState.State.IDLE);
                 bringToForeground(other);
                 return;
             }
@@ -306,8 +305,8 @@ public class ClientManager {
         log(clientId, "DECLINING — waiting for offer dialog to close...");
 
         if (!missionProcessor.waitForDialogClosed()) {
-            log(clientId, "Dialog still visible — double-clicking agent icon to dismiss.");
-            missionProcessor.doubleClickAgentIcon();
+            log(clientId, "Decline still visible — clicking decline to confirm.");
+            missionProcessor.clickDeclineButton();
             return;
         }
 
