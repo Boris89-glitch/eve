@@ -31,11 +31,7 @@ public class ClientManager {
     /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
     private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
 
-    private static final int  MAX_AGENT_RETRIES  = 3;
-    /** Seconds to wait after each gate jump before checking again.
-     *  Must be longer than the warp time to the next gate — gates are visible in
-     *  the overview while warping, so a short cooldown causes repeated clicks. */
-    private static final long JUMP_COOLDOWN_SECS  = 30;
+    private static final int  MAX_AGENT_RETRIES  = 2;
     private static final long UNDOCK_WAIT_SECS    = 13;
 
     public ClientManager(StateManager stateManager) {
@@ -97,19 +93,27 @@ public class ClientManager {
 
             checkUndockTimers();
 
-            // If a WARPING client is due for a check, bring it to foreground first so
-            // it can be processed and transition out of WARPING when the warp ends.
-            ClientWindowInfo warpCheckDue = findWarpingClientDueForCheck();
-            if (warpCheckDue != null) {
-                bringToForeground(warpCheckDue);
+            // If a client is in the WARPING grace period (just clicked a stargate/warp,
+            // < 6s ago), it MUST stay in foreground — switch back to it if needed.
+            // Otherwise, if a WARPING client's check is due, switch to it — unless
+            // the foreground client is IDLE (needs to process its next action first).
+            ClientWindowInfo fg = getForegroundClient();
+            ClientWindowInfo graceClient = findWarpingClientInGracePeriod();
+
+            if (graceClient != null) {
+                // Grace period takes priority — ensure this client stays focused.
+                if (fg == null || !fg.getClientId().equals(graceClient.getClientId())) {
+                    bringToForeground(graceClient);
+                }
+            } else if (fg == null || stateManager.getStateEnum(fg.getClientId()) != ClientState.State.IDLE) {
+                //TODO: what to do here, loop other clients?  I think not
             }
 
-            ClientWindowInfo active = (warpCheckDue != null) ? warpCheckDue : getForegroundClient();
-            if (active == null) {
+            if (fg == null) {
                 log("[ClientManager] No EVE client in foreground — skipping tick.");
                 return;
             }
-            processClient(active.getClientId(), active);
+            processClient(fg.getClientId(), fg);
         } finally {
             monitorRunning.set(false);
         }
@@ -168,13 +172,14 @@ public class ClientManager {
                     new Thread(() -> missionProcessor.clickWarpToLocation()).start();
                     break;
                 case "stargate":
-                    log(clientId, "IDLE[TO_MISSION]: stargate — E+clicking to jump.");
+                    log(clientId, "stargate — E+clicking to jump.");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
                     break;
+                    //TODO: case jumping! check if invisible on next gate or jumping, dont just click on some stargate
                 default:
-                    log(clientId, "IDLE[TO_MISSION]: unexpected '" + found + "' — ignoring.");
+                    log(clientId, "unexpected '" + found + "' — ignoring.");
             }
             return;
         }
@@ -192,13 +197,13 @@ public class ClientManager {
                     stateManager.setState(clientId, ClientState.State.COMPLETING);
                     break;
                 case "stargate":
-                    log(clientId, "IDLE[RETURNING_HOME]: stargate — E+clicking to jump.");
+                    log(clientId, "stargate — E+clicking to jump.");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
                     break;
                 default:
-                    log(clientId, "IDLE[RETURNING_HOME]: unexpected '" + found + "' — ignoring.");
+                    log(clientId, "unexpected '" + found + "' — ignoring.");
             }
             return;
         }
@@ -214,8 +219,6 @@ public class ClientManager {
         }
 
         // Standard mission dialog logic.
-        // Single Python call for all dialog state detection — replaces the old
-        // chain of 3-6 sequential waitForTemplate calls (was ~18s overhead).
         MissionProcessor.DialogState dialogState = missionProcessor.detectDialog();
 
         switch (dialogState) {
@@ -260,7 +263,7 @@ public class ClientManager {
         ClientState cs = stateManager.getState(clientId);
         long checkingElapsed = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
         if (checkingElapsed >= 40) {
-            ClientWindowInfo other = findNonUndockingClient(clientId);
+            ClientWindowInfo other = findNonWarpingClient(clientId);
             if (other != null) {
                 log(clientId, "CHECKING_MISSIONS: 40s elapsed without accept — returning to IDLE and switching focus to " + other.getClientId());
                 cs.setCurrentMission(null);
@@ -379,14 +382,11 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
-        log(clientId, "TRAVEL: closing any open dialogs from undock.");
         missionProcessor.closeAllDialogs();
-        log(clientId, "TRAVEL: pressing Ctrl+R to reload modules.");
         missionProcessor.pressCtrlR();
-        log(clientId, "TRAVEL: clicking set_destination.");
         missionProcessor.clickSetDestination();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.TO_MISSION);
-        stateManager.setState(clientId, ClientState.State.IDLE);
+        //stateManager.setState(clientId, ClientState.State.IDLE);//??
     }
 
     // -----------------------------------------------------------------------
@@ -400,7 +400,7 @@ public class ClientManager {
             log(clientId, "IN_COMBAT: set_destination detected — mission complete, transitioning to RETURNING.");
             stateManager.setState(clientId, ClientState.State.RETURNING);
         } else {
-            log(clientId, "IN_COMBAT: standing by.");
+            //log(clientId, "IN_COMBAT: standing by.");
         }
     }
 
@@ -410,7 +410,6 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleReturning(String clientId, ClientWindowInfo window) {
-        log(clientId, "RETURNING: clicking set_destination.");
         missionProcessor.clickSetDestination();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
         stateManager.setState(clientId, ClientState.State.IDLE);
@@ -421,9 +420,7 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleCompleting(String clientId) {
-        log(clientId, "COMPLETING: clicking Complete Mission.");
         missionProcessor.clickCompleteMission();
-        log(clientId, "COMPLETING: clicking OK to collect rewards.");
         missionProcessor.clickOk();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
         stateManager.setState(clientId, ClientState.State.IDLE);
@@ -447,7 +444,6 @@ public class ClientManager {
                         stateManager.getState(id).getUndockStartTime(), LocalDateTime.now()
                 ).getSeconds();
                 if (elapsed >= UNDOCK_WAIT_SECS) {
-                    log(id, "UNDOCKING: 15s elapsed — transitioning to TRAVEL.");
                     stateManager.setState(id, ClientState.State.TRAVEL);
                 }
             }
@@ -469,14 +465,10 @@ public class ClientManager {
         if (elapsed < 6) {
             // Log only on the very first tick of the grace period to avoid spam.
             if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
-                log(clientId, "WARPING: grace period — waiting for warp to begin.");
+                log(clientId, "WARPING: waiting for warp to begin.");
                 cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker (not a real check time)
             }
             return;
-        }
-
-        if (!isWarpCheckDue(cs)) {
-            return; // silent wait — no log spam
         }
 
         boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
@@ -484,17 +476,20 @@ public class ClientManager {
         if (!missionProcessor.isWarpActive()) {
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
+            // Process IDLE immediately so this client handles the next action
+            // (gate jump, warp-to, etc.) before any switch occurs.
+            handleIdle(clientId, window);
         } else {
             if (firstCheck) {
-                ClientWindowInfo other = findNonUndockingClient(clientId);
+                ClientWindowInfo other = findNonWarpingClient(clientId);
                 if (other != null) {
-                    log(clientId, "WARPING: warp confirmed — switching focus to " + other.getClientId());
+                    log(clientId, "warp confirmed — switching focus to non-warping client: " + other.getClientId());
                     bringToForeground(other);
                 } else {
-                    log(clientId, "WARPING: warp confirmed — no other client to switch to.");
+                    log(clientId, "warp confirmed — no other non-warping clients to switch to.");
                 }
             }
-            log(clientId, "WARPING: still in warp (" + elapsed + "s).");
+            log(clientId, "still WARPING (" + elapsed + "s).");
         }
     }
 
@@ -506,36 +501,31 @@ public class ClientManager {
      *
      * Uses LocalDateTime.MIN.plusNanos(1) as a sentinel meaning "grace logged, no real check yet".
      */
-    private boolean isWarpCheckDue(ClientState cs) {
-        long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
-        if (elapsed < 6) return false;
-        // MIN or MIN+1ns → no real check done yet → due immediately
-        if (cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1))) return true;
-        return Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds() >= 20;
-    }
+
 
     // -----------------------------------------------------------------------
     // Window focus switching
     // -----------------------------------------------------------------------
 
-    /** Returns a WARPING client whose warp_active check is due, or null if none. */
-    private ClientWindowInfo findWarpingClientDueForCheck() {
+    /** Returns a WARPING client still in its grace period (< 6s), or null. */
+    private ClientWindowInfo findWarpingClientInGracePeriod() {
         for (ClientWindowInfo info : clientWindows.values()) {
             String id = info.getClientId();
             if (stateManager.getStateEnum(id) == ClientState.State.WARPING) {
-                if (isWarpCheckDue(stateManager.getState(id))) {
-                    return info;
-                }
+                long elapsed = java.time.Duration.between(
+                        stateManager.getState(id).getWarpStartTime(),
+                        java.time.LocalDateTime.now()).getSeconds();
+                if (elapsed < 6) return info;
             }
         }
         return null;
     }
 
-    /** Returns the first registered client that is not UNDOCKING and is not {@code excludeId}. */
-    private ClientWindowInfo findNonUndockingClient(String excludeId) {
+    /** Returns the first registered client that is not WARPING and is not {@code excludeId}. */
+    private ClientWindowInfo findNonWarpingClient(String excludeId) {
         for (ClientWindowInfo info : clientWindows.values()) {
             if (!info.getClientId().equals(excludeId) &&
-                    stateManager.getStateEnum(info.getClientId()) != ClientState.State.UNDOCKING) {
+                    stateManager.getStateEnum(info.getClientId()) != ClientState.State.WARPING) {
                 return info;
             }
         }
@@ -551,7 +541,7 @@ public class ClientManager {
         String templateKey = window.getClientId()
                 .replaceFirst("^eve_", "")
                 .toLowerCase();
-        log("[ClientManager] Clicking EVE-O Preview thumbnail '" + templateKey + "'");
+        //log("[ClientManager] Clicking EVE-O Preview  '" + templateKey + "'");
         missionProcessor.clickTemplate(templateKey);
     }
 
