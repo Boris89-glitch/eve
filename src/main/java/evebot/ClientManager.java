@@ -31,8 +31,10 @@ public class ClientManager {
     /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
     private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
 
-    private static final int  MAX_AGENT_RETRIES  = 2;
-    private static final long UNDOCK_WAIT_SECS    = 13;
+    private static final int  MAX_AGENT_RETRIES        = 2;
+    private static final long UNDOCK_WAIT_SECS          = 13;
+    /** Pixels below the EVE-O Preview thumbnail template centre to click (skips the title bar). */
+    private static final int  THUMBNAIL_CLICK_OFFSET_Y = 75;
 
     public ClientManager(StateManager stateManager) {
         this.stateManager     = stateManager;
@@ -386,7 +388,7 @@ public class ClientManager {
         missionProcessor.pressCtrlR();
         missionProcessor.clickSetDestination();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.TO_MISSION);
-        //stateManager.setState(clientId, ClientState.State.IDLE);//??
+        stateManager.setState(clientId, ClientState.State.IDLE);
     }
 
     // -----------------------------------------------------------------------
@@ -542,7 +544,7 @@ public class ClientManager {
                 .replaceFirst("^eve_", "")
                 .toLowerCase();
         //log("[ClientManager] Clicking EVE-O Preview  '" + templateKey + "'");
-        missionProcessor.clickTemplate(templateKey);
+        missionProcessor.clickTemplateBelow(templateKey, THUMBNAIL_CLICK_OFFSET_Y);
     }
 
     // -----------------------------------------------------------------------

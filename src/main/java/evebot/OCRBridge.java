@@ -191,6 +191,14 @@ public class OCRBridge {
     }
 
     /**
+     * Left-click a template, offset offsetY pixels below its centre.
+     */
+    public void clickTemplateBelow(String key, int offsetY) {
+        System.out.printf("[%s] [OCRBridge] clickTemplateBelow: %s +%dpx%n", ts(), key, offsetY);
+        runPython("python", automationScriptPath, "--click", key, "--offset-y", String.valueOf(offsetY));
+    }
+
+    /**
      * Double-click: find the named template on screen and double-click its centre.
      * Used for: activating ships in hangar, opening agent dialog.
      */

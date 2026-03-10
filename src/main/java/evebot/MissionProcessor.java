@@ -261,6 +261,12 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    public void clickTemplateBelow(String key, int offsetY) {
+        log("Clicking template: " + key + " (+" + offsetY + "px below centre)");
+        ocrBridge.clickTemplateBelow(key, offsetY);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void clickSetDestination() {
         log("Clicking SET DESTINATION (template)");
         ocrBridge.clickTemplate("set_destination");

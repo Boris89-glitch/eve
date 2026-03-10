@@ -205,7 +205,7 @@ def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
 class TemplateMatcher:
     """Loads PNG templates once and exposes find / click / right-click helpers."""
 
-    def __init__(self, templates_dir: Path, threshold: float = 0.80):
+    def __init__(self, templates_dir: Path, threshold: float = 0.70):
         self.threshold = threshold
         self.templates: Dict[str, np.ndarray] = {}
         self.templates_dir = templates_dir
@@ -274,7 +274,7 @@ class TemplateMatcher:
             x, y = max_loc
             log.debug("Found '%s' at (%d,%d) conf=%.3f", key, x, y, max_val)
             return (x, y, w, h)
-        log.debug("'%s' not found (best=%.3f < %.3f)", key, max_val, th)
+        log.info("'%s' not found (best=%.3f < threshold %.3f)", key, max_val, th)
         return None
 
     def find_all_on_screen(self) -> Dict[str, Optional[Tuple[int, int, int, int]]]:
@@ -982,21 +982,20 @@ def cmd_check(threshold: float):
 # -----------------------------------------------------------------------------
 
 
-def cmd_click(key: str, dry_run: bool, threshold: float):
+def cmd_click(key: str, dry_run: bool, threshold: float, offset_y: int = 0):
     matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    match = matcher.wait_for(key, timeout=2.0)
+    if not match:
+        log.warning("Could not find '%s' within 2.0s", key)
+        sys.exit(1)
+    cx, cy = matcher.center(match)
+    cy += offset_y
     if dry_run:
-        match = matcher.wait_for(key, timeout=2.0)
-        if match:
-            log.info(
-                "[DRY RUN] Would left-click '%s' at %s", key, matcher.center(match)
-            )
-            sys.exit(0)
-        else:
-            log.warning("[DRY RUN] Template '%s' not found", key)
-            sys.exit(1)
+        log.info("[DRY RUN] Would left-click '%s' at (%d,%d)", key, cx, cy)
     else:
-        ok = matcher.wait_and_click(key, timeout=2.0)
-        sys.exit(0 if ok else 1)
+        log.info("Left-clicking '%s' at (%d,%d)", key, cx, cy)
+        matcher._do_click(cx, cy, button="left", delay=0.3)
+    sys.exit(0)
 
 
 def cmd_double_click(key: str, dry_run: bool, threshold: float):
@@ -1102,6 +1101,10 @@ Examples:
         "--click", metavar="KEY", help="Left-click a template then exit"
     )
     parser.add_argument(
+        "--offset-y", type=int, default=0, metavar="PX",
+        help="Y offset in pixels applied to --click (positive = downward)",
+    )
+    parser.add_argument(
         "--double-click", metavar="KEY", help="Double-click a template then exit"
     )
     parser.add_argument(
@@ -1150,7 +1153,7 @@ Examples:
         return
 
     if args.click:
-        cmd_click(args.click, dry_run=args.dry_run, threshold=args.threshold)
+        cmd_click(args.click, dry_run=args.dry_run, threshold=args.threshold, offset_y=args.offset_y)
         return
 
     if getattr(args, "double_click", None):
