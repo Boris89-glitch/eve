@@ -264,10 +264,10 @@ public class ClientManager {
     private void handleCheckingMissions(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
         long checkingElapsed = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
-        if (checkingElapsed >= 40) {
-            ClientWindowInfo other = findNonWarpingClient(clientId);
+        if (checkingElapsed >= 35) {
+            ClientWindowInfo other = findOtherClient(clientId);
             if (other != null) {
-                log(clientId, "CHECKING_MISSIONS: 40s elapsed without accept — returning to IDLE and switching focus to " + other.getClientId());
+                log(clientId, "CHECKING_MISSIONS: 35s elapsed without accept — returning to IDLE and switching focus to " + other.getClientId());
                 cs.setCurrentMission(null);
                 stateManager.setState(clientId, ClientState.State.IDLE);
                 bringToForeground(other);
@@ -456,7 +456,7 @@ public class ClientManager {
     // WARPING — poll warp_active until it disappears, then return to IDLE.
     //
     // Timeline:
-    //   0–6s   : grace period — warp_active may not have appeared yet, skip check.
+    //   0–7s   : grace period — warp_active may not have appeared yet, skip check.
     //   5s+    : check warp_active every 20s; when gone → IDLE.
     // -----------------------------------------------------------------------
 
@@ -464,7 +464,7 @@ public class ClientManager {
         ClientState cs = stateManager.getState(clientId);
         long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
-        if (elapsed < 6) {
+        if (elapsed < 7) {
             // Log only on the very first tick of the grace period to avoid spam.
             if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
                 log(clientId, "WARPING: waiting for warp to begin.");
@@ -483,12 +483,20 @@ public class ClientManager {
             handleIdle(clientId, window);
         } else {
             if (firstCheck) {
-                ClientWindowInfo other = findNonWarpingClient(clientId);
+                ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "warp confirmed — switching focus to non-warping client: " + other.getClientId());
+                    log(clientId, "warp confirmed — switching focus to: " + other.getClientId());
                     bringToForeground(other);
                 } else {
-                    log(clientId, "warp confirmed — no other non-warping clients to switch to.");
+                    log(clientId, "warp confirmed — no other clients to switch to.");
+                }
+            } else if (elapsed >= 35) {
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "WARPING: 35s elapsed — switching focus to: " + other.getClientId());
+                    bringToForeground(other);
+                } else {
+                    log(clientId, "WARPING: 35s elapsed — no other clients to switch to.");
                 }
             }
             log(clientId, "still WARPING (" + elapsed + "s).");
@@ -517,17 +525,16 @@ public class ClientManager {
                 long elapsed = java.time.Duration.between(
                         stateManager.getState(id).getWarpStartTime(),
                         java.time.LocalDateTime.now()).getSeconds();
-                if (elapsed < 6) return info;
+                if (elapsed < 7) return info;
             }
         }
         return null;
     }
 
-    /** Returns the first registered client that is not WARPING and is not {@code excludeId}. */
-    private ClientWindowInfo findNonWarpingClient(String excludeId) {
+    /** Returns the first registered client that is not {@code excludeId}. */
+    private ClientWindowInfo findOtherClient(String excludeId) {
         for (ClientWindowInfo info : clientWindows.values()) {
-            if (!info.getClientId().equals(excludeId) &&
-                    stateManager.getStateEnum(info.getClientId()) != ClientState.State.WARPING) {
+            if (!info.getClientId().equals(excludeId)) {
                 return info;
             }
         }
