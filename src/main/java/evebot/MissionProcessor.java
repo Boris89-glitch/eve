@@ -54,7 +54,7 @@ public class MissionProcessor {
 
     public void clickRequestMission() {
         log("Clicking REQUEST MISSION (template) — with agent_icon double-click fallback");
-        boolean found = ocrBridge.waitAndClickTemplate("request_mission", 3);
+        boolean found = ocrBridge.waitAndClickTemplate("request_mission", 1);
         if (!found) {
             log("Request Mission not visible — double-clicking agent_icon as fallback.");
             ocrBridge.doubleClickTemplate("agent_icon");
@@ -97,15 +97,15 @@ public class MissionProcessor {
 
     public boolean waitForDialogClosed() {
         log("Waiting for offer dialog to close...");
-        boolean gone = ocrBridge.waitForTemplateGone("decline", 5);
+        boolean gone = ocrBridge.waitForTemplateGone("decline", 3);
         if (gone) log("Dialog closed.");
-        else      log("Dialog still visible after 5s.");
+        else      log("Dialog still visible after 3s.");
         return gone;
     }
 
     public boolean waitForNewOffer() {
         log("Waiting for new mission offer...");
-        String found = ocrBridge.waitForAnyTemplate(8, "accept", "decline");
+        String found = ocrBridge.waitForAnyTemplate(4, "accept", "decline");
         if (found != null) log("New offer dialog visible (" + found + ").");
         else               log("No new offer appeared within timeout.");
         return found != null;
@@ -315,6 +315,14 @@ public class MissionProcessor {
      */
     public String detectReturningUI() {
         return ocrBridge.findAnyTemplate("dock", "stargate");
+    }
+
+    /**
+     * Single screenshot scan for the mission complete button.
+     * Returns "complete_mission" when the agent dialog is open, null otherwise.
+     */
+    public String detectCompletingUI() {
+        return ocrBridge.findAnyTemplate("complete_mission");
     }
 
     /**

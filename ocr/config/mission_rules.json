@@ -32,7 +32,9 @@
     { "target_contains": "BlaadRaidersBumer",    "comment": "No blood raider burners"   },
     { "target_contains": "BloadRaidersBumer",    "comment": "No blood raider burners"   },
     { "target_contains": "BloodRaidersBumer",    "comment": "No blood raider burners"   },
-    { "location_contains": "j0c-",       "comment": "System too far"         },
+    { "location_contains": "OK0C",       "comment": "System too far"         },
+    { "location_contains": "JOK0C",       "comment": "System too far"         },
+    { "location_contains": "J-OK0C",       "comment": "System too far"         },
     { "location_contains": "p33-",       "comment": "System too far"         },
     { "location_contains": "dw-t2i",       "comment": "System too far"         }
   ]

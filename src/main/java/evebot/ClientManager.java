@@ -263,11 +263,15 @@ public class ClientManager {
 
     private void handleCheckingMissions(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
-        long checkingElapsed = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
-        if (checkingElapsed >= 35) {
+
+        if (cs.getMissionCheckStartTime().equals(LocalDateTime.MIN)) {
+            cs.setMissionCheckStartTime(LocalDateTime.now());
+        }
+        long cycleElapsed = Duration.between(cs.getMissionCheckStartTime(), LocalDateTime.now()).getSeconds();
+        if (cycleElapsed >= 35) {
             ClientWindowInfo other = findOtherClient(clientId);
             if (other != null) {
-                log(clientId, "CHECKING_MISSIONS: 35s elapsed without accept — returning to IDLE and switching focus to " + other.getClientId());
+                log(clientId, "CHECKING_MISSIONS: 35s in check/decline cycle — returning to IDLE and switching focus to " + other.getClientId());
                 cs.setCurrentMission(null);
                 stateManager.setState(clientId, ClientState.State.IDLE);
                 bringToForeground(other);
@@ -422,6 +426,10 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleCompleting(String clientId) {
+        if (missionProcessor.detectCompletingUI() == null) {
+            log(clientId, "COMPLETING: agent dialog not ready — waiting.");
+            return;
+        }
         missionProcessor.clickCompleteMission();
         missionProcessor.clickOk();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);

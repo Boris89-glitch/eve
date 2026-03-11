@@ -60,6 +60,9 @@ public class ClientState {
     /** True once warp_to_location has been clicked — bot is in the mission system, activate_gate only. */
     private boolean warpedToLocation = false;
 
+    /** Timestamp when the current CHECKING_MISSIONS/DECLINING cycle began — persists across declines. */
+    private LocalDateTime missionCheckStartTime = LocalDateTime.MIN;
+
     /** Timestamp of the last stargate jump click during TRAVEL or RETURNING. */
     private LocalDateTime lastTravelAction = LocalDateTime.MIN;
 
@@ -98,6 +101,9 @@ public class ClientState {
         if (state == State.IDLE || state == State.CHECKING_MISSIONS || state == State.DECLINING) {
             this.missionTracked = false;
         }
+        if (state != State.CHECKING_MISSIONS && state != State.DECLINING) {
+            this.missionCheckStartTime = LocalDateTime.MIN;
+        }
         if (state == State.TRAVEL || state == State.RETURNING) {
             this.destinationSet   = false;
             this.warpedToLocation = false;
@@ -123,6 +129,9 @@ public class ClientState {
 
     public boolean isWarpedToLocation()           { return warpedToLocation; }
     public void    setWarpedToLocation(boolean v) { this.warpedToLocation = v; }
+
+    public LocalDateTime getMissionCheckStartTime()                { return missionCheckStartTime; }
+    public void          setMissionCheckStartTime(LocalDateTime t) { this.missionCheckStartTime = t; }
 
     public LocalDateTime getLastTravelAction()                { return lastTravelAction; }
     public void          setLastTravelAction(LocalDateTime t) { this.lastTravelAction = t; }

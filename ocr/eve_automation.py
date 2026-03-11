@@ -205,7 +205,7 @@ def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
 class TemplateMatcher:
     """Loads PNG templates once and exposes find / click / right-click helpers."""
 
-    def __init__(self, templates_dir: Path, threshold: float = 0.70):
+    def __init__(self, templates_dir: Path, threshold: float = 0.80):
         self.threshold = threshold
         self.templates: Dict[str, np.ndarray] = {}
         self.templates_dir = templates_dir
