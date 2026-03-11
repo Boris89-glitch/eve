@@ -36,6 +36,7 @@
     { "location_contains": "JOK0C",       "comment": "System too far"         },
     { "location_contains": "J-OK0C",       "comment": "System too far"         },
     { "location_contains": "p33-",       "comment": "System too far"         },
-    { "location_contains": "dw-t2i",       "comment": "System too far"         }
+    { "location_contains": "dw-t2i",       "comment": "System too far"         },
+    { "location_contains": "dwt2i",       "comment": "System too far"         }
   ]
 }

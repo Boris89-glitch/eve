@@ -302,6 +302,14 @@ public class MissionProcessor {
     }
 
     /**
+     * Scans for mission-arrival elements only (no stargate).
+     * Returns: "activate_gate", "warp_to_location", or null.
+     */
+    public String detectMissionArrivalUI() {
+        return ocrBridge.findAnyTemplate("activate_gate", "warp_to_location");
+    }
+
+    /**
      * Scans only for activate_gate — used after warp_to_location has been clicked
      * (we are in the mission system; no more regular stargates to jump).
      */
@@ -318,11 +326,19 @@ public class MissionProcessor {
     }
 
     /**
-     * Single screenshot scan for the mission complete button.
-     * Returns "complete_mission" when the agent dialog is open, null otherwise.
+     * Scans for dock only — used on the first tick after warp lands
+     * to avoid false stargate matches during the gate tunnel animation.
+     */
+    public String detectDockOnly() {
+        return ocrBridge.findAnyTemplate("dock");
+    }
+
+    /**
+     * Single screenshot scan for the agent icon.
+     * Returns "agent_icon" when docked and the icon is visible, null otherwise.
      */
     public String detectCompletingUI() {
-        return ocrBridge.findAnyTemplate("complete_mission");
+        return ocrBridge.findAnyTemplate("agent_icon");
     }
 
     /**

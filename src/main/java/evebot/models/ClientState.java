@@ -78,6 +78,9 @@ public class ClientState {
     /** Which navigation leg is active — used by IDLE to know what to do after a warp lands. */
     private TravelPhase travelPhase = TravelPhase.NONE;
 
+    /** True on the first IDLE tick right after exiting WARPING — triggers the 8s jump-settle wait. */
+    private boolean justExitedWarp = false;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -147,6 +150,9 @@ public class ClientState {
 
     public TravelPhase getTravelPhase()              { return travelPhase; }
     public void        setTravelPhase(TravelPhase p) { this.travelPhase = p; }
+
+    public boolean isJustExitedWarp()              { return justExitedWarp; }
+    public void    setJustExitedWarp(boolean v)    { this.justExitedWarp = v; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

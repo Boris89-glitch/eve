@@ -156,6 +156,46 @@ public class ClientManager {
         ClientState cs = stateManager.getState(clientId);
 
         if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION) {
+            boolean justLanded = cs.isJustExitedWarp();
+            if (justLanded) {
+                cs.setJustExitedWarp(false);
+                long warpSecs = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
+
+                // Just exited warp — check mission-specific elements first (no stargate,
+                // it's always visible in-system and would false-match during a gate tunnel).
+                String found = missionProcessor.detectMissionArrivalUI();
+                if (found != null) {
+                    switch (found) {
+                        case "activate_gate":
+                            log(clientId, "IDLE[TO_MISSION]: activate_gate — E+clicking, entering combat.");
+                            stateManager.setState(clientId, ClientState.State.IN_COMBAT);
+                            new Thread(() -> missionProcessor.eClickTemplate("activate_gate")).start();
+                            break;
+                        case "warp_to_location":
+                            log(clientId, "IDLE[TO_MISSION]: warp_to_location — warping into mission space.");
+                            cs.setWarpStartTime(LocalDateTime.now());
+                            stateManager.setState(clientId, ClientState.State.WARPING);
+                            new Thread(() -> missionProcessor.clickWarpToLocation()).start();
+                            break;
+                        default:
+                            log(clientId, "unexpected '" + found + "' — ignoring.");
+                    }
+                    return;
+                }
+
+                // Neither activate_gate nor warp_to_location visible.
+                // Short warp (<35s) = likely mid-jump through a gate tunnel — wait 8s.
+                // Long warp (≥35s) = already jumped, skip wait and check stargate immediately.
+                if (warpSecs < 35) {
+                    log(clientId, "IDLE[TO_MISSION]: no mission-specific element — waiting 8s (possible jump transition).");
+                    // TODO: bubble detection — ship may be caught in an interdictor bubble; needs separate handling
+                    try { Thread.sleep(8000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                } else {
+                    log(clientId, "IDLE[TO_MISSION]: no mission-specific element after " + warpSecs + "s warp — checking stargate.");
+                }
+            }
+
+            // Normal tick (or post-8s-wait): full travel UI check including stargate.
             String found = missionProcessor.detectTravelUI();
             if (found == null) {
                 log(clientId, "IDLE[TO_MISSION]: no navigation element visible — waiting.");
@@ -174,7 +214,7 @@ public class ClientManager {
                     new Thread(() -> missionProcessor.clickWarpToLocation()).start();
                     break;
                 case "stargate":
-                    log(clientId, "stargate — E+clicking to jump.");
+                    log(clientId, "IDLE[TO_MISSION]: stargate — E+clicking to jump.");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     new Thread(() -> missionProcessor.eClickTemplate("stargate")).start();
@@ -187,6 +227,30 @@ public class ClientManager {
         }
 
         if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
+            boolean justLanded = cs.isJustExitedWarp();
+            if (justLanded) {
+                cs.setJustExitedWarp(false);
+                long warpSecs = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
+
+                // Just exited warp — check dock first (no stargate yet, same false-match risk).
+                String dockCheck = missionProcessor.detectDockOnly();
+                if (dockCheck != null) {
+                    log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
+                    missionProcessor.clickDock();
+                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    return;
+                }
+
+                if (warpSecs < 35) {
+                    log(clientId, "IDLE[RETURNING_HOME]: dock not visible — waiting 8s (possible jump transition).");
+                    // TODO: bubble detection — ship may be caught in an interdictor bubble; needs separate handling
+                    try { Thread.sleep(8000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                } else {
+                    log(clientId, "IDLE[RETURNING_HOME]: dock not visible after " + warpSecs + "s warp — checking stargate.");
+                }
+            }
+
+            // Normal tick (or post-8s-wait): full returning UI check including stargate.
             String found = missionProcessor.detectReturningUI();
             if (found == null) {
                 log(clientId, "IDLE[RETURNING_HOME]: no navigation element visible — waiting.");
@@ -427,9 +491,11 @@ public class ClientManager {
 
     private void handleCompleting(String clientId) {
         if (missionProcessor.detectCompletingUI() == null) {
-            log(clientId, "COMPLETING: agent dialog not ready — waiting.");
+            log(clientId, "COMPLETING: agent icon not visible yet — waiting.");
+            try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             return;
         }
+        missionProcessor.doubleClickAgentIcon();
         missionProcessor.clickCompleteMission();
         missionProcessor.clickOk();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
@@ -486,6 +552,10 @@ public class ClientManager {
         if (!missionProcessor.isWarpActive()) {
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
+            cs.setJustExitedWarp(true);
+            // Brief pause to let the game UI finish rendering after warp landing
+            // before taking a navigation screenshot — avoids false template matches.
+            try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             // Process IDLE immediately so this client handles the next action
             // (gate jump, warp-to, etc.) before any switch occurs.
             handleIdle(clientId, window);
