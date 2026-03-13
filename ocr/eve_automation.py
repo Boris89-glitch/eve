@@ -126,6 +126,16 @@ TEMPLATE_FILES = {
     # EVE-O Preview thumbnails — clicked to switch client focus
     "gravitar": "gravitar",
     "meeshayl_lancer": "meeshayl_lancer",
+    # Combat templates
+    "launcher": "launcher",
+    "kin_damage": "kin_damage",
+    "exp_damage": "exp_damage",
+    "inf_damage": "inf_damage",
+    "target_jaguar": "target_jaguar",
+    "target_vengeance": "target_vengeance",
+    "target_inquisitor": "target_inquisitor",
+    "target_enyo": "target_enyo",
+    "target_navitas": "target_navitas",
 }
 
 # Maps mission dialog template keys → ship template keys.
@@ -277,6 +287,12 @@ class TemplateMatcher:
         log.info("'%s' not found (best=%.3f < threshold %.3f)", key, max_val, th)
         return None
 
+    # TODO: add find_all(key) — returns List of (x, y, w, h) for ALL matches
+    #       above threshold using cv2.matchTemplate + np.where + non-max suppression.
+    #       Needed for ctrl+clicking multiple identical targets (e.g., 2× inquisitor).
+    #       Wire up as: ctrlClickAllTemplate(key) in OCRBridge/MissionProcessor,
+    #       --ctrl-click-all KEY in CLI.
+
     def find_all_on_screen(self) -> Dict[str, Optional[Tuple[int, int, int, int]]]:
         screen = self.screenshot_cv()
         return {key: self.find(key, screen=screen) for key in self.templates}
@@ -373,15 +389,20 @@ class TemplateMatcher:
         """Hold E, left-click at (cx, cy), release E. Used for jump/warp interactions."""
         VK_E = 0x45
         try:
-            import win32api, win32con
+            import win32api, win32con, win32gui
 
             win32api.SetCursorPos((cx, cy))
             time.sleep(0.05)
+            # Ensure the EVE window under the cursor has focus so keybd_event registers.
+            hwnd = win32gui.WindowFromPoint((cx, cy))
+            if hwnd:
+                win32gui.SetForegroundWindow(hwnd)
+                time.sleep(0.1)
             win32api.keybd_event(VK_E, 0, 0, 0)          # key down
             time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.05)
-            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
             time.sleep(0.05)
             win32api.keybd_event(VK_E, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
             log.info("win32 E+left-clicked at (%d,%d)", cx, cy)
@@ -392,6 +413,100 @@ class TemplateMatcher:
             pyautogui.click(cx, cy)
             pyautogui.keyUp('e')
             log.info("pyautogui E+left-clicked at (%d,%d)", cx, cy)
+        time.sleep(delay)
+
+    def _do_w_click(self, cx: int, cy: int, delay: float = 1.5):
+        """Hold W, left-click at (cx, cy), release W. Used for keep-at-range commands."""
+        VK_W = 0x57
+        try:
+            import win32api, win32con
+
+            win32api.SetCursorPos((cx, cy))
+            time.sleep(0.05)
+            win32api.keybd_event(VK_W, 0, 0, 0)          # key down
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_W, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
+            log.info("win32 W+left-clicked at (%d,%d)", cx, cy)
+        except ImportError:
+            pyautogui.keyDown('w')
+            pyautogui.moveTo(cx, cy, duration=0.1)
+            time.sleep(0.05)
+            pyautogui.click(cx, cy)
+            pyautogui.keyUp('w')
+            log.info("pyautogui W+left-clicked at (%d,%d)", cx, cy)
+        time.sleep(delay)
+
+    def _do_q_click(self, cx: int, cy: int, delay: float = 1.5):
+        """Hold Q, left-click at (cx, cy), release Q. Used for orbit commands."""
+        VK_Q = 0x51
+        try:
+            import win32api, win32con
+
+            win32api.SetCursorPos((cx, cy))
+            time.sleep(0.05)
+            win32api.keybd_event(VK_Q, 0, 0, 0)          # key down
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_Q, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
+            log.info("win32 Q+left-clicked at (%d,%d)", cx, cy)
+        except ImportError:
+            pyautogui.keyDown('q')
+            pyautogui.moveTo(cx, cy, duration=0.1)
+            time.sleep(0.05)
+            pyautogui.click(cx, cy)
+            pyautogui.keyUp('q')
+            log.info("pyautogui Q+left-clicked at (%d,%d)", cx, cy)
+        time.sleep(delay)
+
+    def _do_ctrl_click(self, cx: int, cy: int, delay: float = 0.3):
+        """Hold Ctrl, left-click at (cx, cy), release Ctrl. Used for locking targets."""
+        VK_CONTROL = 0x11
+        try:
+            import win32api, win32con
+
+            win32api.SetCursorPos((cx, cy))
+            time.sleep(0.05)
+            win32api.keybd_event(VK_CONTROL, 0, 0, 0)          # key down
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
+            log.info("win32 Ctrl+left-clicked at (%d,%d)", cx, cy)
+        except ImportError:
+            pyautogui.keyDown('ctrl')
+            pyautogui.moveTo(cx, cy, duration=0.1)
+            time.sleep(0.05)
+            pyautogui.click(cx, cy)
+            pyautogui.keyUp('ctrl')
+            log.info("pyautogui Ctrl+left-clicked at (%d,%d)", cx, cy)
+        time.sleep(delay)
+
+    def _do_key_press(self, keys: str, delay: float = 0.3):
+        """Press each character in *keys* sequentially."""
+        try:
+            import win32api, win32con
+
+            for k in keys:
+                vk = ord(k.upper())
+                win32api.keybd_event(vk, 0, 0, 0)
+                time.sleep(0.05)
+                win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+                time.sleep(0.1)
+            log.info("win32 key-pressed '%s'", keys)
+        except ImportError:
+            for k in keys:
+                pyautogui.press(k)
+                time.sleep(0.1)
+            log.info("pyautogui key-pressed '%s'", keys)
         time.sleep(delay)
 
     # -- click helpers ---------------------------------------------------------
@@ -516,6 +631,96 @@ class TemplateMatcher:
             self._do_e_click(cx, cy, delay=delay)
             return True
         log.warning("Could not E+click '%s' within %.1fs — not found", key, timeout)
+        return False
+
+    def w_click(self, key: str, screen=None, threshold=None, delay: float = 1.5) -> bool:
+        """Find template and hold-W left-click its centre (keep at range)."""
+        match = self.find(key, screen=screen, threshold=threshold)
+        if match:
+            cx, cy = self.center(match)
+            log.info("W+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_w_click(cx, cy, delay=delay)
+            return True
+        log.warning("'%s' not found on screen — cannot W+click", key)
+        return False
+
+    def q_click(self, key: str, screen=None, threshold=None, delay: float = 1.5) -> bool:
+        """Find template and hold-Q left-click its centre (orbit)."""
+        match = self.find(key, screen=screen, threshold=threshold)
+        if match:
+            cx, cy = self.center(match)
+            log.info("Q+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_q_click(cx, cy, delay=delay)
+            return True
+        log.warning("'%s' not found on screen — cannot Q+click", key)
+        return False
+
+    def ctrl_click(self, key: str, screen=None, threshold=None, delay: float = 0.3) -> bool:
+        """Find template and hold-Ctrl left-click its centre (lock target)."""
+        match = self.find(key, screen=screen, threshold=threshold)
+        if match:
+            cx, cy = self.center(match)
+            log.info("Ctrl+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_ctrl_click(cx, cy, delay=delay)
+            return True
+        log.warning("'%s' not found on screen — cannot Ctrl+click", key)
+        return False
+
+    def wait_and_w_click(
+        self,
+        key: str,
+        timeout: float = 10.0,
+        interval: float = 0.5,
+        delay: float = 1.5,
+        threshold=None,
+    ) -> bool:
+        match = self.wait_for(
+            key, timeout=timeout, interval=interval, threshold=threshold
+        )
+        if match:
+            cx, cy = self.center(match)
+            log.info("W+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_w_click(cx, cy, delay=delay)
+            return True
+        log.warning("Could not W+click '%s' within %.1fs — not found", key, timeout)
+        return False
+
+    def wait_and_q_click(
+        self,
+        key: str,
+        timeout: float = 10.0,
+        interval: float = 0.5,
+        delay: float = 1.5,
+        threshold=None,
+    ) -> bool:
+        match = self.wait_for(
+            key, timeout=timeout, interval=interval, threshold=threshold
+        )
+        if match:
+            cx, cy = self.center(match)
+            log.info("Q+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_q_click(cx, cy, delay=delay)
+            return True
+        log.warning("Could not Q+click '%s' within %.1fs — not found", key, timeout)
+        return False
+
+    def wait_and_ctrl_click(
+        self,
+        key: str,
+        timeout: float = 10.0,
+        interval: float = 0.5,
+        delay: float = 0.3,
+        threshold=None,
+    ) -> bool:
+        match = self.wait_for(
+            key, timeout=timeout, interval=interval, threshold=threshold
+        )
+        if match:
+            cx, cy = self.center(match)
+            log.info("Ctrl+left-clicking '%s' at (%d,%d)", key, cx, cy)
+            self._do_ctrl_click(cx, cy, delay=delay)
+            return True
+        log.warning("Could not Ctrl+click '%s' within %.1fs — not found", key, timeout)
         return False
 
 
@@ -1072,6 +1277,66 @@ def cmd_ctrl_r(dry_run: bool):
     sys.exit(0)
 
 
+def cmd_w_click(key: str, dry_run: bool, threshold: float):
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    if dry_run:
+        match = matcher.wait_for(key, timeout=2.0)
+        if match:
+            log.info(
+                "[DRY RUN] Would W+left-click '%s' at %s", key, matcher.center(match)
+            )
+            sys.exit(0)
+        else:
+            log.warning("[DRY RUN] Template '%s' not found", key)
+            sys.exit(1)
+    else:
+        ok = matcher.wait_and_w_click(key, timeout=2.0)
+        sys.exit(0 if ok else 1)
+
+
+def cmd_q_click(key: str, dry_run: bool, threshold: float):
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    if dry_run:
+        match = matcher.wait_for(key, timeout=2.0)
+        if match:
+            log.info(
+                "[DRY RUN] Would Q+left-click '%s' at %s", key, matcher.center(match)
+            )
+            sys.exit(0)
+        else:
+            log.warning("[DRY RUN] Template '%s' not found", key)
+            sys.exit(1)
+    else:
+        ok = matcher.wait_and_q_click(key, timeout=2.0)
+        sys.exit(0 if ok else 1)
+
+
+def cmd_ctrl_click(key: str, dry_run: bool, threshold: float):
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    if dry_run:
+        match = matcher.wait_for(key, timeout=2.0)
+        if match:
+            log.info(
+                "[DRY RUN] Would Ctrl+left-click '%s' at %s", key, matcher.center(match)
+            )
+            sys.exit(0)
+        else:
+            log.warning("[DRY RUN] Template '%s' not found", key)
+            sys.exit(1)
+    else:
+        ok = matcher.wait_and_ctrl_click(key, timeout=2.0)
+        sys.exit(0 if ok else 1)
+
+
+def cmd_key_press(keys: str, dry_run: bool):
+    if dry_run:
+        log.info("[DRY RUN] Would press keys: %s", keys)
+        sys.exit(0)
+    matcher = TemplateMatcher(TEMPLATES_DIR)
+    matcher._do_key_press(keys, delay=0.3)
+    sys.exit(0)
+
+
 # -----------------------------------------------------------------------------
 # CLI entry point
 # -----------------------------------------------------------------------------
@@ -1115,6 +1380,18 @@ Examples:
     )
     parser.add_argument(
         "--ctrl-r", action="store_true", help="Hold Ctrl and press R (reload modules), then exit"
+    )
+    parser.add_argument(
+        "--w-click", metavar="KEY", help="Hold W + left-click a template then exit (keep at range)"
+    )
+    parser.add_argument(
+        "--q-click", metavar="KEY", help="Hold Q + left-click a template then exit (orbit)"
+    )
+    parser.add_argument(
+        "--ctrl-click", metavar="KEY", help="Hold Ctrl + left-click a template then exit (lock target)"
+    )
+    parser.add_argument(
+        "--key-press", metavar="KEYS", help="Press each character in KEYS sequentially then exit"
     )
     parser.add_argument(
         "--repair-ship",
@@ -1174,6 +1451,22 @@ Examples:
 
     if getattr(args, "ctrl_r", False):
         cmd_ctrl_r(dry_run=args.dry_run)
+        return
+
+    if getattr(args, "w_click", None):
+        cmd_w_click(args.w_click, dry_run=args.dry_run, threshold=args.threshold)
+        return
+
+    if getattr(args, "q_click", None):
+        cmd_q_click(args.q_click, dry_run=args.dry_run, threshold=args.threshold)
+        return
+
+    if getattr(args, "ctrl_click", None):
+        cmd_ctrl_click(args.ctrl_click, dry_run=args.dry_run, threshold=args.threshold)
+        return
+
+    if getattr(args, "key_press", None):
+        cmd_key_press(args.key_press, dry_run=args.dry_run)
         return
 
     if getattr(args, "repair_ship", None):

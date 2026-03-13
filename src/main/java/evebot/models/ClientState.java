@@ -81,6 +81,12 @@ public class ClientState {
     /** True on the first IDLE tick right after exiting WARPING — triggers the 8s jump-settle wait. */
     private boolean justExitedWarp = false;
 
+    /** Current step in the combat sequence (0 = first step). Reset on entering IN_COMBAT. */
+    private int combatStep = 0;
+
+    /** Timestamp when the current combat safe-wait began — used to measure elapsed wait time. */
+    private LocalDateTime combatWaitStart = LocalDateTime.MIN;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -114,6 +120,10 @@ public class ClientState {
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
+        }
+        if (state == State.IN_COMBAT) {
+            this.combatStep = 0;
+            this.combatWaitStart = LocalDateTime.MIN;
         }
     }
 
@@ -153,6 +163,12 @@ public class ClientState {
 
     public boolean isJustExitedWarp()              { return justExitedWarp; }
     public void    setJustExitedWarp(boolean v)    { this.justExitedWarp = v; }
+
+    public int  getCombatStep()             { return combatStep; }
+    public void setCombatStep(int step)     { this.combatStep = step; }
+
+    public LocalDateTime getCombatWaitStart()                { return combatWaitStart; }
+    public void          setCombatWaitStart(LocalDateTime t) { this.combatWaitStart = t; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

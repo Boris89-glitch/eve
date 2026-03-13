@@ -48,14 +48,13 @@ public class Main {
                 clientManager::monitorClients,
                 0, 1, TimeUnit.SECONDS);
 
-        // State persistence disabled during testing — re-enable by uncommenting:
-        // scheduler.scheduleAtFixedRate(stateManager::saveStates, 20, 20, TimeUnit.SECONDS);
+        // Auto-save state every 20 s
+        scheduler.scheduleAtFixedRate(stateManager::saveStates, 20, 20, TimeUnit.SECONDS);
 
         // Keep the JVM alive
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\n[Main] Shutting down.");
-            // State save on exit disabled during testing — re-enable by uncommenting:
-            // stateManager.saveStates();
+            stateManager.saveStates();
             scheduler.shutdownNow();
         }));
     }

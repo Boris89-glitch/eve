@@ -225,6 +225,42 @@ public class OCRBridge {
     }
 
     /**
+     * W+left-click: hold the W key while left-clicking the template centre.
+     * Used for keep-at-range commands in combat.
+     */
+    public void wClickTemplate(String key) {
+        System.out.printf("[%s] [OCRBridge] wClickTemplate: %s%n", ts(), key);
+        runPython("python", automationScriptPath, "--w-click", key);
+    }
+
+    /**
+     * Q+left-click: hold the Q key while left-clicking the template centre.
+     * Used for orbit commands in combat.
+     */
+    public void qClickTemplate(String key) {
+        System.out.printf("[%s] [OCRBridge] qClickTemplate: %s%n", ts(), key);
+        runPython("python", automationScriptPath, "--q-click", key);
+    }
+
+    /**
+     * Ctrl+left-click: hold Ctrl while left-clicking the template centre.
+     * Used for locking targets in combat.
+     */
+    public void ctrlClickTemplate(String key) {
+        System.out.printf("[%s] [OCRBridge] ctrlClickTemplate: %s%n", ts(), key);
+        runPython("python", automationScriptPath, "--ctrl-click", key);
+    }
+
+    /**
+     * Press each character in the keys string sequentially.
+     * Used for activating module groups in combat (e.g., "adc").
+     */
+    public void keyPress(String keys) {
+        System.out.printf("[%s] [OCRBridge] keyPress: %s%n", ts(), keys);
+        runPython("python", automationScriptPath, "--key-press", keys);
+    }
+
+    /**
      * Hold Ctrl and press R — reloads modules in EVE.
      */
     public void ctrlR() {

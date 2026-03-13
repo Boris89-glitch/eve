@@ -261,6 +261,36 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    public void wClickTemplate(String key) {
+        log("W+clicking template: " + key);
+        ocrBridge.wClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void qClickTemplate(String key) {
+        log("Q+clicking template: " + key);
+        ocrBridge.qClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void ctrlClickTemplate(String key) {
+        log("Ctrl+clicking template: " + key);
+        ocrBridge.ctrlClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void rightClickTemplate(String key) {
+        log("Right-clicking template: " + key);
+        ocrBridge.rightClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void keyPress(String keys) {
+        log("Pressing keys: " + keys);
+        ocrBridge.keyPress(keys);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void clickTemplateBelow(String key, int offsetY) {
         log("Clicking template: " + key + " (+" + offsetY + "px below centre)");
         ocrBridge.clickTemplateBelow(key, offsetY);
