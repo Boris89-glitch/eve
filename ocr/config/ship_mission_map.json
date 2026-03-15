@@ -3,15 +3,9 @@
   "_comment2": "title_contains matched against mission target first, title as fallback. First match wins.",
   "ship_missions": [
     {
-      "ship_template": "ship_vengeance",
-      "ship_display": "ship_vengeance (Daredevil hull)",
-      "title_contains": ["vengeance"],
-      "comment": "Vengeance Anomic Team — must be first so it wins before generic anomic team rule"
-    },
-    {
       "ship_template": "ship_garmur",
       "ship_display": "ship_garmur (Garmur hull)",
-      "title_contains": ["anomic team", "burner team", "jaguar", "enyo", "hawk"],
+      "title_contains": ["anomic team", "burner team", "jaguar", "enyo", "hawk", "vengeance"],
       "comment": "Garmur hull for all other Anomic Team missions"
     },
     {

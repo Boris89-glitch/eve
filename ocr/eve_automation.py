@@ -82,6 +82,8 @@ TEMPLATE_FILES = {
     "untrack": "untrack",  # visible when mission is already tracked
     "close_active_window": "close_active_window",
     "complete_mission": "complete_mission",
+    "not_complete": "not_complete",  # mission accepted but not yet completable
+    "completed": "completed",  # mission done, ready to turn in
     # Repair flow
     "get_repair_quote": "get_repair_quote",
     "repair": "repair",
@@ -107,7 +109,7 @@ TEMPLATE_FILES = {
     # Mission dialog detection templates — crop these from the mission dialog window.
     # Name them mission_<target>.png. They are matched against the open dialog to
     # identify the mission type without relying on OCR text parsing.
-    "mission_vengeance": "mission_vengeance",  # → ship_vengeance/ship_garmur
+    "mission_vengeance": "mission_vengeance",  # → ship_garmur
     "mission_enyo": "mission_enyo",  # → ship_garmur
     "mission_hawk": "mission_hawk",  # → ship_garmur
     "mission_jaguar": "mission_jaguar",  # → ship_garmur
@@ -121,7 +123,6 @@ TEMPLATE_FILES = {
     "mission_recon1": "mission_recon1",  # → ship_sk  (Recon part 1)
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
-    "ship_vengeance": "ship_vengeance",
     "ship_worm": "ship_worm",
     "ship_sansha": "ship_sansha",
     "ship_angel": "ship_angel",
@@ -148,7 +149,7 @@ TEMPLATE_FILES = {
 # Maps mission dialog template keys → ship template keys.
 # Checked in order; first match wins.
 MISSION_TEMPLATE_TO_SHIP = [
-    ("mission_vengeance", "ship_vengeance"),# can we do this in garmur?
+    ("mission_vengeance", "ship_garmur"),
     ("mission_jaguar", "ship_garmur"),
     ("mission_enyo", "ship_garmur"),
     ("mission_hawk", "ship_garmur"),
@@ -209,7 +210,7 @@ def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
                     pattern,
                 )
                 return entry["ship_template"]
-    default = ship_map.get("default_ship_template", "ship_vengeance")
+    default = ship_map.get("default_ship_template", "ship_garmur")
     log.info("No OCR rule matched '%s' — using default: %s", mission_target, default)
     return default
 
@@ -393,8 +394,9 @@ class TemplateMatcher:
         time.sleep(delay)
 
     def _do_e_click(self, cx: int, cy: int, delay: float = 1.5):
-        """Hold E, left-click at (cx, cy), release E. Used for jump/warp interactions."""
+        """Hold E, left-click twice at (cx, cy), release E. Used for jump/warp interactions."""
         VK_E = 0x45
+        SCAN_E = 0x12  # hardware scan code for E
         try:
             import win32api, win32con, win32gui
 
@@ -405,71 +407,115 @@ class TemplateMatcher:
             if hwnd:
                 win32gui.SetForegroundWindow(hwnd)
                 time.sleep(0.1)
-            win32api.keybd_event(VK_E, 0, 0, 0)          # key down
-            time.sleep(0.05)
+            win32api.keybd_event(VK_E, SCAN_E, 0, 0)          # key down
+            time.sleep(0.15)
+            # Verify E is held before first click
+            e_state1 = win32api.GetAsyncKeyState(VK_E)
+            log.info("E key state before click 1: %s (held=%s)", e_state1, e_state1 < 0)
+            # First click
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
             time.sleep(0.05)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
             time.sleep(0.05)
-            win32api.keybd_event(VK_E, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
-            log.info("win32 E+left-clicked at (%d,%d)", cx, cy)
+            # Verify E is held before second click
+            e_state2 = win32api.GetAsyncKeyState(VK_E)
+            log.info("E key state before click 2: %s (held=%s)", e_state2, e_state2 < 0)
+            # Second click (key still held)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_E, SCAN_E, win32con.KEYEVENTF_KEYUP, 0)  # key up
+            log.info("win32 E+left-clicked (x2) at (%d,%d) [key_states: %s, %s]", cx, cy, e_state1, e_state2)
         except ImportError:
             pyautogui.keyDown('e')
             pyautogui.moveTo(cx, cy, duration=0.1)
             time.sleep(0.05)
             pyautogui.click(cx, cy)
+            time.sleep(0.05)
+            pyautogui.click(cx, cy)
             pyautogui.keyUp('e')
-            log.info("pyautogui E+left-clicked at (%d,%d)", cx, cy)
+            log.info("pyautogui E+left-clicked (x2) at (%d,%d)", cx, cy)
         time.sleep(delay)
 
     def _do_w_click(self, cx: int, cy: int, delay: float = 1.5):
-        """Hold W, left-click at (cx, cy), release W. Used for keep-at-range commands."""
+        """Hold W, left-click twice at (cx, cy), release W. Used for keep-at-range commands."""
         VK_W = 0x57
+        SCAN_W = 0x11  # hardware scan code for W
         try:
             import win32api, win32con
 
             win32api.SetCursorPos((cx, cy))
             time.sleep(0.05)
-            win32api.keybd_event(VK_W, 0, 0, 0)          # key down
-            time.sleep(0.05)
+            win32api.keybd_event(VK_W, SCAN_W, 0, 0)          # key down
+            time.sleep(0.15)
+            # Verify W is held before first click
+            w_state1 = win32api.GetAsyncKeyState(VK_W)
+            log.info("W key state before click 1: %s (held=%s)", w_state1, w_state1 < 0)
+            # First click
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
             time.sleep(0.05)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
             time.sleep(0.05)
-            win32api.keybd_event(VK_W, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
-            log.info("win32 W+left-clicked at (%d,%d)", cx, cy)
+            # Verify W is held before second click
+            w_state2 = win32api.GetAsyncKeyState(VK_W)
+            log.info("W key state before click 2: %s (held=%s)", w_state2, w_state2 < 0)
+            # Second click (key still held)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_W, SCAN_W, win32con.KEYEVENTF_KEYUP, 0)  # key up
+            log.info("win32 W+left-clicked (x2) at (%d,%d) [key_states: %s, %s]", cx, cy, w_state1, w_state2)
         except ImportError:
             pyautogui.keyDown('w')
             pyautogui.moveTo(cx, cy, duration=0.1)
             time.sleep(0.05)
             pyautogui.click(cx, cy)
+            time.sleep(0.05)
+            pyautogui.click(cx, cy)
             pyautogui.keyUp('w')
-            log.info("pyautogui W+left-clicked at (%d,%d)", cx, cy)
+            log.info("pyautogui W+left-clicked (x2) at (%d,%d)", cx, cy)
         time.sleep(delay)
 
     def _do_q_click(self, cx: int, cy: int, delay: float = 1.5):
-        """Hold Q, left-click at (cx, cy), release Q. Used for orbit commands."""
+        """Hold Q, left-click twice at (cx, cy), release Q. Used for orbit commands."""
         VK_Q = 0x51
+        SCAN_Q = 0x10  # hardware scan code for Q
         try:
             import win32api, win32con
 
             win32api.SetCursorPos((cx, cy))
             time.sleep(0.05)
-            win32api.keybd_event(VK_Q, 0, 0, 0)          # key down
-            time.sleep(0.05)
+            win32api.keybd_event(VK_Q, SCAN_Q, 0, 0)          # key down
+            time.sleep(0.15)
+            # Verify Q is held before first click
+            q_state1 = win32api.GetAsyncKeyState(VK_Q)
+            log.info("Q key state before click 1: %s (held=%s)", q_state1, q_state1 < 0)
+            # First click
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
             time.sleep(0.05)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
             time.sleep(0.05)
-            win32api.keybd_event(VK_Q, 0, win32con.KEYEVENTF_KEYUP, 0)  # key up
-            log.info("win32 Q+left-clicked at (%d,%d)", cx, cy)
+            # Verify Q is held before second click
+            q_state2 = win32api.GetAsyncKeyState(VK_Q)
+            log.info("Q key state before click 2: %s (held=%s)", q_state2, q_state2 < 0)
+            # Second click (key still held)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_Q, SCAN_Q, win32con.KEYEVENTF_KEYUP, 0)  # key up
+            log.info("win32 Q+left-clicked (x2) at (%d,%d) [key_states: %s, %s]", cx, cy, q_state1, q_state2)
         except ImportError:
             pyautogui.keyDown('q')
             pyautogui.moveTo(cx, cy, duration=0.1)
             time.sleep(0.05)
             pyautogui.click(cx, cy)
+            time.sleep(0.05)
+            pyautogui.click(cx, cy)
             pyautogui.keyUp('q')
-            log.info("pyautogui Q+left-clicked at (%d,%d)", cx, cy)
+            log.info("pyautogui Q+left-clicked (x2) at (%d,%d)", cx, cy)
         time.sleep(delay)
 
     def _do_ctrl_click(self, cx: int, cy: int, delay: float = 0.3):

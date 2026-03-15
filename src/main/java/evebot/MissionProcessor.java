@@ -38,6 +38,10 @@ public class MissionProcessor {
         this.ocrBridge = new OCRBridge();
     }
 
+    public OCRBridge getOcrBridge() {
+        return ocrBridge;
+    }
+
     // -----------------------------------------------------------------------
     // OCR reads
     // -----------------------------------------------------------------------
@@ -62,7 +66,7 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
-    public enum DialogState { NONE, OFFER, ALREADY_ACCEPTED }
+    public enum DialogState { NONE, OFFER, ALREADY_ACCEPTED, COMPLETED, NOT_COMPLETE }
 
     /**
      * Single-call dialog detection — one Python process, one screenshot, checks
@@ -71,14 +75,25 @@ public class MissionProcessor {
      * Returns:
      *   OFFER            — accept or decline button visible (fresh mission offer)
      *   ALREADY_ACCEPTED — complete_mission visible but no accept/decline
-     *                      (bot restarted mid-session with mission active)
-     *   NONE             — no dialog buttons found
+     *   COMPLETED        — no dialog buttons, but 'completed' template visible (mission done, turn in)
+     *   NOT_COMPLETE     — no dialog buttons, but 'not_complete' template visible (mission in progress)
+     *   NONE             — nothing recognisable found
      */
     public DialogState detectDialog() {
         log("Detecting dialog state (single template scan)...");
         // Check accept/decline first so an offer dialog is never mistaken for ALREADY_ACCEPTED.
         String found = ocrBridge.findAnyTemplate("accept", "decline", "complete_mission");
         if (found == null) {
+            // No dialog buttons — check for completed/not_complete status indicators.
+            String status = ocrBridge.findAnyTemplate("completed", "not_complete");
+            if ("completed".equals(status)) {
+                log("Dialog state: COMPLETED (completed template visible)");
+                return DialogState.COMPLETED;
+            }
+            if ("not_complete".equals(status)) {
+                log("Dialog state: NOT_COMPLETE (not_complete template visible)");
+                return DialogState.NOT_COMPLETE;
+            }
             log("Dialog state: NONE");
             return DialogState.NONE;
         }
@@ -256,25 +271,19 @@ public class MissionProcessor {
     // -----------------------------------------------------------------------
 
     public void eClickTemplate(String key) {
-        log("E+clicking template (x2): " + key);
-        ocrBridge.eClickTemplate(key);
-        sleep(POST_CLICK_DELAY_MS);
+        log("E+clicking template: " + key);
         ocrBridge.eClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }
 
     public void wClickTemplate(String key) {
-        log("W+clicking template (x2): " + key);
-        ocrBridge.wClickTemplate(key);
-        sleep(POST_CLICK_DELAY_MS);
+        log("W+clicking template: " + key);
         ocrBridge.wClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }
 
     public void qClickTemplate(String key) {
-        log("Q+clicking template (x2): " + key);
-        ocrBridge.qClickTemplate(key);
-        sleep(POST_CLICK_DELAY_MS);
+        log("Q+clicking template: " + key);
         ocrBridge.qClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }

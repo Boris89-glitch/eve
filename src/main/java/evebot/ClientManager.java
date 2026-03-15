@@ -328,6 +328,18 @@ public class ClientManager {
                 stateManager.setState(clientId, ClientState.State.COMPLETING);
                 break;
             }
+            case COMPLETED: {
+                agentRetries.put(clientId, 0);
+                log(clientId, "Mission completed (completed template visible) — turning in.");
+                stateManager.setState(clientId, ClientState.State.COMPLETING);
+                break;
+            }
+            case NOT_COMPLETE: {
+                agentRetries.put(clientId, 0);
+                log(clientId, "Mission accepted but NOT complete (not_complete visible) — proceeding to ship selection.");
+                stateManager.setState(clientId, ClientState.State.ACCEPTED);
+                break;
+            }
             default: { // OFFER
                 agentRetries.put(clientId, 0);
                 log(clientId, "Mission offer dialog confirmed — reading via OCR.");
@@ -576,14 +588,10 @@ public class ClientManager {
             return;
         }
 
-        if (elapsed > 0 && elapsed % 30 == 0) {
-            log(clientId, "COMBAT[" + combatLabel + "] waiting for mission complete (" + elapsed + "s)...");
-        }
-        if (allowClientSwitch) {
+        log(clientId, "COMBAT[" + combatLabel + "] waiting for mission complete (" + elapsed + "s)...");
+        if (allowClientSwitch && elapsed > 0 && elapsed % 30 == 0) {
             ClientWindowInfo other = findOtherClient(clientId);
-            if (other != null) {
-                bringToForeground(other);
-            }
+            if (other != null) bringToForeground(other);
         }
     }
 
@@ -638,12 +646,10 @@ public class ClientManager {
                 // SAFE WAIT: 90 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 90) {
+                    log(clientId, "COMBAT[Jaguar] safe wait: " + elapsed + "s / 90s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Jaguar] safe wait: " + elapsed + "s / 90s.");
-                    }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) {
-                        bringToForeground(other);
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
                     }
                     return;
                 }
@@ -733,14 +739,13 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                // SAFE WAIT: 15 seconds
+                // SAFE WAIT: 25 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
+                if (elapsed < 25) {
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 25s.");
                     return;
                 }
-                log(clientId, "COMBAT[Vengeance] 15s wait complete — locking inquisitors.");
+                log(clientId, "COMBAT[Vengeance] 25s wait complete — locking inquisitors.");
                 cs.setCombatStep(5);
                 break;
             }
@@ -780,11 +785,11 @@ public class ClientManager {
                 // SAFE WAIT: 130 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 130) {
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 130s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 130s.");
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
                     }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 130s wait complete — re-targeting inquisitor.");
@@ -813,11 +818,11 @@ public class ClientManager {
                 // SAFE WAIT: 60 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 60) {
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 60s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 60s.");
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
                     }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 60s wait complete — switching ammo.");
@@ -840,7 +845,10 @@ public class ClientManager {
             case 15: {
                 // SAFE WAIT: 10 seconds (ammo load)
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 10) return;
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 10s.");
+                    return;
+                }
                 log(clientId, "COMBAT[Vengeance] 10s wait complete — activating modules.");
                 cs.setCombatStep(16);
                 break;
@@ -861,8 +869,7 @@ public class ClientManager {
                 // SAFE WAIT: 30 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 30) {
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 30s.");
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 30s wait complete — waiting for mission complete.");
@@ -930,14 +937,13 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                // SAFE WAIT: 15 seconds
+                // SAFE WAIT: 25 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
+                if (elapsed < 25) {
+                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 25s.");
                     return;
                 }
-                log(clientId, "COMBAT[Enyo] 15s wait complete — locking navitas targets.");
+                log(clientId, "COMBAT[Enyo] 25s wait complete — locking navitas targets.");
                 cs.setCombatStep(5);
                 break;
             }
@@ -977,11 +983,11 @@ public class ClientManager {
                 // SAFE WAIT: 120 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 120) {
+                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 120s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 120s.");
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
                     }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
                     return;
                 }
                 log(clientId, "COMBAT[Enyo] 120s wait complete — locking enyo.");
@@ -1016,11 +1022,11 @@ public class ClientManager {
                 // SAFE WAIT: 60 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 60) {
+                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 60s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 60s.");
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
                     }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
                     return;
                 }
                 log(clientId, "COMBAT[Enyo] 60s wait complete — waiting for mission complete.");
@@ -1077,20 +1083,19 @@ public class ClientManager {
                 cs.setCombatStep(3);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Hawk] 15s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Hawk] 25s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 3: {
-                // SAFE WAIT: 15 seconds
+                // SAFE WAIT: 25 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
+                if (elapsed < 25) {
+                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 25s.");
                     return;
                 }
-                log(clientId, "COMBAT[Hawk] 15s wait complete — locking bustard.");
+                log(clientId, "COMBAT[Hawk] 25s wait complete — locking bustard.");
                 cs.setCombatStep(4);
                 break;
             }
@@ -1116,11 +1121,11 @@ public class ClientManager {
                 // SAFE WAIT: 120 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 120) {
+                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 120s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 120s.");
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
                     }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
                     return;
                 }
                 log(clientId, "COMBAT[Hawk] 120s wait complete — locking hawk.");
@@ -1210,6 +1215,7 @@ public class ClientManager {
                 // WAIT: 20 seconds (no client switching)
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 20) {
+                    log(clientId, "COMBAT[Sansha] safe wait: " + elapsed + "s / 20s.");
                     return;
                 }
                 log(clientId, "COMBAT[Sansha] 20s wait complete — stopping overloads.");
