@@ -36,5 +36,8 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### Bot state ###
+config/bot_state.json
 /.claude/worktrees/exciting-dirac/
 /.claude/worktrees/lucid-taussig/

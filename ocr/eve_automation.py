@@ -99,6 +99,9 @@ TEMPLATE_FILES = {
     "warp_active": "warp_active",
     "dock": "dock",
     "ok": "ok",
+    # Capsule / self-destruct (ship destroyed recovery)
+    "capsule": "capsule",
+    "destruct": "destruct",
     # Agent interaction
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
     # Mission dialog detection templates — crop these from the mission dialog window.
@@ -136,6 +139,10 @@ TEMPLATE_FILES = {
     "target_inquisitor": "target_inquisitor",
     "target_enyo": "target_enyo",
     "target_navitas": "target_navitas",
+    "em_damage": "em_damage",
+    "target_hawk": "target_hawk",
+    "target_bustard": "target_bustard",
+    "target_frigate": "target_frigate",
 }
 
 # Maps mission dialog template keys → ship template keys.
@@ -507,6 +514,54 @@ class TemplateMatcher:
                 pyautogui.press(k)
                 time.sleep(0.1)
             log.info("pyautogui key-pressed '%s'", keys)
+        time.sleep(delay)
+
+    def _do_shift_key_press(self, keys: str, delay: float = 0.3):
+        """Hold Shift and press each character in *keys* sequentially."""
+        VK_SHIFT = 0x10
+        try:
+            import win32api, win32con
+
+            win32api.keybd_event(VK_SHIFT, 0, 0, 0)  # Shift down
+            time.sleep(0.05)
+            for k in keys:
+                vk = ord(k.upper())
+                win32api.keybd_event(vk, 0, 0, 0)
+                time.sleep(0.05)
+                win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+                time.sleep(0.1)
+            win32api.keybd_event(VK_SHIFT, 0, win32con.KEYEVENTF_KEYUP, 0)  # Shift up
+            log.info("win32 Shift+key-pressed '%s'", keys)
+        except ImportError:
+            pyautogui.keyDown('shift')
+            for k in keys:
+                pyautogui.press(k)
+                time.sleep(0.1)
+            pyautogui.keyUp('shift')
+            log.info("pyautogui Shift+key-pressed '%s'", keys)
+        time.sleep(delay)
+
+    def _do_alt_key_press(self, key: str, delay: float = 0.3):
+        """Hold Alt and press a key (e.g. 'f1' for Alt+F1)."""
+        VK_MENU = 0x12  # Alt key
+        VK_MAP = {"f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73}
+        try:
+            import win32api, win32con
+
+            vk = VK_MAP.get(key.lower())
+            if vk is None:
+                vk = ord(key.upper())
+            win32api.keybd_event(VK_MENU, 0, 0, 0)  # Alt down
+            time.sleep(0.05)
+            win32api.keybd_event(vk, 0, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)  # Alt up
+            log.info("win32 Alt+%s sent", key)
+        except ImportError:
+            pyautogui.hotkey('alt', key)
+            log.info("pyautogui Alt+%s sent", key)
         time.sleep(delay)
 
     # -- click helpers ---------------------------------------------------------
@@ -1337,6 +1392,24 @@ def cmd_key_press(keys: str, dry_run: bool):
     sys.exit(0)
 
 
+def cmd_shift_key_press(keys: str, dry_run: bool):
+    if dry_run:
+        log.info("[DRY RUN] Would Shift+press keys: %s", keys)
+        sys.exit(0)
+    matcher = TemplateMatcher(TEMPLATES_DIR)
+    matcher._do_shift_key_press(keys, delay=0.3)
+    sys.exit(0)
+
+
+def cmd_alt_key_press(key: str, dry_run: bool):
+    if dry_run:
+        log.info("[DRY RUN] Would Alt+press key: %s", key)
+        sys.exit(0)
+    matcher = TemplateMatcher(TEMPLATES_DIR)
+    matcher._do_alt_key_press(key, delay=0.3)
+    sys.exit(0)
+
+
 # -----------------------------------------------------------------------------
 # CLI entry point
 # -----------------------------------------------------------------------------
@@ -1392,6 +1465,12 @@ Examples:
     )
     parser.add_argument(
         "--key-press", metavar="KEYS", help="Press each character in KEYS sequentially then exit"
+    )
+    parser.add_argument(
+        "--shift-key-press", metavar="KEYS", help="Hold Shift and press each character in KEYS sequentially then exit"
+    )
+    parser.add_argument(
+        "--alt-key-press", metavar="KEY", help="Hold Alt and press KEY (e.g. 'f1') then exit"
     )
     parser.add_argument(
         "--repair-ship",
@@ -1467,6 +1546,14 @@ Examples:
 
     if getattr(args, "key_press", None):
         cmd_key_press(args.key_press, dry_run=args.dry_run)
+        return
+
+    if getattr(args, "shift_key_press", None):
+        cmd_shift_key_press(args.shift_key_press, dry_run=args.dry_run)
+        return
+
+    if getattr(args, "alt_key_press", None):
+        cmd_alt_key_press(args.alt_key_press, dry_run=args.dry_run)
         return
 
     if getattr(args, "repair_ship", None):

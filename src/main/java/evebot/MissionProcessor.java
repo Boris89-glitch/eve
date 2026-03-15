@@ -256,19 +256,25 @@ public class MissionProcessor {
     // -----------------------------------------------------------------------
 
     public void eClickTemplate(String key) {
-        log("E+clicking template: " + key);
+        log("E+clicking template (x2): " + key);
+        ocrBridge.eClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
         ocrBridge.eClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }
 
     public void wClickTemplate(String key) {
-        log("W+clicking template: " + key);
+        log("W+clicking template (x2): " + key);
+        ocrBridge.wClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
         ocrBridge.wClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }
 
     public void qClickTemplate(String key) {
-        log("Q+clicking template: " + key);
+        log("Q+clicking template (x2): " + key);
+        ocrBridge.qClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
         ocrBridge.qClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }
@@ -288,6 +294,18 @@ public class MissionProcessor {
     public void keyPress(String keys) {
         log("Pressing keys: " + keys);
         ocrBridge.keyPress(keys);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void shiftKeyPress(String keys) {
+        log("Shift+pressing keys: " + keys);
+        ocrBridge.shiftKeyPress(keys);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void altKeyPress(String key) {
+        log("Alt+pressing key: " + key);
+        ocrBridge.altKeyPress(key);
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -385,6 +403,22 @@ public class MissionProcessor {
      */
     public boolean isWarpActive() {
         return ocrBridge.findAnyTemplate("warp_active") != null;
+    }
+
+    /**
+     * Returns true if the capsule template is visible — ship was destroyed.
+     */
+    public boolean isCapsuleVisible() {
+        return ocrBridge.findAnyTemplate("capsule") != null;
+    }
+
+    /**
+     * Clicks the self-destruct button on the capsule.
+     */
+    public void clickDestruct() {
+        log("Clicking DESTRUCT (template)");
+        ocrBridge.clickTemplate("destruct");
+        sleep(POST_CLICK_DELAY_MS);
     }
 
     /** Generic left-click on any registered template. */

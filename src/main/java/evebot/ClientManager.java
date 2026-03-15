@@ -237,6 +237,16 @@ public class ClientManager {
                 if (dockCheck != null) {
                     log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
                     missionProcessor.clickDock();
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                    return;
+                }
+
+                // No dock visible — check if we landed in station (agent_icon means docking completed).
+                String agentCheck = missionProcessor.detectCompletingUI();
+                if (agentCheck != null) {
+                    log(clientId, "IDLE[RETURNING_HOME]: agent_icon visible — docked in station.");
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
                     stateManager.setState(clientId, ClientState.State.COMPLETING);
                     return;
                 }
@@ -253,6 +263,14 @@ public class ClientManager {
             // Normal tick (or post-8s-wait): full returning UI check including stargate.
             String found = missionProcessor.detectReturningUI();
             if (found == null) {
+                // No nav element — check if we're already docked in station.
+                String agentFallback = missionProcessor.detectCompletingUI();
+                if (agentFallback != null) {
+                    log(clientId, "IDLE[RETURNING_HOME]: agent_icon visible — already docked.");
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    return;
+                }
                 log(clientId, "IDLE[RETURNING_HOME]: no navigation element visible — waiting.");
                 return;
             }
@@ -260,7 +278,8 @@ public class ClientManager {
                 case "dock":
                     log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
                     missionProcessor.clickDock();
-                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
                     break;
                 case "stargate":
                     log(clientId, "stargate — E+clicking to jump.");
@@ -510,8 +529,13 @@ public class ClientManager {
             case "enyo":
                 handleCombatEnyo(clientId, cs);
                 break;
+            case "hawk":
+                handleCombatHawk(clientId, cs);
+                break;
+            case "sansha":
+                handleCombatSansha(clientId, cs);
+                break;
             // Future missions:
-            // case "hawk":      handleCombatHawk(clientId, cs);      break;
             default:
                 // Unknown target — fall back to set_destination polling.
                 if (missionProcessor.isSetDestinationVisible()) {
@@ -519,6 +543,47 @@ public class ClientManager {
                     stateManager.setState(clientId, ClientState.State.RETURNING);
                 }
                 break;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared final-step logic for all combat sequences.
+    // Polls set_destination; after 30s also checks for capsule (ship destroyed).
+    // -----------------------------------------------------------------------
+
+    private void pollSetDestinationOrCapsule(String clientId, ClientState cs,
+                                              String combatLabel, boolean allowClientSwitch) {
+        if (missionProcessor.isSetDestinationVisible()) {
+            log(clientId, "COMBAT[" + combatLabel + "] set_destination detected — mission complete!");
+            stateManager.setState(clientId, ClientState.State.RETURNING);
+            return;
+        }
+
+        long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+
+        // After 30s without set_destination, start checking for capsule (ship destroyed).
+        if (elapsed >= 30 && missionProcessor.isCapsuleVisible()) {
+            log(clientId, "COMBAT[" + combatLabel + "] *** CAPSULE DETECTED — ship destroyed! Self-destructing...");
+            missionProcessor.clickDestruct();
+
+            // Safe wait 120s — clone jump / respawn animation.
+            log(clientId, "COMBAT[" + combatLabel + "] waiting 120s for self-destruct respawn...");
+            try { Thread.sleep(120_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+            // Back in station — re-board ship and retry mission.
+            log(clientId, "COMBAT[" + combatLabel + "] respawned — transitioning to REPAIRING to re-board ship.");
+            stateManager.setState(clientId, ClientState.State.REPAIRING);
+            return;
+        }
+
+        if (elapsed > 0 && elapsed % 30 == 0) {
+            log(clientId, "COMBAT[" + combatLabel + "] waiting for mission complete (" + elapsed + "s)...");
+        }
+        if (allowClientSwitch) {
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) {
+                bringToForeground(other);
+            }
         }
     }
 
@@ -605,20 +670,7 @@ public class ClientManager {
                 break;
             }
             case 7: {
-                // SAFE WAIT: poll for set_destination (mission complete signal)
-                if (missionProcessor.isSetDestinationVisible()) {
-                    log(clientId, "COMBAT[Jaguar] set_destination detected — mission complete!");
-                    stateManager.setState(clientId, ClientState.State.RETURNING);
-                } else {
-                    long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                    if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Jaguar] waiting for mission complete (" + elapsed + "s)...");
-                    }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) {
-                        bringToForeground(other);
-                    }
-                }
+                pollSetDestinationOrCapsule(clientId, cs, "Jaguar", true);
                 break;
             }
             default:
@@ -819,18 +871,7 @@ public class ClientManager {
                 break;
             }
             case 18: {
-                // SAFE WAIT: poll for set_destination (mission complete signal)
-                if (missionProcessor.isSetDestinationVisible()) {
-                    log(clientId, "COMBAT[Vengeance] set_destination detected — mission complete!");
-                    stateManager.setState(clientId, ClientState.State.RETURNING);
-                } else {
-                    long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                    if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Vengeance] waiting for mission complete (" + elapsed + "s)...");
-                    }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
-                }
+                pollSetDestinationOrCapsule(clientId, cs, "Vengeance", true);
                 break;
             }
             default:
@@ -988,22 +1029,234 @@ public class ClientManager {
                 break;
             }
             case 14: {
-                // SAFE WAIT: poll for set_destination (mission complete signal)
-                if (missionProcessor.isSetDestinationVisible()) {
-                    log(clientId, "COMBAT[Enyo] set_destination detected — mission complete!");
-                    stateManager.setState(clientId, ClientState.State.RETURNING);
-                } else {
-                    long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                    if (elapsed > 0 && elapsed % 30 == 0) {
-                        log(clientId, "COMBAT[Enyo] waiting for mission complete (" + elapsed + "s)...");
-                    }
-                    ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
-                }
+                pollSetDestinationOrCapsule(clientId, cs, "Enyo", true);
                 break;
             }
             default:
                 log(clientId, "COMBAT[Enyo] unexpected step " + step + " — resetting.");
+                cs.setCombatStep(0);
+        }
+    }
+
+    /**
+     * Anomic Base — Hawk combat sequence.
+     *
+     * Steps:
+     *   0  → Right-click 'launcher' (ammo context menu)
+     *   1  → Click 'em_damage' (load EM ammo)
+     *   2  → W+click 'target_hawk' (keep at range) + start 15s wait
+     *   3  → SAFE WAIT 15s
+     *   4  → Ctrl+click 'target_bustard' (lock support)
+     *   5  → Keypress 'adc' (activate modules)
+     *   6  → SAFE WAIT 120s
+     *   7  → Ctrl+click 'target_hawk' (lock)
+     *   8  → Click 'target_hawk' (select active)
+     *   9  → Keypress 'ad'
+     *   10 → SAFE WAIT for set_destination (mission complete → RETURNING)
+     */
+    private void handleCombatHawk(String clientId, ClientState cs) {
+        int step = cs.getCombatStep();
+
+        switch (step) {
+            case 0: {
+                log(clientId, "COMBAT[Hawk] Step 0: right-click launcher (ammo menu).");
+                missionProcessor.rightClickTemplate("launcher");
+                cs.setCombatStep(1);
+                break;
+            }
+            case 1: {
+                log(clientId, "COMBAT[Hawk] Step 1: click em_damage (load EM).");
+                missionProcessor.clickTemplate("em_damage");
+                cs.setCombatStep(2);
+                break;
+            }
+            case 2: {
+                log(clientId, "COMBAT[Hawk] Step 2: W+click target_hawk (keep at range).");
+                missionProcessor.wClickTemplate("target_hawk");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(3);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Hawk] 15s safe wait — switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
+                break;
+            }
+            case 3: {
+                // SAFE WAIT: 15 seconds
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 15) {
+                    ClientWindowInfo other = findOtherClient(clientId);
+                    if (other != null) bringToForeground(other);
+                    return;
+                }
+                log(clientId, "COMBAT[Hawk] 15s wait complete — locking bustard.");
+                cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                log(clientId, "COMBAT[Hawk] Step 4: Ctrl+click target_bustard (lock support).");
+                missionProcessor.ctrlClickTemplate("target_bustard");
+                cs.setCombatStep(5);
+                break;
+            }
+            case 5: {
+                log(clientId, "COMBAT[Hawk] Step 5: press 'adc' (activate modules).");
+                missionProcessor.keyPress("adc");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(6);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Hawk] 120s safe wait — switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
+                break;
+            }
+            case 6: {
+                // SAFE WAIT: 120 seconds
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 120) {
+                    if (elapsed > 0 && elapsed % 30 == 0) {
+                        log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 120s.");
+                    }
+                    ClientWindowInfo other = findOtherClient(clientId);
+                    if (other != null) bringToForeground(other);
+                    return;
+                }
+                log(clientId, "COMBAT[Hawk] 120s wait complete — locking hawk.");
+                cs.setCombatStep(7);
+                break;
+            }
+            case 7: {
+                log(clientId, "COMBAT[Hawk] Step 7: Ctrl+click target_hawk (lock).");
+                missionProcessor.ctrlClickTemplate("target_hawk");
+                cs.setCombatStep(8);
+                break;
+            }
+            case 8: {
+                log(clientId, "COMBAT[Hawk] Step 8: click target_hawk (select active).");
+                missionProcessor.clickTemplate("target_hawk");
+                cs.setCombatStep(9);
+                break;
+            }
+            case 9: {
+                log(clientId, "COMBAT[Hawk] Step 9: press 'ad'.");
+                missionProcessor.keyPress("ad");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(10);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Hawk] waiting for mission complete — switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
+                break;
+            }
+            case 10: {
+                pollSetDestinationOrCapsule(clientId, cs, "Hawk", true);
+                break;
+            }
+            default:
+                log(clientId, "COMBAT[Hawk] unexpected step " + step + " — resetting.");
+                cs.setCombatStep(0);
+        }
+    }
+
+    /**
+     * Anomic Base — Sansha combat sequence.
+     *
+     * Steps:
+     *   0  → Shift+press 'asdx' (activate overloaded modules)
+     *   1  → Ctrl+click 'target_frigate' (lock target)
+     *   2  → Keypress 'asdxc' (activate modules)
+     *   3  → Q+click 'target_frigate' (orbit)
+     *   4  → WAIT 20s (no client switching)
+     *   5  → Shift+d (stop overloading afterburner)
+     *   6  → Shift+s (stop overloading web)
+     *   7  → Alt+F1 (burst cap recharge)
+     *   8  → WAIT 1s
+     *   9  → Alt+F1 (deactivate cap module)
+     *   10 → WAIT for set_destination (no client switching)
+     */
+    private void handleCombatSansha(String clientId, ClientState cs) {
+        int step = cs.getCombatStep();
+
+        switch (step) {
+            case 0: {
+                log(clientId, "COMBAT[Sansha] Step 0: Shift+press 'asdx' (activate overloaded modules).");
+                missionProcessor.shiftKeyPress("asdx");
+                cs.setCombatStep(1);
+                break;
+            }
+            case 1: {
+                log(clientId, "COMBAT[Sansha] Step 1: Ctrl+click target_frigate (lock target).");
+                missionProcessor.ctrlClickTemplate("target_frigate");
+                cs.setCombatStep(2);
+                break;
+            }
+            case 2: {
+                log(clientId, "COMBAT[Sansha] Step 2: press 'asdxc' (activate modules).");
+                missionProcessor.keyPress("asdxc");
+                cs.setCombatStep(3);
+                break;
+            }
+            case 3: {
+                log(clientId, "COMBAT[Sansha] Step 3: Q+click target_frigate (orbit).");
+                missionProcessor.qClickTemplate("target_frigate");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                // WAIT: 20 seconds (no client switching)
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 20) {
+                    return;
+                }
+                log(clientId, "COMBAT[Sansha] 20s wait complete — stopping overloads.");
+                cs.setCombatStep(5);
+                break;
+            }
+            case 5: {
+                log(clientId, "COMBAT[Sansha] Step 5: Shift+d (stop overloading afterburner).");
+                missionProcessor.shiftKeyPress("d");
+                cs.setCombatStep(6);
+                break;
+            }
+            case 6: {
+                log(clientId, "COMBAT[Sansha] Step 6: Shift+s (stop overloading web).");
+                missionProcessor.shiftKeyPress("s");
+                cs.setCombatStep(7);
+                break;
+            }
+            case 7: {
+                log(clientId, "COMBAT[Sansha] Step 7: Alt+F1 (burst cap recharge).");
+                missionProcessor.altKeyPress("f1");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(8);
+                break;
+            }
+            case 8: {
+                // WAIT: 1 second
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 1) {
+                    return;
+                }
+                cs.setCombatStep(9);
+                break;
+            }
+            case 9: {
+                log(clientId, "COMBAT[Sansha] Step 9: Alt+F1 (deactivate cap module).");
+                missionProcessor.altKeyPress("f1");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(10);
+                break;
+            }
+            case 10: {
+                pollSetDestinationOrCapsule(clientId, cs, "Sansha", false);
+                break;
+            }
+            default:
+                log(clientId, "COMBAT[Sansha] unexpected step " + step + " — resetting.");
                 cs.setCombatStep(0);
         }
     }
@@ -1033,7 +1286,13 @@ public class ClientManager {
         missionProcessor.clickCompleteMission();
         missionProcessor.clickOk();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
-        stateManager.setState(clientId, ClientState.State.IDLE);
+
+        // Request next mission immediately and go to CHECKING_MISSIONS
+        // instead of IDLE — avoids stale complete_mission being misdetected.
+        missionProcessor.clickRequestMission();
+        stateManager.getState(clientId).setCurrentMission(null);
+        stateManager.getState(clientId).setMissionCheckStartTime(LocalDateTime.MIN);
+        stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
     // -----------------------------------------------------------------------

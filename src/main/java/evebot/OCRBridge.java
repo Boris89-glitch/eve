@@ -260,6 +260,16 @@ public class OCRBridge {
         runPython("python", automationScriptPath, "--key-press", keys);
     }
 
+    public void shiftKeyPress(String keys) {
+        System.out.printf("[%s] [OCRBridge] shiftKeyPress: %s%n", ts(), keys);
+        runPython("python", automationScriptPath, "--shift-key-press", keys);
+    }
+
+    public void altKeyPress(String key) {
+        System.out.printf("[%s] [OCRBridge] altKeyPress: %s%n", ts(), key);
+        runPython("python", automationScriptPath, "--alt-key-press", key);
+    }
+
     /**
      * Hold Ctrl and press R — reloads modules in EVE.
      */
