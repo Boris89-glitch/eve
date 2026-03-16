@@ -98,6 +98,10 @@ TEMPLATE_FILES = {
     "stargate": "stargate",
     "warp_to_location": "warp_to_location",
     "activate_gate": "activate_gate",
+    "jump": "jump",              # context menu item — right-click stargate → Jump
+    "mission_start": "mission_start",  # context menu item — right-click mission gate → Activate Gate
+    "keep_at_range": "keep_at_range",  # HUD indicator confirming keep-at-range is active
+    "orbiting": "orbiting",            # HUD indicator confirming orbit is active
     "warp_active": "warp_active",
     "dock": "dock",
     "ok": "ok",
@@ -120,7 +124,7 @@ TEMPLATE_FILES = {
     "mission_sansha": "mission_sansha",  # → ship_sansha
     "mission_angel": "mission_angel",  # → ship_angel
     "mission_infested": "mission_infested",  # → ship_sk  (Infested Ruins)
-    "mission_recon1": "mission_recon1",  # → ship_sk  (Recon part 1)
+    "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
     "ship_worm": "ship_worm",
@@ -142,13 +146,17 @@ TEMPLATE_FILES = {
     "target_navitas": "target_navitas",
     "em_damage": "em_damage",
     "target_hawk": "target_hawk",
+    "target_b": "target_b",              # Hawk support ship — overview row
     "target_bustard": "target_bustard",
     "target_frigate": "target_frigate",
+    # Recon mission — dock at home station to complete
+    "home_station": "home_station",
 }
 
 # Maps mission dialog template keys → ship template keys.
 # Checked in order; first match wins.
 MISSION_TEMPLATE_TO_SHIP = [
+    ("mission_recon1", "ship_garmur"),     # Recon 1 of 3 — must be before vengeance (false-match risk)
     ("mission_vengeance", "ship_garmur"),
     ("mission_jaguar", "ship_garmur"),
     ("mission_enyo", "ship_garmur"),
@@ -160,7 +168,6 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_sansha", "ship_sansha"),
     ("mission_angel", "ship_angel"),
     ("mission_infested", "ship_sk"),
-    ("mission_recon1", "ship_sk"),
 ]
 
 # -----------------------------------------------------------------------------
@@ -177,10 +184,11 @@ def load_ship_mission_map() -> dict:
     return {"ship_missions": [], "default_ship_template": "ship_garmur"}
 
 
-def resolve_ship_via_dialog_templates(matcher: "TemplateMatcher") -> Optional[str]:
+def resolve_ship_via_dialog_templates(matcher: "TemplateMatcher") -> tuple[Optional[str], Optional[str]]:
     """
     Scan the current screen for mission dialog templates (mission_*).
-    Returns the ship template key for the first match, or None if nothing matched.
+    Returns (ship_template_key, dialog_key) for the first match,
+    or (None, None) if nothing matched.
     This is the primary identification method — no OCR involved.
     """
     screen = matcher.screenshot_cv()
@@ -190,8 +198,8 @@ def resolve_ship_via_dialog_templates(matcher: "TemplateMatcher") -> Optional[st
         match = matcher.find(dialog_key, screen=screen)
         if match:
             log.info("Dialog template matched: '%s' → ship: '%s'", dialog_key, ship_key)
-            return ship_key
-    return None
+            return ship_key, dialog_key
+    return None, None
 
 
 def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
@@ -295,11 +303,46 @@ class TemplateMatcher:
         log.info("'%s' not found (best=%.3f < threshold %.3f)", key, max_val, th)
         return None
 
-    # TODO: add find_all(key) — returns List of (x, y, w, h) for ALL matches
-    #       above threshold using cv2.matchTemplate + np.where + non-max suppression.
-    #       Needed for ctrl+clicking multiple identical targets (e.g., 2× inquisitor).
-    #       Wire up as: ctrlClickAllTemplate(key) in OCRBridge/MissionProcessor,
-    #       --ctrl-click-all KEY in CLI.
+    def find_all(
+        self,
+        key: str,
+        screen: Optional[np.ndarray] = None,
+        threshold: Optional[float] = None,
+    ) -> list[Tuple[int, int, int, int]]:
+        """Return list of (x, y, w, h) for ALL matches above threshold.
+        Uses non-max suppression to avoid overlapping detections."""
+        template = self.templates.get(key)
+        if template is None:
+            log.debug("Template '%s' not loaded — skipping.", key)
+            return []
+        if screen is None:
+            screen = self.screenshot_cv()
+        th = threshold if threshold is not None else self.threshold
+        h, w = template.shape[:2]
+        result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
+        locs = np.where(result >= th)
+        # Collect all candidates
+        candidates = []
+        for pt_y, pt_x in zip(*locs):
+            candidates.append((int(pt_x), int(pt_y), w, h, float(result[pt_y, pt_x])))
+        if not candidates:
+            log.info("find_all('%s'): no matches (threshold %.3f)", key, th)
+            return []
+        # Non-max suppression: sort by confidence descending, discard overlapping
+        candidates.sort(key=lambda c: c[4], reverse=True)
+        kept: list[Tuple[int, int, int, int]] = []
+        for cx, cy, cw, ch, conf in candidates:
+            # Skip if too close to an already-kept match (within half template size)
+            too_close = False
+            for kx, ky, kw, kh in kept:
+                if abs(cx - kx) < cw * 0.5 and abs(cy - ky) < ch * 0.5:
+                    too_close = True
+                    break
+            if not too_close:
+                kept.append((cx, cy, cw, ch))
+                log.debug("find_all('%s'): kept match at (%d,%d) conf=%.3f", key, cx, cy, conf)
+        log.info("find_all('%s'): found %d distinct matches", key, len(kept))
+        return kept
 
     def find_all_on_screen(self) -> Dict[str, Optional[Tuple[int, int, int, int]]]:
         screen = self.screenshot_cv()
@@ -767,6 +810,20 @@ class TemplateMatcher:
         log.warning("'%s' not found on screen — cannot Ctrl+click", key)
         return False
 
+    def ctrl_click_all(self, key: str, threshold=None, delay: float = 0.3) -> int:
+        """Find ALL matches of template and Ctrl+click each one (lock all targets).
+        Returns the number of targets clicked."""
+        matches = self.find_all(key, threshold=threshold)
+        if not matches:
+            log.warning("'%s' not found on screen — cannot Ctrl+click any", key)
+            return 0
+        for i, match in enumerate(matches):
+            cx, cy = self.center(match)
+            log.info("Ctrl+click-all '%s' [%d/%d] at (%d,%d)", key, i + 1, len(matches), cx, cy)
+            self._do_ctrl_click(cx, cy, delay=delay)
+            time.sleep(0.3)  # brief pause between locks
+        return len(matches)
+
     def wait_and_w_click(
         self,
         key: str,
@@ -916,7 +973,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     ship_map = load_ship_mission_map()
 
     # Primary: scan the open mission dialog for a known visual template
-    ship_template = resolve_ship_via_dialog_templates(matcher)
+    ship_template, dialog_matched = resolve_ship_via_dialog_templates(matcher)
     if ship_template:
         log.info("Ship identified via dialog template: %s", ship_template)
     else:
@@ -954,6 +1011,10 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
                 cx,
                 cy,
             )
+            result = {"ship_template": ship_template}
+            if dialog_matched:
+                result["dialog_matched"] = dialog_matched
+            print(json.dumps(result), flush=True)
             sys.exit(0)
         else:
             log.warning(
@@ -1027,6 +1088,11 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             sys.exit(1)
 
     log.info("=== Ship repaired and activated successfully ===")
+    # Print JSON result to stdout so Java can read the dialog match
+    result = {"ship_template": ship_template}
+    if dialog_matched:
+        result["dialog_matched"] = dialog_matched
+    print(json.dumps(result), flush=True)
     sys.exit(0)
 
 
@@ -1355,6 +1421,24 @@ def cmd_e_click(key: str, dry_run: bool, threshold: float):
         sys.exit(0 if ok else 1)
 
 
+def cmd_ctrl_click_all(key: str, dry_run: bool, threshold: float):
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    if dry_run:
+        matches = matcher.find_all(key)
+        if matches:
+            for i, m in enumerate(matches):
+                log.info("[DRY RUN] Would Ctrl+click '%s' [%d] at %s", key, i + 1, matcher.center(m))
+            sys.exit(0)
+        else:
+            log.warning("[DRY RUN] Template '%s' not found", key)
+            sys.exit(1)
+    else:
+        count = matcher.ctrl_click_all(key)
+        # Print the count to stdout so Java can read it
+        print(str(count), flush=True)
+        sys.exit(0 if count > 0 else 1)
+
+
 def cmd_ctrl_r(dry_run: bool):
     if dry_run:
         log.info("[DRY RUN] Would press Ctrl+R (reload modules)")
@@ -1510,6 +1594,9 @@ Examples:
         "--ctrl-click", metavar="KEY", help="Hold Ctrl + left-click a template then exit (lock target)"
     )
     parser.add_argument(
+        "--ctrl-click-all", metavar="KEY", help="Find ALL matches of template and Ctrl+click each (lock all targets)"
+    )
+    parser.add_argument(
         "--key-press", metavar="KEYS", help="Press each character in KEYS sequentially then exit"
     )
     parser.add_argument(
@@ -1588,6 +1675,10 @@ Examples:
 
     if getattr(args, "ctrl_click", None):
         cmd_ctrl_click(args.ctrl_click, dry_run=args.dry_run, threshold=args.threshold)
+        return
+
+    if getattr(args, "ctrl_click_all", None):
+        cmd_ctrl_click_all(args.ctrl_click_all, dry_run=args.dry_run, threshold=args.threshold)
         return
 
     if getattr(args, "key_press", None):

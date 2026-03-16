@@ -167,6 +167,16 @@ public class MissionProcessor {
         sleep(1200);
     }
 
+    public void doubleClickTemplate(String key) {
+        log("Double-clicking template: " + key);
+        ocrBridge.doubleClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public String findTemplate(String key) {
+        return ocrBridge.findAnyTemplate(key);
+    }
+
     public void pressCtrlR() {
         log("Pressing Ctrl+R (reload modules)");
         ocrBridge.ctrlR();
@@ -220,10 +230,18 @@ public class MissionProcessor {
 
         // 1 — Identify ship from open dialog + repair + activate (all in Python)
         log("Step 1: Repair + activate ship");
-        boolean repaired = ocrBridge.repairShip(lookup);
-        if (!repaired) {
+        String dialogMatched = ocrBridge.repairShip(lookup);
+        if (dialogMatched == null) {
             System.err.println("[MissionProcessor] repairShip failed — aborting.");
             return false;
+        }
+
+        // If Python matched a dialog template (e.g. "mission_hawk"), extract the
+        // combat target name and set it on the mission so IN_COMBAT knows what to do.
+        if (mission != null && !dialogMatched.isEmpty() && dialogMatched.startsWith("mission_")) {
+            String combatTarget = dialogMatched.substring("mission_".length());
+            log("Dialog template identified combat target: '" + combatTarget + "'");
+            mission.setShipTarget(combatTarget);
         }
         sleep(500);
 
@@ -270,6 +288,20 @@ public class MissionProcessor {
     // Travel / returning navigation
     // -----------------------------------------------------------------------
 
+    /**
+     * Right-click a template, then click a context-menu template.
+     * Used for stargate jumps (right-click stargate → click "jump")
+     * and mission gate activation (right-click activate_gate → click "mission_start").
+     */
+    public void rightClickAndSelect(String targetKey, String menuKey) {
+        log("Right-clicking '" + targetKey + "' → clicking '" + menuKey + "'");
+        ocrBridge.rightClickTemplate(targetKey);
+        sleep(800);
+        ocrBridge.clickTemplate(menuKey);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** @deprecated Use {@link #rightClickAndSelect} instead. Kept for combat sequences. */
     public void eClickTemplate(String key) {
         log("E+clicking template: " + key);
         ocrBridge.eClickTemplate(key);
@@ -292,6 +324,15 @@ public class MissionProcessor {
         log("Ctrl+clicking template: " + key);
         ocrBridge.ctrlClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** Ctrl+click ALL matches of a template (lock all visible targets). Returns count locked. */
+    public int ctrlClickAllTemplate(String key) {
+        log("Ctrl+click-all template: " + key);
+        int count = ocrBridge.ctrlClickAllTemplate(key);
+        log("Locked " + count + " targets for '" + key + "'");
+        sleep(POST_CLICK_DELAY_MS);
+        return count;
     }
 
     public void rightClickTemplate(String key) {

@@ -129,9 +129,10 @@ class EVEMissionReader:
 
     def clean_location(self, raw: str) -> str:
         upper = self.clean_line(raw).upper()
-        # Strip noise words and security decimal
+        # Strip noise words and security decimal.
+        # No \b boundaries — OCR often merges words (e.g. "T2ILOWSECWARNING").
         upper = re.sub(
-            r"\b(LOW|NULL|HIGH|SEC|WARNING|LOCATION|LACATION|DIVISION|SECURITY)\b",
+            r"(LOW|NULL|HIGH|SEC|WARNING|LOCATION|LACATION|DIVISION|SECURITY)",
             " ", upper,
         )
         upper = re.sub(r"-?\d+\.\d+", " ", upper)

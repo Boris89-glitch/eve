@@ -192,7 +192,8 @@ public class MissionConfig {
                     && !safe(m.getObjective()).contains(objectiveContains.toLowerCase()))
                 return false;
             if (locationContains != null
-                    && !safe(m.getLocation()).contains(locationContains.toLowerCase()))
+                    && !safe(m.getLocation()).contains(locationContains.toLowerCase())
+                    && !safe(m.getRawText()).contains(locationContains.toLowerCase()))
                 return false;
             if (securityContains != null
                     && !safe(m.getSecurity()).contains(securityContains.toLowerCase()))

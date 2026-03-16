@@ -252,6 +252,27 @@ public class OCRBridge {
     }
 
     /**
+     * Ctrl+click ALL matches of a template on screen (lock all targets).
+     * Returns the number of targets clicked, or 0 if none found.
+     */
+    public int ctrlClickAllTemplate(String key) {
+        System.out.printf("[%s] [OCRBridge] ctrlClickAllTemplate: %s%n", ts(), key);
+        String output = runPython("python", automationScriptPath, "--ctrl-click-all", key);
+        if (output == null || output.isEmpty()) {
+            System.err.printf("[%s] [OCRBridge] ctrlClickAllTemplate: no output.%n", ts());
+            return 0;
+        }
+        try {
+            int count = Integer.parseInt(output.trim());
+            System.out.printf("[%s] [OCRBridge] ctrlClickAllTemplate: locked %d targets.%n", ts(), count);
+            return count;
+        } catch (NumberFormatException e) {
+            System.err.printf("[%s] [OCRBridge] ctrlClickAllTemplate: bad output '%s'.%n", ts(), output);
+            return 0;
+        }
+    }
+
+    /**
      * Press each character in the keys string sequentially.
      * Used for activating module groups in combat (e.g., "adc").
      */
@@ -291,16 +312,28 @@ public class OCRBridge {
      * @param missionTitle The accepted mission's title (used for ship lookup)
      * @return true if repair + activation succeeded, false on failure
      */
-    public boolean repairShip(String missionTitle) {
+    /**
+     * @return dialog_matched key (e.g. "mission_hawk") if identified, empty string
+     *         if repair succeeded but no dialog matched, or null on failure.
+     */
+    public String repairShip(String missionTitle) {
         System.out.printf("[%s] [OCRBridge] repairShip for mission: %s%n", ts(), missionTitle);
-        int code = runPythonExitCode("python", automationScriptPath,
+        String output = runPython("python", automationScriptPath,
                 "--repair-ship", missionTitle != null ? missionTitle : "");
-        if (code == 0) {
-            System.out.printf("[%s] [OCRBridge] repairShip succeeded.%n", ts());
-            return true;
-        } else {
-            System.err.printf("[%s] [OCRBridge] repairShip FAILED (exit code %d).%n", ts(), code);
-            return false;
+        if (output == null || output.isEmpty()) {
+            System.err.printf("[%s] [OCRBridge] repairShip FAILED (no output).%n", ts());
+            return null;
+        }
+        System.out.printf("[%s] [OCRBridge] repairShip result: %s%n", ts(), output);
+        try {
+            JsonObject json = gson.fromJson(output, JsonObject.class);
+            if (json.has("dialog_matched")) {
+                return json.get("dialog_matched").getAsString();
+            }
+            return "";  // success but no dialog match (OCR fallback was used)
+        } catch (JsonSyntaxException e) {
+            System.err.printf("[%s] [OCRBridge] repairShip: could not parse JSON: %s%n", ts(), e.getMessage());
+            return "";  // repair succeeded (got output) but JSON parse failed — treat as success
         }
     }
 

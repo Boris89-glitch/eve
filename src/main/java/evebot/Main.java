@@ -43,10 +43,10 @@ public class Main {
         // 3. Scheduler
         this.scheduler = Executors.newScheduledThreadPool(3);
 
-        // Poll clients every 1 second — fast enough to catch declines and re-request quickly
+        // Poll clients every 500ms for snappier response times
         scheduler.scheduleAtFixedRate(
                 clientManager::monitorClients,
-                0, 1, TimeUnit.SECONDS);
+                0, 500, TimeUnit.MILLISECONDS);
 
         // Auto-save state every 20 s
         scheduler.scheduleAtFixedRate(stateManager::saveStates, 20, 20, TimeUnit.SECONDS);
