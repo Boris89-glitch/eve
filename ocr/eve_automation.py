@@ -149,6 +149,9 @@ TEMPLATE_FILES = {
     "target_b": "target_b",              # Hawk support ship — overview row
     "target_bustard": "target_bustard",
     "target_frigate": "target_frigate",
+    "hive": "hive",
+    "lock_target": "lock_target",
+    "jamed": "jamed",  # ECM jam indicator — Angel combat
     # Recon mission — dock at home station to complete
     "home_station": "home_station",
 }
@@ -628,6 +631,32 @@ class TemplateMatcher:
                 time.sleep(0.1)
             pyautogui.keyUp('shift')
             log.info("pyautogui Shift+key-pressed '%s'", keys)
+        time.sleep(delay)
+
+    def _do_ctrl_key_press(self, keys: str, delay: float = 0.3):
+        """Hold Ctrl and press each character in *keys* sequentially."""
+        VK_CONTROL = 0x11
+        VK_MAP = {"space": 0x20}
+        try:
+            import win32api, win32con
+
+            win32api.keybd_event(VK_CONTROL, 0, 0, 0)  # Ctrl down
+            time.sleep(0.05)
+            for k in keys.split("+"):
+                vk = VK_MAP.get(k.lower()) or ord(k.upper())
+                win32api.keybd_event(vk, 0, 0, 0)
+                time.sleep(0.05)
+                win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+                time.sleep(0.1)
+            win32api.keybd_event(VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)  # Ctrl up
+            log.info("win32 Ctrl+key-pressed '%s'", keys)
+        except ImportError:
+            pyautogui.keyDown('ctrl')
+            for k in keys.split("+"):
+                pyautogui.press(k)
+                time.sleep(0.1)
+            pyautogui.keyUp('ctrl')
+            log.info("pyautogui Ctrl+key-pressed '%s'", keys)
         time.sleep(delay)
 
     def _do_alt_key_press(self, key: str, delay: float = 0.3):
@@ -1531,6 +1560,15 @@ def cmd_shift_key_press(keys: str, dry_run: bool):
     sys.exit(0)
 
 
+def cmd_ctrl_key_press(keys: str, dry_run: bool):
+    if dry_run:
+        log.info("[DRY RUN] Would Ctrl+press keys: %s", keys)
+        sys.exit(0)
+    matcher = TemplateMatcher(TEMPLATES_DIR)
+    matcher._do_ctrl_key_press(keys, delay=0.3)
+    sys.exit(0)
+
+
 def cmd_alt_key_press(key: str, dry_run: bool):
     if dry_run:
         log.info("[DRY RUN] Would Alt+press key: %s", key)
@@ -1601,6 +1639,9 @@ Examples:
     )
     parser.add_argument(
         "--shift-key-press", metavar="KEYS", help="Hold Shift and press each character in KEYS sequentially then exit"
+    )
+    parser.add_argument(
+        "--ctrl-key-press", metavar="KEYS", help="Hold Ctrl and press KEYS (e.g. 'space') then exit"
     )
     parser.add_argument(
         "--alt-key-press", metavar="KEY", help="Hold Alt and press KEY (e.g. 'f1') then exit"
@@ -1687,6 +1728,10 @@ Examples:
 
     if getattr(args, "shift_key_press", None):
         cmd_shift_key_press(args.shift_key_press, dry_run=args.dry_run)
+        return
+
+    if getattr(args, "ctrl_key_press", None):
+        cmd_ctrl_key_press(args.ctrl_key_press, dry_run=args.dry_run)
         return
 
     if getattr(args, "alt_key_press", None):

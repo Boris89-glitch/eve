@@ -353,6 +353,12 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    public void ctrlKeyPress(String keys) {
+        log("Ctrl+pressing keys: " + keys);
+        ocrBridge.ctrlKeyPress(keys);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void altKeyPress(String key) {
         log("Alt+pressing key: " + key);
         ocrBridge.altKeyPress(key);

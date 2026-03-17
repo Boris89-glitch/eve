@@ -286,6 +286,11 @@ public class OCRBridge {
         runPython("python", automationScriptPath, "--shift-key-press", keys);
     }
 
+    public void ctrlKeyPress(String keys) {
+        System.out.printf("[%s] [OCRBridge] ctrlKeyPress: %s%n", ts(), keys);
+        runPython("python", automationScriptPath, "--ctrl-key-press", keys);
+    }
+
     public void altKeyPress(String key) {
         System.out.printf("[%s] [OCRBridge] altKeyPress: %s%n", ts(), key);
         runPython("python", automationScriptPath, "--alt-key-press", key);
