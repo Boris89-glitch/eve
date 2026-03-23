@@ -98,7 +98,17 @@ public class MissionProcessor {
             return DialogState.NONE;
         }
         if ("complete_mission".equals(found)) {
-            log("Dialog state: ALREADY_ACCEPTED");
+            // complete_mission button visible — check if mission is actually done or still in progress.
+            String status = ocrBridge.findAnyTemplate("completed", "not_complete");
+            if ("completed".equals(status)) {
+                log("Dialog state: COMPLETED (complete_mission + completed visible)");
+                return DialogState.COMPLETED;
+            }
+            if ("not_complete".equals(status)) {
+                log("Dialog state: NOT_COMPLETE (complete_mission + not_complete visible)");
+                return DialogState.NOT_COMPLETE;
+            }
+            log("Dialog state: ALREADY_ACCEPTED (complete_mission only)");
             return DialogState.ALREADY_ACCEPTED;
         }
         log("Dialog state: OFFER (" + found + ")");

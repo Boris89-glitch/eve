@@ -123,9 +123,6 @@ TEMPLATE_FILES = {
     "mission_hawk": "mission_hawk",  # → ship_garmur
     "mission_jaguar": "mission_jaguar",  # → ship_garmur
     "mission_worm": "mission_worm",  # → ship_worm
-    "mission_garmur": "mission_garmur",  # → ship_garmur
-    "mission_dramiel": "mission_dramiel",  # → ship_angel
-    "mission_succubus": "mission_succubus",  # → ship_garmur
     "mission_sansha": "mission_sansha",  # → ship_sansha
     "mission_angel": "mission_angel",  # → ship_angel
     "mission_infested": "mission_infested",  # → ship_sk  (Infested Ruins)
@@ -151,9 +148,10 @@ TEMPLATE_FILES = {
     "target_navitas": "target_navitas",
     "em_damage": "em_damage",
     "target_hawk": "target_hawk",
-    "target_b": "target_b",              # Hawk support ship — overview row
-    "target_bustard": "target_bustard",
-    "target_frigate": "target_frigate",
+    "target_bantam": "target_bantam",    # Hawk support frigates — overview row
+    "target_sansha": "target_sansha",    # Sansha burner — overview row
+    "target_angel": "target_angel",      # Angel burner — overview row
+    "target_worm": "target_worm",        # Worm burner — overview row
     "hive": "hive",
     "lock_target": "lock_target",
     "jamed": "jamed",  # ECM jam indicator — Angel combat
@@ -170,9 +168,6 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_enyo", "ship_garmur"),
     ("mission_hawk", "ship_garmur"),
     ("mission_worm", "ship_worm"),
-    ("mission_garmur", "ship_garmur"),
-    ("mission_dramiel", "ship_angel"),
-    ("mission_succubus", "ship_sansha"),
     ("mission_sansha", "ship_sansha"),
     ("mission_angel", "ship_angel"),
     ("mission_infested", "ship_sk"),

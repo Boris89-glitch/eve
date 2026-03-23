@@ -341,7 +341,10 @@ public class ClientManager {
             }
             case NOT_COMPLETE: {
                 agentRetries.put(clientId, 0);
-                log(clientId, "Mission accepted but NOT complete (not_complete visible) — proceeding to ship selection.");
+                log(clientId, "Mission accepted but NOT complete — reading mission via OCR before ship selection.");
+                Rectangle missionArea = getMissionAreaForClient(clientId);
+                Mission mission = missionProcessor.readMission(missionArea);
+                stateManager.getState(clientId).setCurrentMission(mission);
                 stateManager.setState(clientId, ClientState.State.ACCEPTED);
                 break;
             }
@@ -733,7 +736,7 @@ public class ClientManager {
      *   3  → Check 'orbiting' — if not found, repeat W+click (loop back to 2)
      *   4  → Keypress 's' (activate module)
      *   5  → SAFE WAIT 15s
-     *   6  → Ctrl+click-all 'target_frigate' (lock all targets)
+     *   6  → Ctrl+click-all 'target_inquisitor' (lock all targets)
      *   7  → WAIT 3s (lock animation)
      *   8  → Click 'target_inquisitor' (select as active target)
      *   9  → Keypress 'adc' (activate modules)
@@ -804,8 +807,8 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Vengeance] Step 6: Ctrl+click-all target_frigate (lock all).");
-                missionProcessor.ctrlClickAllTemplate("target_frigate");
+                log(clientId, "COMBAT[Vengeance] Step 6: Ctrl+click-all target_inquisitor (lock all).");
+                missionProcessor.ctrlClickAllTemplate("target_inquisitor");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
@@ -947,7 +950,7 @@ public class ClientManager {
      *   3  → Check 'orbiting' — if not found, repeat W+click (loop back to 2)
      *   4  → Keypress 's' (activate module)
      *   5  → SAFE WAIT 15s
-     *   6  → Ctrl+click-all 'target_frigate' (lock all targets)
+     *   6  → Ctrl+click-all 'target_navitas' (lock all targets)
      *   7  → WAIT 3s (lock animation)
      *   8  → Click 'target_navitas' (select as active target)
      *   9  → Keypress 'adc' (activate modules)
@@ -1018,8 +1021,8 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click-all target_frigate (lock all).");
-                missionProcessor.ctrlClickAllTemplate("target_frigate");
+                log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click-all target_navitas (lock all).");
+                missionProcessor.ctrlClickAllTemplate("target_navitas");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
@@ -1113,9 +1116,9 @@ public class ClientManager {
      *   2  → W+click 'target_hawk' (orbit)
      *   3  → Check 'orbiting' — if not found, repeat W+click (loop back to 2)
      *   4  → SAFE WAIT 25s
-     *   5  → Ctrl+click-all 'target_frigate' (lock all targets)
+     *   5  → Ctrl+click-all 'target_hawk' + 'target_bantam' (lock all targets)
      *   6  → WAIT 3s (lock animation)
-     *   7  → Click 'target_b' (select support ship)
+     *   7  → Click 'target_bantam' (select support ship)
      *   8  → Keypress 'adc' (activate modules)
      *   9  → SAFE WAIT 120s
      *   10 → Click 'target_hawk' (select active)
@@ -1172,8 +1175,9 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                log(clientId, "COMBAT[Hawk] Step 5: Ctrl+click-all target_frigate (lock all).");
-                missionProcessor.ctrlClickAllTemplate("target_frigate");
+                log(clientId, "COMBAT[Hawk] Step 5: Ctrl+click-all target_hawk + target_bantam (lock all).");
+                missionProcessor.ctrlClickAllTemplate("target_hawk");
+                missionProcessor.ctrlClickAllTemplate("target_bantam");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(6);
                 break;
@@ -1182,8 +1186,8 @@ public class ClientManager {
                 // WAIT 3s for lock animations to complete
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 3) return;
-                log(clientId, "COMBAT[Hawk] Step 7: click target_b (select support ship).");
-                missionProcessor.clickTemplate("target_b");
+                log(clientId, "COMBAT[Hawk] Step 7: click target_bantam (select support ship).");
+                missionProcessor.clickTemplate("target_bantam");
                 cs.setCombatStep(7);
                 break;
             }
@@ -1246,17 +1250,16 @@ public class ClientManager {
      * Anomic Base — Sansha combat sequence.
      *
      * Steps:
-     *   0  → Ctrl+click 'target_frigate' (lock) + double-click 'target_frigate' (select)
-     *   1  → Keypress 'asdx' (activate modules)
-     *   2  → Q+click 'target_frigate' (keep at range)
+     *   0  → Ctrl+click 'target_sansha' (lock) + double-click 'target_sansha' (select)
+     *   1  → Keypress 'asdxc' (activate modules)
+     *   2  → Q+click 'target_sansha' (keep at range)
      *   3  → Check 'keep_at_range' — if not found, repeat Q+click (loop back to 2)
-     *   4  → WAIT 15s (no client switching)
-     *   5  → Shift+d (stop overloading afterburner)
-     *   6  → Shift+s (stop overloading web)
-     *   7  → Alt+F1 (burst cap recharge)
-     *   8  → WAIT 1s
-     *   9  → Alt+F1 (deactivate cap module)
-     *   10 → WAIT for set_destination (no client switching)
+     *   4  → WAIT 10s
+     *   5  → Shift+ds (stop overloading afterburner + web)
+     *   6  → Alt+F1 (burst cap recharge)
+     *   7  → WAIT 1s
+     *   8  → Alt+F1 (deactivate cap module)
+     *   9  → WAIT for set_destination (no client switching)
      */
     private void handleCombatSansha(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -1269,21 +1272,21 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Sansha] Step 1: Ctrl+click target_frigate (lock) + double-click (select).");
-                missionProcessor.ctrlClickTemplate("target_frigate");
-                missionProcessor.doubleClickTemplate("target_frigate");
+                log(clientId, "COMBAT[Sansha] Step 1: Ctrl+click target_sansha (lock) + double-click (select).");
+                missionProcessor.ctrlClickTemplate("target_sansha");
+                missionProcessor.doubleClickTemplate("target_sansha");
                 cs.setCombatStep(2);
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Sansha] Step 2: press 'asdx' (activate modules).");
-                missionProcessor.keyPress("asdx");
+                log(clientId, "COMBAT[Sansha] Step 2: press 'asdxc' (activate modules).");
+                missionProcessor.keyPress("asdxc");
                 cs.setCombatStep(3);
                 break;
             }
             case 3: {
-                log(clientId, "COMBAT[Sansha] Step 3: Q+click target_frigate (keep at range).");
-                missionProcessor.qClickTemplate("target_frigate");
+                log(clientId, "COMBAT[Sansha] Step 3: Q+click target_sansha (keep at range).");
+                missionProcessor.qClickTemplate("target_sansha");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(4);
                 break;
@@ -1304,50 +1307,44 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                // WAIT: 15 seconds (no client switching)
+                // WAIT: 10 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    log(clientId, "COMBAT[Sansha] safe wait: " + elapsed + "s / 15s.");
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Sansha] wait: " + elapsed + "s / 10s.");
                     return;
                 }
-                log(clientId, "COMBAT[Sansha] 15s wait complete — stopping overloads.");
+                log(clientId, "COMBAT[Sansha] 10s wait complete — stopping overloads.");
                 cs.setCombatStep(6);
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Sansha] Step 6: Shift+d (stop overloading afterburner).");
-                missionProcessor.shiftKeyPress("d");
+                log(clientId, "COMBAT[Sansha] Step 6: Shift+ds (stop overloading afterburner + web).");
+                missionProcessor.shiftKeyPress("ds");
                 cs.setCombatStep(7);
                 break;
             }
             case 7: {
-                log(clientId, "COMBAT[Sansha] Step 7: Shift+s (stop overloading web).");
-                missionProcessor.shiftKeyPress("s");
+                log(clientId, "COMBAT[Sansha] Step 7: Alt+F1 (burst cap recharge).");
+                missionProcessor.altKeyPress("f1");
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(8);
                 break;
             }
             case 8: {
-                log(clientId, "COMBAT[Sansha] Step 8: Alt+F1 (burst cap recharge).");
-                missionProcessor.altKeyPress("f1");
-                cs.setCombatWaitStart(LocalDateTime.now());
+                // WAIT: 1 second
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 1) return;
                 cs.setCombatStep(9);
                 break;
             }
             case 9: {
-                // WAIT: 1 second
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 1) return;
+                log(clientId, "COMBAT[Sansha] Step 9: Alt+F1 (deactivate cap module).");
+                missionProcessor.altKeyPress("f1");
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(10);
                 break;
             }
             case 10: {
-                log(clientId, "COMBAT[Sansha] Step 10: Alt+F1 (deactivate cap module).");
-                missionProcessor.altKeyPress("f1");
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(11);
-                break;
-            }
-            case 11: {
                 pollSetDestinationOrCapsule(clientId, cs, "Sansha", false);
                 break;
             }
@@ -1548,7 +1545,7 @@ public class ClientManager {
      *
      * Steps:
      *   0 → Shift+axc (overload modules)
-     *   1 → right-click target_frigate (lock) + switch to other client
+     *   1 → right-click target_angel (lock) + switch to other client
      *   2 → poll lock_target — when found, press 'a'
      *   3 → poll for 'jamed' template, press 'xc' when found
      *   4 → press 'asd'
@@ -1566,8 +1563,8 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Angel] Step 1: right-click target_frigate (lock target).");
-                missionProcessor.rightClickTemplate("target_frigate");
+                log(clientId, "COMBAT[Angel] Step 1: right-click target_angel (lock target).");
+                missionProcessor.rightClickTemplate("target_angel");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(2);
                 ClientWindowInfo other = findOtherClient(clientId);
@@ -1658,12 +1655,12 @@ public class ClientManager {
      *
      * Steps:
      *   0 → Shift+asx (overload modules)
-     *   1 → double-click target_frigate (approach + lock)
+     *   1 → double-click target_worm (approach + lock)
      *   2 → press 's' (activate web)
      *   3 → WAIT 12s
-     *   4 → right-click target_frigate (lock target)
+     *   4 → right-click target_worm (lock target)
      *   5 → press 'sdxac' (TODO: verify lock_target before activating)
-     *   6 → Q+click target_frigate (orbit)
+     *   6 → Q+click target_worm (orbit)
      *   7 → check keep_at_range — if not found, repeat Q+click (loop back to 6)
      *   8 → Alt+F1
      *   9 → SAFE WAIT for set_destination (mission complete → RETURNING)
@@ -1679,8 +1676,8 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Worm] Step 1: double-click target_frigate (approach + lock).");
-                missionProcessor.doubleClickTemplate("target_frigate");
+                log(clientId, "COMBAT[Worm] Step 1: double-click target_worm (approach + lock).");
+                missionProcessor.doubleClickTemplate("target_worm");
                 cs.setCombatStep(2);
                 break;
             }
@@ -1703,8 +1700,8 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                log(clientId, "COMBAT[Worm] Step 4: right-click target_frigate (lock target).");
-                missionProcessor.rightClickTemplate("target_frigate");
+                log(clientId, "COMBAT[Worm] Step 4: right-click target_worm (lock target).");
+                missionProcessor.rightClickTemplate("target_worm");
                 cs.setCombatStep(5);
                 break;
             }
@@ -1716,8 +1713,8 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Worm] Step 6: Q+click target_frigate (orbit).");
-                missionProcessor.qClickTemplate("target_frigate");
+                log(clientId, "COMBAT[Worm] Step 6: Q+click target_worm (orbit).");
+                missionProcessor.qClickTemplate("target_worm");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
@@ -1784,9 +1781,8 @@ public class ClientManager {
         // Read agent standings before completing — determines fleet reward choice
         missionProcessor.clickAgentStandings();
         double standings = missionProcessor.readAgentStandings();
-        missionProcessor.closeAllDialogs(); // close standings window
 
-        missionProcessor.doubleClickAgentIcon();
+        missionProcessor.doubleClickAgentIcon(); // refocus agent dialog (standings covers complete_mission)
         missionProcessor.clickCompleteMission();
 
         // Fleet reward decision based on agent standings
