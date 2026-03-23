@@ -230,8 +230,13 @@ public class ClientManager {
                 // Just exited warp — check dock first (no stargate yet, same false-match risk).
                 String dockCheck = missionProcessor.detectDockOnly();
                 if (dockCheck != null) {
-                    log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
-                    missionProcessor.clickDock();
+                    if (missionProcessor.isEnemyInLocal()) {
+                        log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
+                        missionProcessor.instaDock();
+                    } else {
+                        log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
+                        missionProcessor.clickDock();
+                    }
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     return;
@@ -271,8 +276,13 @@ public class ClientManager {
             }
             switch (found) {
                 case "dock":
-                    log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
-                    missionProcessor.clickDock();
+                    if (missionProcessor.isEnemyInLocal()) {
+                        log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
+                        missionProcessor.instaDock();
+                    } else {
+                        log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
+                        missionProcessor.clickDock();
+                    }
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     break;
@@ -1770,8 +1780,31 @@ public class ClientManager {
             return;
         }
         missionProcessor.doubleClickAgentIcon();
+
+        // Read agent standings before completing — determines fleet reward choice
+        missionProcessor.clickAgentStandings();
+        double standings = missionProcessor.readAgentStandings();
+        missionProcessor.closeAllDialogs(); // close standings window
+
+        missionProcessor.doubleClickAgentIcon();
         missionProcessor.clickCompleteMission();
-        missionProcessor.clickOk();
+
+        // Fleet reward decision based on agent standings
+        // Below 0: take all rewards (fleet_no) to recover standings
+        // Healthy: share with fleet (fleet_yes)
+        if (Double.isNaN(standings)) {
+            log(clientId, "COMPLETING: standings OCR failed — defaulting to fleet YES.");
+            missionProcessor.clickFleetYes();
+        } else if (standings < -1.0) {
+            log(clientId, String.format("COMPLETING: standings %.2f (critical) — fleet NO.", standings));
+            missionProcessor.clickFleetNo();
+        } else if (standings < 0.0) {
+            log(clientId, String.format("COMPLETING: standings %.2f (low) — fleet NO.", standings));
+            missionProcessor.clickFleetNo();
+        } else {
+            log(clientId, String.format("COMPLETING: standings %.2f (healthy) — fleet YES.", standings));
+            missionProcessor.clickFleetYes();
+        }
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
 
         // Request next mission immediately and go to CHECKING_MISSIONS

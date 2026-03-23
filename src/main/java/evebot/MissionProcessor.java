@@ -389,10 +389,59 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    /** Check if enemy icon is visible in local chat. */
+    public boolean isEnemyInLocal() {
+        return ocrBridge.findAnyTemplate("enemy") != null;
+    }
+
+    /**
+     * Insta-dock sequence for when enemies are in local:
+     * right-click empty space → hover Locations → click Dock → Ctrl+S (autopilot).
+     */
+    public void instaDock() {
+        log("INSTA-DOCK: enemy in local — using safe dock sequence");
+        ocrBridge.rightClickPos(960, 540);   // right-click centre of space view
+        sleep(800);
+        ocrBridge.hoverTemplate("locations"); // hover Locations submenu
+        sleep(800);
+        ocrBridge.clickTemplate("dock");      // click Dock from submenu
+        sleep(POST_CLICK_DELAY_MS);
+        ctrlKeyPress("s");                    // autopilot to insta-dock bookmark
+    }
+
     public void clickOk() {
         log("Clicking OK (template)");
         ocrBridge.clickTemplate("ok");
         sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public String detectFleetReward() {
+        return ocrBridge.findAnyTemplate("fleet_yes", "fleet_no");
+    }
+
+    public void clickFleetYes() {
+        log("Clicking fleet reward YES");
+        ocrBridge.clickTemplate("fleet_yes");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void clickFleetNo() {
+        log("Clicking fleet reward NO");
+        ocrBridge.clickTemplate("fleet_no");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void clickAgentStandings() {
+        log("Clicking agent standings button");
+        ocrBridge.clickTemplate("agent_standings");
+        sleep(1200); // wait for standings window to open
+    }
+
+    /** OCR-read agent standings from the standings info window. */
+    public double readAgentStandings() {
+        double val = ocrBridge.readStandings(300, 490, 100, 55);
+        log("Agent standings OCR: " + val);
+        return val;
     }
 
     /**

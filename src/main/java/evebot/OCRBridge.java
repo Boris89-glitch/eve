@@ -177,6 +177,30 @@ public class OCRBridge {
         }
     }
 
+    /**
+     * OCR-read agent standings from a screen region.
+     * Returns the standings value as a double, or Double.NaN on failure.
+     */
+    public double readStandings(int x, int y, int width, int height) {
+        String json = runPython("python", missionReaderPath,
+                "--standings",
+                String.valueOf(x), String.valueOf(y),
+                String.valueOf(width), String.valueOf(height));
+        if (json == null || json.isEmpty()) return Double.NaN;
+        System.out.printf("[%s] [OCRBridge] Standings OCR output: %s%n", ts(), json);
+        try {
+            JsonObject obj = gson.fromJson(json, JsonObject.class);
+            if (obj.has("error")) {
+                System.err.println("[OCRBridge] Standings OCR error: " + obj.get("error").getAsString());
+                return Double.NaN;
+            }
+            return obj.get("standings").getAsDouble();
+        } catch (Exception e) {
+            System.err.println("[OCRBridge] Standings parse error: " + e.getMessage());
+            return Double.NaN;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Template clicking — eve_automation.py
     // -----------------------------------------------------------------------
@@ -213,6 +237,24 @@ public class OCRBridge {
     public void rightClickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] rightClickTemplate: %s%n", ts(), key);
         runPython("python", automationScriptPath, "--right-click", key);
+    }
+
+    /**
+     * Right-click at fixed screen coordinates (not template-based).
+     */
+    public void rightClickPos(int x, int y) {
+        System.out.printf("[%s] [OCRBridge] rightClickPos: (%d,%d)%n", ts(), x, y);
+        runPython("python", automationScriptPath, "--right-click-pos",
+                String.valueOf(x), String.valueOf(y));
+    }
+
+    /**
+     * Hover: find the named template and move mouse to its centre without clicking.
+     * Used for opening submenus on hover (e.g. Locations in right-click context menu).
+     */
+    public void hoverTemplate(String key) {
+        System.out.printf("[%s] [OCRBridge] hoverTemplate: %s%n", ts(), key);
+        runPython("python", automationScriptPath, "--hover", key);
     }
 
     /**

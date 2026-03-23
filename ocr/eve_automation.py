@@ -105,11 +105,16 @@ TEMPLATE_FILES = {
     "warp_active": "warp_active",
     "dock": "dock",
     "ok": "ok",
+    "fleet_yes": "fleet_yes",
+    "fleet_no": "fleet_no",
     # Capsule / self-destruct (ship destroyed recovery)
     "capsule": "capsule",
     "destruct": "destruct",
     # Agent interaction
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
+    "agent_standings": "agent_standings",  # standings info button in agent dialog
+    "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
+    "locations": "locations",  # locations submenu in right-click context menu (hover target)
     # Mission dialog detection templates — crop these from the mission dialog window.
     # Name them mission_<target>.png. They are matched against the open dialog to
     # identify the mission type without relying on OCR text parsing.
@@ -1617,6 +1622,13 @@ Examples:
         "--right-click", metavar="KEY", help="Right-click a template then exit"
     )
     parser.add_argument(
+        "--right-click-pos", nargs=2, type=int, metavar=("X", "Y"),
+        help="Right-click at fixed screen coordinates then exit"
+    )
+    parser.add_argument(
+        "--hover", metavar="KEY", help="Find template and move mouse to its centre (no click), then exit"
+    )
+    parser.add_argument(
         "--e-click", metavar="KEY", help="Hold E + left-click a template then exit"
     )
     parser.add_argument(
@@ -1696,6 +1708,37 @@ Examples:
         cmd_right_click(
             args.right_click, dry_run=args.dry_run, threshold=args.threshold
         )
+        return
+
+    if getattr(args, "right_click_pos", None):
+        x, y = args.right_click_pos
+        matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)
+        if args.dry_run:
+            log.info("[DRY RUN] Would right-click at (%d,%d)", x, y)
+        else:
+            log.info("Right-clicking at (%d,%d)", x, y)
+            matcher._do_click(x, y, button="right", delay=0.3)
+        sys.exit(0)
+        return
+
+    if getattr(args, "hover", None):
+        matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)
+        match = matcher.wait_for(args.hover, timeout=2.0)
+        if not match:
+            log.warning("Could not find '%s' within 2.0s for hover", args.hover)
+            sys.exit(1)
+        cx, cy = matcher.center(match)
+        if args.dry_run:
+            log.info("[DRY RUN] Would hover '%s' at (%d,%d)", args.hover, cx, cy)
+        else:
+            log.info("Hovering '%s' at (%d,%d)", args.hover, cx, cy)
+            try:
+                import win32api
+                win32api.SetCursorPos((cx, cy))
+            except ImportError:
+                pyautogui.moveTo(cx, cy, duration=0.1)
+            time.sleep(0.5)
+        sys.exit(0)
         return
 
     if getattr(args, "e_click", None):

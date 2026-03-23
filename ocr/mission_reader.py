@@ -270,6 +270,32 @@ class EVEMissionReader:
 
 
 def main():
+    # --standings mode: OCR a small region for a numeric standings value
+    if len(sys.argv) >= 2 and sys.argv[1] == "--standings":
+        if len(sys.argv) != 6:
+            print(json.dumps({"error": "Usage: mission_reader.py --standings x y width height"}))
+            sys.exit(1)
+        try:
+            x, y, width, height = map(int, sys.argv[2:6])
+            reader = EVEMissionReader()
+            image = reader.capture_region(x, y, width, height)
+            if image is None:
+                print(json.dumps({"error": "Failed to capture standings region"}))
+                sys.exit(1)
+            processed = reader.preprocess_image(image)
+            config = r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.-"
+            raw = pytesseract.image_to_string(processed, config=config).strip()
+            # Parse the first float-like value from OCR output
+            match = re.search(r"-?\d+\.?\d*", raw)
+            if match:
+                print(json.dumps({"standings": float(match.group())}))
+            else:
+                print(json.dumps({"error": f"Could not parse standings from: {raw}"}))
+        except Exception as e:
+            print(json.dumps({"error": str(e)}))
+            sys.exit(1)
+        return
+
     if len(sys.argv) not in (5, 6):
         print(json.dumps({"error": "Usage: mission_reader.py x y width height [debug]"}))
         sys.exit(1)
