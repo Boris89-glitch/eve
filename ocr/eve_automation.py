@@ -495,17 +495,11 @@ class TemplateMatcher:
             time.sleep(0.05)
             win32api.keybd_event(VK_W, SCAN_W, 0, 0)          # key down
             time.sleep(0.15)
-            # Verify W is held before first click
-            w_state1 = win32api.GetAsyncKeyState(VK_W)
-            log.info("W key state before click 1: %s (held=%s)", w_state1, w_state1 < 0)
             # First click
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
             time.sleep(0.05)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
             time.sleep(0.05)
-            # Verify W is held before second click
-            w_state2 = win32api.GetAsyncKeyState(VK_W)
-            log.info("W key state before click 2: %s (held=%s)", w_state2, w_state2 < 0)
             # Second click (key still held)
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, cx, cy, 0, 0)
             time.sleep(0.05)

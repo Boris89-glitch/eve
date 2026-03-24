@@ -682,7 +682,6 @@ public class ClientManager {
             case 2: {
                 log(clientId, "COMBAT[Jaguar] Step 2: Q+click target_jaguar (orbit).");
                 missionProcessor.qClickTemplate("target_jaguar");
-                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
@@ -797,7 +796,6 @@ public class ClientManager {
             case 2: {
                 log(clientId, "COMBAT[Vengeance] Step 2: W+click target_vengeance (keep at range).");
                 missionProcessor.wClickTemplate("target_vengeance");
-                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
@@ -1009,7 +1007,6 @@ public class ClientManager {
             case 2: {
                 log(clientId, "COMBAT[Enyo] Step 2: W+click target_enyo (keep at range).");
                 missionProcessor.wClickTemplate("target_enyo");
-                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
@@ -1173,7 +1170,6 @@ public class ClientManager {
             case 2: {
                 log(clientId, "COMBAT[Hawk] Step 2: W+click target_hawk (keep at range).");
                 missionProcessor.wClickTemplate("target_hawk");
-                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
@@ -1320,7 +1316,6 @@ public class ClientManager {
             case 3: {
                 log(clientId, "COMBAT[Sansha] Step 3: Q+click target_sansha (keep at range).");
                 missionProcessor.qClickTemplate("target_sansha");
-                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(4);
                 break;
             }
@@ -1599,7 +1594,6 @@ public class ClientManager {
             case 4: {
                 log(clientId, "COMBAT[Angel] Step 4: Q+click target_angel (keep at range).");
                 missionProcessor.qClickTemplate("target_angel");
-                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
             }
@@ -1721,7 +1715,6 @@ public class ClientManager {
             case 6: {
                 log(clientId, "COMBAT[Worm] Step 6: Q+click target_worm (keep at range).");
                 missionProcessor.qClickTemplate("target_worm");
-                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
             }
