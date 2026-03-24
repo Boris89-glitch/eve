@@ -282,13 +282,24 @@ def main():
             if image is None:
                 print(json.dumps({"error": "Failed to capture standings region"}))
                 sys.exit(1)
-            processed = reader.preprocess_image(image)
+            # Standings-specific preprocessing: EVE shows light text on dark bg
+            gray = image.convert("L")
+            gray = ImageEnhance.Contrast(gray).enhance(2.0)
+            gray = gray.filter(ImageFilter.SHARPEN)
+            img_cv = np.array(gray)
+            # Scale up 3x for better OCR of small text
+            img_cv = cv2.resize(img_cv, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+            # Invert so dark bg → white bg, light text → dark text
+            _, img_cv = cv2.threshold(img_cv, 150, 255, cv2.THRESH_BINARY_INV)
+            # Re-invert to get black text on white background for Tesseract
+            img_cv = cv2.bitwise_not(img_cv)
+            processed = Image.fromarray(img_cv)
             config = r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.-"
             raw = pytesseract.image_to_string(processed, config=config).strip()
             # Parse the first float-like value from OCR output
             match = re.search(r"-?\d+\.?\d*", raw)
             if match:
-                print(json.dumps({"standings": float(match.group())}))
+                print(json.dumps({"standings": float(match.group()), "raw": raw}))
             else:
                 print(json.dumps({"error": f"Could not parse standings from: {raw}"}))
         except Exception as e:

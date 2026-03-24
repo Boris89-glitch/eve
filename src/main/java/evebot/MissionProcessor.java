@@ -194,10 +194,13 @@ public class MissionProcessor {
     }
 
     public void closeAllDialogs() {
-        log("Closing all open dialogs (loop until X gone)");
-        while (ocrBridge.findAnyTemplate("close_active_window") != null) {
-            ocrBridge.clickTemplate("close_active_window");
-            sleep(500);
+        log("Closing all open dialogs (scan twice to catch late-rendering windows)");
+        for (int pass = 0; pass < 2; pass++) {
+            while (ocrBridge.findAnyTemplate("close_active_window") != null) {
+                ocrBridge.clickTemplate("close_active_window");
+                sleep(500);
+            }
+            if (pass == 0) sleep(1000); // wait for any late-rendering dialogs
         }
         log("No more dialogs visible.");
     }
@@ -422,6 +425,15 @@ public class MissionProcessor {
     public void clickOk() {
         log("Clicking OK (template)");
         ocrBridge.clickTemplate("ok");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    public void waitAndClickOk() {
+        log("Waiting for OK dialog and clicking");
+        boolean found = ocrBridge.waitAndClickTemplate("ok", 3);
+        if (!found) {
+            log("OK button not found after 3s — may have already been dismissed.");
+        }
         sleep(POST_CLICK_DELAY_MS);
     }
 

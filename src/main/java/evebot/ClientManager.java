@@ -793,6 +793,11 @@ public class ClientManager {
                 missionProcessor.keyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Vengeance] 25s safe wait — switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
                 break;
             }
             case 5: {
@@ -829,23 +834,23 @@ public class ClientManager {
                 cs.setCombatStep(9);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Vengeance] 130s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Vengeance] 100s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 9: {
-                // SAFE WAIT: 130 seconds
+                // SAFE WAIT: 100 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 130) {
-                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 130s.");
+                if (elapsed < 100) {
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 100s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Vengeance] 130s wait complete — re-targeting inquisitor.");
+                log(clientId, "COMBAT[Vengeance] 100s wait complete — re-targeting inquisitor.");
                 cs.setCombatStep(10);
                 break;
             }
@@ -1004,19 +1009,19 @@ public class ClientManager {
                 cs.setCombatStep(5);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Enyo] 20s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Enyo] 25s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 5: {
-                // SAFE WAIT: 20 seconds
+                // SAFE WAIT: 25 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 20) {
-                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 20s.");
+                if (elapsed < 25) {
+                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 25s.");
                     return;
                 }
-                log(clientId, "COMBAT[Enyo] 20s wait complete — locking navitas targets.");
+                log(clientId, "COMBAT[Enyo] 25s wait complete — locking navitas targets.");
                 cs.setCombatStep(6);
                 break;
             }
@@ -1043,23 +1048,23 @@ public class ClientManager {
                 cs.setCombatStep(9);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Enyo] 120s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Enyo] 100s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 9: {
-                // SAFE WAIT: 120 seconds
+                // SAFE WAIT: 100 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 120) {
-                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 120s.");
+                if (elapsed < 100) {
+                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 100s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Enyo] 120s wait complete — selecting enyo.");
+                log(clientId, "COMBAT[Enyo] 100s wait complete — selecting enyo.");
                 cs.setCombatStep(10);
                 break;
             }
@@ -1154,9 +1159,15 @@ public class ClientManager {
                 if (elapsed < 2) return;
                 String found = missionProcessor.findTemplate("orbiting");
                 if (found != null) {
-                    log(clientId, "COMBAT[Hawk] orbiting confirmed — proceeding.");
+                    log(clientId, "COMBAT[Hawk] orbiting confirmed — pressing 's' and proceeding.");
+                    missionProcessor.keyPress("s");
                     cs.setCombatWaitStart(LocalDateTime.now());
                     cs.setCombatStep(4);
+                    ClientWindowInfo other = findOtherClient(clientId);
+                    if (other != null) {
+                        log(clientId, "COMBAT[Hawk] 25s safe wait — switching to: " + other.getClientId());
+                        bringToForeground(other);
+                    }
                 } else {
                     log(clientId, "COMBAT[Hawk] orbiting NOT found — retrying W+click.");
                     cs.setCombatStep(2);
@@ -1496,22 +1507,18 @@ public class ClientManager {
                 // Instant switch on safe wait entry
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Recon] 30s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Recon] 20s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 3: {
-                // SAFE WAIT: 30 seconds
+                // SAFE WAIT: 20 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 30) {
-                    if (elapsed > 0 && elapsed % 30 == 0) {
-                        ClientWindowInfo other = findOtherClient(clientId);
-                        if (other != null) bringToForeground(other);
-                    }
+                if (elapsed < 20) {
                     return;
                 }
-                log(clientId, "COMBAT[Recon] 30s wait complete — docking at home station.");
+                log(clientId, "COMBAT[Recon] 20s wait complete — docking at home station.");
                 cs.setCombatStep(4);
                 break;
             }
@@ -1567,11 +1574,6 @@ public class ClientManager {
                 missionProcessor.rightClickTemplate("target_angel");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(2);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Angel] lock wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
                 break;
             }
             case 2: {
@@ -1801,6 +1803,7 @@ public class ClientManager {
             log(clientId, String.format("COMPLETING: standings %.2f (healthy) — fleet YES.", standings));
             missionProcessor.clickFleetYes();
         }
+        missionProcessor.waitAndClickOk(); // dismiss fleet reward confirmation dialog
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
 
         // Request next mission immediately and go to CHECKING_MISSIONS
