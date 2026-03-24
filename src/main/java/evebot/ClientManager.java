@@ -146,6 +146,29 @@ public class ClientManager {
     // IDLE
     // -----------------------------------------------------------------------
 
+    /**
+     * Load ammo before activating the gate (Vengeance only).
+     * Right-clicks launcher → clicks exp_damage so explosive rockets are ready before warp.
+     */
+    private void loadAmmoBeforeGate(String clientId, ClientState cs) {
+        Mission mission = cs.getCurrentMission();
+        String target = mission != null
+                ? (mission.getShipTarget() != null ? mission.getShipTarget() : mission.getTarget())
+                : null;
+        if (target == null || !target.equalsIgnoreCase("vengeance")) return;
+
+        log(clientId, "PRE-GATE: loading explosive rockets for Vengeance.");
+        String found = missionProcessor.findTemplate("launcher");
+        if (found == null) {
+            log(clientId, "PRE-GATE: launcher not found — skipping ammo load.");
+            return;
+        }
+        missionProcessor.rightClickTemplate("launcher");
+        try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        missionProcessor.clickTemplate("exp_damage");
+        try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+    }
+
     private void handleIdle(String clientId, ClientWindowInfo window) {
         // 2. Phase-based navigation — handles transit after each warp lands.
         ClientState cs = stateManager.getState(clientId);
@@ -162,6 +185,7 @@ public class ClientManager {
                 if (found != null) {
                     switch (found) {
                         case "activate_gate":
+                            loadAmmoBeforeGate(clientId, cs);
                             log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
                             cs.setWarpStartTime(LocalDateTime.now());
                             cs.setLastWarpCheck(LocalDateTime.MIN);
@@ -200,6 +224,7 @@ public class ClientManager {
             }
             switch (found) {
                 case "activate_gate":
+                    loadAmmoBeforeGate(clientId, cs);
                     log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
                     cs.setWarpStartTime(LocalDateTime.now());
                     cs.setLastWarpCheck(LocalDateTime.MIN);
@@ -710,17 +735,17 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                // SAFE WAIT: 90 seconds
+                // SAFE WAIT: 120 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 90) {
-                    log(clientId, "COMBAT[Jaguar] safe wait: " + elapsed + "s / 90s.");
+                if (elapsed < 120) {
+                    log(clientId, "COMBAT[Jaguar] safe wait: " + elapsed + "s / 120s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Jaguar] 90s wait complete — proceeding to lock target.");
+                log(clientId, "COMBAT[Jaguar] 120s wait complete — proceeding to lock target.");
                 cs.setCombatStep(6);
                 break;
             }
@@ -782,40 +807,28 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[Vengeance] Step 0: right-click launcher (ammo menu).");
-                missionProcessor.rightClickTemplate("launcher");
+                log(clientId, "COMBAT[Vengeance] Step 0: W+click target_vengeance (keep at range).");
+                missionProcessor.wClickTemplate("target_vengeance");
                 cs.setCombatStep(1);
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Vengeance] Step 1: click exp_damage (load explosive).");
-                missionProcessor.clickTemplate("exp_damage");
-                cs.setCombatStep(2);
-                break;
-            }
-            case 2: {
-                log(clientId, "COMBAT[Vengeance] Step 2: W+click target_vengeance (keep at range).");
-                missionProcessor.wClickTemplate("target_vengeance");
-                cs.setCombatStep(3);
-                break;
-            }
-            case 3: {
                 // Check orbiting — if not found, loop back to W+click
                 String found = missionProcessor.findTemplate("orbiting");
                 if (found != null) {
                     log(clientId, "COMBAT[Vengeance] orbiting confirmed — proceeding.");
-                    cs.setCombatStep(4);
+                    cs.setCombatStep(2);
                 } else {
                     log(clientId, "COMBAT[Vengeance] orbiting NOT found — retrying W+click.");
-                    cs.setCombatStep(2);
+                    cs.setCombatStep(0);
                 }
                 break;
             }
-            case 4: {
-                log(clientId, "COMBAT[Vengeance] Step 4: press 's' (activate modules).");
+            case 2: {
+                log(clientId, "COMBAT[Vengeance] Step 2: press 's' (activate modules).");
                 missionProcessor.keyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(5);
+                cs.setCombatStep(3);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "COMBAT[Vengeance] 25s safe wait — switching to: " + other.getClientId());
@@ -823,7 +836,7 @@ public class ClientManager {
                 }
                 break;
             }
-            case 5: {
+            case 3: {
                 // SAFE WAIT: 25 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 25) {
@@ -831,30 +844,30 @@ public class ClientManager {
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 25s wait complete — locking inquisitors.");
+                cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                log(clientId, "COMBAT[Vengeance] Step 4: Ctrl+click-all target_inquisitor (lock all).");
+                missionProcessor.ctrlClickAllTemplate("target_inquisitor");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(5);
+                break;
+            }
+            case 5: {
+                // WAIT 3s for lock animations to complete
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 3) return;
+                log(clientId, "COMBAT[Vengeance] Step 5: click target_inquisitor (select active).");
+                missionProcessor.clickTemplate("target_inquisitor");
                 cs.setCombatStep(6);
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Vengeance] Step 6: Ctrl+click-all target_inquisitor (lock all).");
-                missionProcessor.ctrlClickAllTemplate("target_inquisitor");
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(7);
-                break;
-            }
-            case 7: {
-                // WAIT 3s for lock animations to complete
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 3) return;
-                log(clientId, "COMBAT[Vengeance] Step 8: click target_inquisitor (select active).");
-                missionProcessor.clickTemplate("target_inquisitor");
-                cs.setCombatStep(8);
-                break;
-            }
-            case 8: {
-                log(clientId, "COMBAT[Vengeance] Step 9: press 'adc' (activate modules).");
+                log(clientId, "COMBAT[Vengeance] Step 6: press 'adc' (activate modules).");
                 missionProcessor.keyPress("adc");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(9);
+                cs.setCombatStep(7);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "COMBAT[Vengeance] 100s safe wait — switching to: " + other.getClientId());
@@ -862,7 +875,7 @@ public class ClientManager {
                 }
                 break;
             }
-            case 9: {
+            case 7: {
                 // SAFE WAIT: 100 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 100) {
@@ -874,20 +887,20 @@ public class ClientManager {
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 100s wait complete — re-targeting inquisitor.");
-                cs.setCombatStep(10);
+                cs.setCombatStep(8);
                 break;
             }
-            case 10: {
-                log(clientId, "COMBAT[Vengeance] Step 11: click target_inquisitor (re-select).");
+            case 8: {
+                log(clientId, "COMBAT[Vengeance] Step 8: click target_inquisitor (re-select).");
                 missionProcessor.clickTemplate("target_inquisitor");
-                cs.setCombatStep(11);
+                cs.setCombatStep(9);
                 break;
             }
-            case 11: {
-                log(clientId, "COMBAT[Vengeance] Step 12: press 'ad'.");
+            case 9: {
+                log(clientId, "COMBAT[Vengeance] Step 9: press 'ad'.");
                 missionProcessor.keyPress("ad");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(12);
+                cs.setCombatStep(10);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "COMBAT[Vengeance] 60s safe wait — switching to: " + other.getClientId());
@@ -895,7 +908,7 @@ public class ClientManager {
                 }
                 break;
             }
-            case 12: {
+            case 10: {
                 // SAFE WAIT: 60 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 60) {
@@ -907,23 +920,23 @@ public class ClientManager {
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 60s wait complete — switching ammo.");
+                cs.setCombatStep(11);
+                break;
+            }
+            case 11: {
+                log(clientId, "COMBAT[Vengeance] Step 11: right-click launcher (ammo menu).");
+                missionProcessor.rightClickTemplate("launcher");
+                cs.setCombatStep(12);
+                break;
+            }
+            case 12: {
+                log(clientId, "COMBAT[Vengeance] Step 12: click inf_damage (load infernal).");
+                missionProcessor.clickTemplate("inf_damage");
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(13);
                 break;
             }
             case 13: {
-                log(clientId, "COMBAT[Vengeance] Step 14: right-click launcher (ammo menu).");
-                missionProcessor.rightClickTemplate("launcher");
-                cs.setCombatStep(14);
-                break;
-            }
-            case 14: {
-                log(clientId, "COMBAT[Vengeance] Step 15: click inf_damage (load infernal).");
-                missionProcessor.clickTemplate("inf_damage");
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(15);
-                break;
-            }
-            case 15: {
                 // SAFE WAIT: 10 seconds (ammo load)
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 10) {
@@ -931,14 +944,14 @@ public class ClientManager {
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 10s wait complete — activating modules.");
-                cs.setCombatStep(16);
+                cs.setCombatStep(14);
                 break;
             }
-            case 16: {
-                log(clientId, "COMBAT[Vengeance] Step 17: press 'ad'.");
+            case 14: {
+                log(clientId, "COMBAT[Vengeance] Step 14: press 'ad'.");
                 missionProcessor.keyPress("ad");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(17);
+                cs.setCombatStep(15);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "COMBAT[Vengeance] 30s safe wait — switching to: " + other.getClientId());
@@ -946,7 +959,7 @@ public class ClientManager {
                 }
                 break;
             }
-            case 17: {
+            case 15: {
                 // SAFE WAIT: 30 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 30) {
@@ -955,10 +968,10 @@ public class ClientManager {
                 }
                 log(clientId, "COMBAT[Vengeance] 30s wait complete — waiting for mission complete.");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(18);
+                cs.setCombatStep(16);
                 break;
             }
-            case 18: {
+            case 16: {
                 pollSetDestinationOrCapsule(clientId, cs, "Vengeance", true);
                 break;
             }
@@ -1233,17 +1246,17 @@ public class ClientManager {
                 break;
             }
             case 8: {
-                // SAFE WAIT: 120 seconds
+                // SAFE WAIT: 90 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 120) {
-                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 120s.");
+                if (elapsed < 90) {
+                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 90s.");
                     if (elapsed > 0 && elapsed % 30 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Hawk] 120s wait complete — selecting hawk.");
+                log(clientId, "COMBAT[Hawk] 90s wait complete — selecting hawk.");
                 cs.setCombatStep(9);
                 break;
             }

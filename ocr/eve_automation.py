@@ -506,7 +506,7 @@ class TemplateMatcher:
             win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, cx, cy, 0, 0)
             time.sleep(0.05)
             win32api.keybd_event(VK_W, SCAN_W, win32con.KEYEVENTF_KEYUP, 0)  # key up
-            log.info("win32 W+left-clicked (x2) at (%d,%d) [key_states: %s, %s]", cx, cy, w_state1, w_state2)
+            log.info("win32 W+left-clicked (x2) at (%d,%d)", cx, cy)
         except ImportError:
             pyautogui.keyDown('w')
             pyautogui.moveTo(cx, cy, duration=0.1)
