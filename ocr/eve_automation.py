@@ -303,7 +303,7 @@ class TemplateMatcher:
             x, y = max_loc
             log.debug("Found '%s' at (%d,%d) conf=%.3f", key, x, y, max_val)
             return (x, y, w, h)
-        log.info("'%s' not found (best=%.3f < threshold %.3f)", key, max_val, th)
+        log.debug("'%s' not found (best=%.3f < threshold %.3f)", key, max_val, th)
         return None
 
     def find_all(

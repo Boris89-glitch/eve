@@ -87,6 +87,9 @@ public class ClientState {
     /** Timestamp when the current combat safe-wait began — used to measure elapsed wait time. */
     private LocalDateTime combatWaitStart = LocalDateTime.MIN;
 
+    /** True once the gate warp has been verified and landed — combat can begin after a short wait. */
+    private boolean combatWarpLanded = false;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -124,6 +127,7 @@ public class ClientState {
         if (state == State.IN_COMBAT) {
             this.combatStep = 0;
             this.combatWaitStart = LocalDateTime.MIN;
+            this.combatWarpLanded = false;
         }
     }
 
@@ -169,6 +173,9 @@ public class ClientState {
 
     public LocalDateTime getCombatWaitStart()                { return combatWaitStart; }
     public void          setCombatWaitStart(LocalDateTime t) { this.combatWaitStart = t; }
+
+    public boolean isCombatWarpLanded()              { return combatWarpLanded; }
+    public void    setCombatWarpLanded(boolean v)    { this.combatWarpLanded = v; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

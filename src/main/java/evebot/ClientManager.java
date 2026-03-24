@@ -163,6 +163,8 @@ public class ClientManager {
                     switch (found) {
                         case "activate_gate":
                             log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
+                            cs.setWarpStartTime(LocalDateTime.now());
+                            cs.setLastWarpCheck(LocalDateTime.MIN);
                             stateManager.setState(clientId, ClientState.State.IN_COMBAT);
                             new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
                             break;
@@ -199,6 +201,8 @@ public class ClientManager {
             switch (found) {
                 case "activate_gate":
                     log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    cs.setLastWarpCheck(LocalDateTime.MIN);
                     stateManager.setState(clientId, ClientState.State.IN_COMBAT);
                     new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
                     break;
@@ -499,6 +503,7 @@ public class ClientManager {
     private void handleTravel(String clientId, ClientWindowInfo window) {
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
+        missionProcessor.closeAllDialogs();
         missionProcessor.clickSetDestination();
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.TO_MISSION);
         stateManager.setState(clientId, ClientState.State.IDLE);
@@ -514,13 +519,38 @@ public class ClientManager {
     private void handleInCombat(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
 
-        // Grace period: gate animation takes ~20s after activate_gate click.
-        // Skip all combat logic until the mission pocket has loaded.
-        long sinceEntry = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
-        if (sinceEntry < 20) {
-            if (sinceEntry == 0) {
-                log(clientId, "IN_COMBAT: gate loading — waiting 20s for mission pocket.");
+        // ── Warp verification phase (no client switching) ──
+        // After clicking activate_gate → mission_start, verify warp started then wait for it to land.
+        if (!cs.isCombatWarpLanded()) {
+            long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
+
+            // 0–7s: grace period — right-click+click takes ~3s, then warp needs time to begin.
+            if (elapsed < 7) {
+                if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
+                    log(clientId, "IN_COMBAT: waiting for gate warp to begin.");
+                    cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker
+                }
+                return;
             }
+
+            // 3s+: poll warp_active — when it disappears, warp has landed.
+            boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
+            cs.setLastWarpCheck(LocalDateTime.now());
+
+            if (missionProcessor.isWarpActive()) {
+                if (firstCheck) {
+                    log(clientId, "IN_COMBAT: gate warp confirmed — waiting for landing.");
+                }
+                return;
+            }
+
+            // Warp not active (or was never seen) — proceed to combat.
+            if (firstCheck) {
+                log(clientId, "IN_COMBAT: no warp detected after " + elapsed + "s — starting combat.");
+            } else {
+                log(clientId, "IN_COMBAT: gate warp landed after " + elapsed + "s — starting combat.");
+            }
+            cs.setCombatWarpLanded(true);
             return;
         }
 
@@ -541,8 +571,7 @@ public class ClientManager {
         }
 
         String target = resolvedTarget.toLowerCase();
-        if (sinceEntry < 17) {
-            // Log once after grace period to show what we're dispatching.
+        if (cs.getCombatStep() == 0) {
             log(clientId, "IN_COMBAT: dispatching combat for shipTarget='" + target + "'.");
         }
         switch (target) {
@@ -658,9 +687,7 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 2s then check keep_at_range — if not found, loop back to Q+click
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 2) return;
+                // Check keep_at_range — if not found, loop back to Q+click
                 String found = missionProcessor.findTemplate("keep_at_range");
                 if (found != null) {
                     log(clientId, "COMBAT[Jaguar] keep_at_range confirmed — proceeding.");
@@ -775,9 +802,7 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 2s then check orbiting — if not found, loop back to W+click
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 2) return;
+                // Check orbiting — if not found, loop back to W+click
                 String found = missionProcessor.findTemplate("orbiting");
                 if (found != null) {
                     log(clientId, "COMBAT[Vengeance] orbiting confirmed — proceeding.");
@@ -960,7 +985,7 @@ public class ClientManager {
      *   8  → Click 'target_navitas' (select as active target)
      *   9  → Keypress 'adc' (activate modules)
      *   10 → SAFE WAIT 120s
-     *   11 → Click 'target_enyo' (select as active target)
+     *   11 → Click 'target_enyo' (select active)
      *   12 → Keypress 'ad'
      *   13 → SAFE WAIT 60s
      *   14 → SAFE WAIT for set_destination (mission complete → RETURNING)
@@ -989,9 +1014,7 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 2s then check orbiting — if not found, loop back to W+click
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 2) return;
+                // Check orbiting — if not found, loop back to W+click
                 String found = missionProcessor.findTemplate("orbiting");
                 if (found != null) {
                     log(clientId, "COMBAT[Enyo] orbiting confirmed — proceeding.");
@@ -1026,8 +1049,9 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click-all target_navitas (lock all).");
+                log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click-all target_navitas + target_enyo (lock all).");
                 missionProcessor.ctrlClickAllTemplate("target_navitas");
+                missionProcessor.ctrlClickTemplate("target_enyo");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
@@ -1069,7 +1093,7 @@ public class ClientManager {
                 break;
             }
             case 10: {
-                log(clientId, "COMBAT[Enyo] Step 11: click target_enyo (select active).");
+                log(clientId, "COMBAT[Enyo] Step 10: click target_enyo (select active).");
                 missionProcessor.clickTemplate("target_enyo");
                 cs.setCombatStep(11);
                 break;
@@ -1154,9 +1178,7 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 2s then check orbiting — if not found, loop back to W+click
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 2) return;
+                // Check orbiting — if not found, loop back to W+click
                 String found = missionProcessor.findTemplate("orbiting");
                 if (found != null) {
                     log(clientId, "COMBAT[Hawk] orbiting confirmed — pressing 's' and proceeding.");
@@ -1303,9 +1325,7 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                // WAIT 2s then check keep_at_range — if not found, loop back to Q+click
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 2) return;
+                // Check keep_at_range — if not found, loop back to Q+click
                 String found = missionProcessor.findTemplate("keep_at_range");
                 if (found != null) {
                     log(clientId, "COMBAT[Sansha] keep_at_range confirmed — proceeding.");
@@ -1373,10 +1393,9 @@ public class ClientManager {
      *   2  → press 's' (activate web)
      *   3  → WAIT 15s
      *   4  → press 's' (cycle web)
-     *   5  → Ctrl+Space (stop ship) + right-click hive → lock_target
-     *   6  → press 'a' (activate guns)
-     *   7  → SAFE WAIT 45s
-     *   8  → poll set_destination / capsule
+     *   5  → Ctrl+Space (stop ship) + Ctrl+click target_hive (lock) + press 'a' + switch client
+     *   6  → SAFE WAIT 45s
+     *   7  → poll set_destination / capsule
      */
     private void handleCombatInfested(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -1389,8 +1408,8 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Infested] Step 1: double-click hive (approach).");
-                missionProcessor.doubleClickTemplate("hive");
+                log(clientId, "COMBAT[Infested] Step 1: double-click target_hive (approach).");
+                missionProcessor.doubleClickTemplate("target_hive");
                 cs.setCombatStep(2);
                 break;
             }
@@ -1419,17 +1438,13 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                log(clientId, "COMBAT[Infested] Step 5: Ctrl+Space (stop ship), right-click hive → lock_target.");
+                // TODO: verify lock_target before activating guns
+                log(clientId, "COMBAT[Infested] Step 5: Ctrl+Space (stop ship), Ctrl+click target_hive (lock), press 'a'.");
                 missionProcessor.ctrlKeyPress("space");
-                new Thread(() -> missionProcessor.rightClickAndSelect("hive", "lock_target")).start();
-                cs.setCombatStep(6);
-                break;
-            }
-            case 6: {
-                log(clientId, "COMBAT[Infested] Step 6: press 'a' (activate guns).");
+                missionProcessor.ctrlClickTemplate("target_hive");
                 missionProcessor.keyPress("a");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(7);
+                cs.setCombatStep(6);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "COMBAT[Infested] switching to: " + other.getClientId());
@@ -1437,7 +1452,7 @@ public class ClientManager {
                 }
                 break;
             }
-            case 7: {
+            case 6: {
                 // SAFE WAIT: 45 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 45) {
@@ -1450,10 +1465,10 @@ public class ClientManager {
                 }
                 log(clientId, "COMBAT[Infested] 45s wait complete — polling completion.");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(8);
+                cs.setCombatStep(7);
                 break;
             }
-            case 8: {
+            case 7: {
                 pollSetDestinationOrCapsule(clientId, cs, "Infested", true);
                 break;
             }
@@ -1471,10 +1486,9 @@ public class ClientManager {
      *
      *   0  → right-click activate_gate → click mission_start (second gate)
      *   1  → press 's' (activate modules)
-     *   2  → wait 20s (gate load) + instant switch to other client
-     *   3  → SAFE WAIT 30s (every 30s re-switch)
-     *   4  → right-click home_station → click dock
-     *   5  → wait 20s for dock → COMPLETING
+     *   2  → SAFE WAIT 20s (gate load) + switch to other client
+     *   3  → right-click home_station → click dock
+     *   4  → wait 20s for dock → COMPLETING
      */
     private void handleCombatRecon(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -1495,41 +1509,31 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                // Wait 20s for gate to load
+                // SAFE WAIT 20s for gate load — switch to other client
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 20) {
-                    if (elapsed == 0) log(clientId, "COMBAT[Recon] gate loading — waiting 20s.");
+                    if (elapsed == 0) {
+                        log(clientId, "COMBAT[Recon] gate loading — safe wait 20s.");
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) {
+                            log(clientId, "COMBAT[Recon] switching to: " + other.getClientId());
+                            bringToForeground(other);
+                        }
+                    }
                     return;
                 }
-                log(clientId, "COMBAT[Recon] 20s gate load complete — entering safe wait.");
-                cs.setCombatWaitStart(LocalDateTime.now());
+                log(clientId, "COMBAT[Recon] 20s gate load complete — docking at home station.");
                 cs.setCombatStep(3);
-                // Instant switch on safe wait entry
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Recon] 20s safe wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
                 break;
             }
             case 3: {
-                // SAFE WAIT: 20 seconds
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 20) {
-                    return;
-                }
-                log(clientId, "COMBAT[Recon] 20s wait complete — docking at home station.");
+                log(clientId, "COMBAT[Recon] Step 3: right-click home_station → dock.");
+                new Thread(() -> missionProcessor.rightClickAndSelect("home_station", "dock")).start();
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(4);
                 break;
             }
             case 4: {
-                log(clientId, "COMBAT[Recon] Step 4: right-click home_station → dock.");
-                new Thread(() -> missionProcessor.rightClickAndSelect("home_station", "dock")).start();
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(5);
-                break;
-            }
-            case 5: {
                 // Wait for dock to complete before transitioning
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 20) {
@@ -1552,12 +1556,13 @@ public class ClientManager {
      *
      * Steps:
      *   0 → Shift+axc (overload modules)
-     *   1 → right-click target_angel (lock) + switch to other client
-     *   2 → poll lock_target — when found, press 'a'
-     *   3 → poll for 'jamed' template, press 'xc' when found
-     *   4 → press 'asd'
-     *   5 → SAFE WAIT for set_destination (mission complete)
-     *   6 → press 'xc' (deactivate modules) → RETURNING
+     *   1 → Ctrl+click target_angel (lock)
+     *   2 → poll for 'jamed' template, press 'xc' when found
+     *   3 → press 'asd'
+     *   4 → Q+click target_angel (keep at range)
+     *   5 → check keep_at_range — if not found, repeat Q+click (loop back to 4)
+     *   6 → SAFE WAIT for set_destination (mission complete)
+     *   7 → press 'xc' (deactivate modules) → RETURNING
      */
     private void handleCombatAngel(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -1570,53 +1575,52 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Angel] Step 1: right-click target_angel (lock target).");
-                missionProcessor.rightClickTemplate("target_angel");
-                cs.setCombatWaitStart(LocalDateTime.now());
+                log(clientId, "COMBAT[Angel] Step 1: Ctrl+click target_angel (lock), then check jamed.");
+                missionProcessor.ctrlClickTemplate("target_angel");
                 cs.setCombatStep(2);
                 break;
             }
             case 2: {
-                // Poll for lock_target to confirm target is locked, then press 'a'
-                String found = missionProcessor.findTemplate("lock_target");
-                if (found != null) {
-                    log(clientId, "COMBAT[Angel] lock_target confirmed — pressing 'a'.");
-                    missionProcessor.keyPress("a");
-                    cs.setCombatWaitStart(LocalDateTime.now());
-                    cs.setCombatStep(3);
-                } else {
-                    long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                    log(clientId, "COMBAT[Angel] waiting for lock_target... " + elapsed + "s");
-                }
-                break;
-            }
-            case 3: {
-                // Poll for 'jamed' template — must appear before moving on
+                // Poll for 'jamed' template — no waiting for lock, just check immediately
                 String found = missionProcessor.findTemplate("jamed");
                 if (found != null) {
                     log(clientId, "COMBAT[Angel] 'jamed' detected — pressing 'xc'.");
                     missionProcessor.keyPress("xc");
-                    cs.setCombatStep(4);
-                } else {
-                    long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                    if (elapsed % 5 == 0) {
-                        log(clientId, "COMBAT[Angel] waiting for 'jamed' (" + elapsed + "s)...");
-                    }
+                    cs.setCombatStep(3);
                 }
                 break;
             }
-            case 4: {
-                log(clientId, "COMBAT[Angel] Step 4: press 'asd'.");
+            case 3: {
+                log(clientId, "COMBAT[Angel] Step 3: press 'asd'.");
                 missionProcessor.keyPress("asd");
+                cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                log(clientId, "COMBAT[Angel] Step 4: Q+click target_angel (keep at range).");
+                missionProcessor.qClickTemplate("target_angel");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
             }
             case 5: {
+                // Check keep_at_range — if not found, loop back to Q+click
+                String found = missionProcessor.findTemplate("keep_at_range");
+                if (found != null) {
+                    log(clientId, "COMBAT[Angel] keep_at_range confirmed — proceeding.");
+                    cs.setCombatWaitStart(LocalDateTime.now());
+                    cs.setCombatStep(6);
+                } else {
+                    log(clientId, "COMBAT[Angel] keep_at_range NOT found — retrying Q+click.");
+                    cs.setCombatStep(4);
+                }
+                break;
+            }
+            case 6: {
                 // SAFE WAIT for set_destination — but intercept to add xc deactivation
                 if (missionProcessor.isSetDestinationVisible()) {
                     log(clientId, "COMBAT[Angel] set_destination detected — deactivating modules.");
-                    cs.setCombatStep(6);
+                    cs.setCombatStep(7);
                     break;
                 }
 
@@ -1640,8 +1644,8 @@ public class ClientManager {
                 }
                 break;
             }
-            case 6: {
-                log(clientId, "COMBAT[Angel] Step 6: press 'xc' (deactivate modules).");
+            case 7: {
+                log(clientId, "COMBAT[Angel] Step 7: press 'xc' (deactivate modules).");
                 missionProcessor.keyPress("xc");
                 stateManager.setState(clientId, ClientState.State.RETURNING);
                 break;
@@ -1659,12 +1663,12 @@ public class ClientManager {
      *   0 → Shift+asx (overload modules)
      *   1 → double-click target_worm (approach + lock)
      *   2 → press 's' (activate web)
-     *   3 → WAIT 12s
-     *   4 → right-click target_worm (lock target)
-     *   5 → press 'sdxac' (TODO: verify lock_target before activating)
-     *   6 → Q+click target_worm (orbit)
+     *   3 → WAIT 10s
+     *   4 → Ctrl+click target_worm (lock target)
+     *   5 → press 'sdxac'
+     *   6 → Q+click target_worm (keep at range)
      *   7 → check keep_at_range — if not found, repeat Q+click (loop back to 6)
-     *   8 → Alt+F1
+     *   8 → Alt+F1 x2 (deactivate module) + switch client
      *   9 → SAFE WAIT for set_destination (mission complete → RETURNING)
      */
     private void handleCombatWorm(String clientId, ClientState cs) {
@@ -1693,38 +1697,36 @@ public class ClientManager {
             case 3: {
                 // WAIT 12 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 12) {
-                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 12s.");
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 10s.");
                     return;
                 }
-                log(clientId, "COMBAT[Worm] 12s wait complete.");
+                log(clientId, "COMBAT[Worm] 10s wait complete.");
                 cs.setCombatStep(4);
                 break;
             }
             case 4: {
-                log(clientId, "COMBAT[Worm] Step 4: right-click target_worm (lock target).");
-                missionProcessor.rightClickTemplate("target_worm");
+                // TODO: verify lock_target before activating
+                log(clientId, "COMBAT[Worm] Step 4: Ctrl+click target_worm (lock target).");
+                missionProcessor.ctrlClickTemplate("target_worm");
                 cs.setCombatStep(5);
                 break;
             }
             case 5: {
-                // TODO: verify lock_target before activating
                 log(clientId, "COMBAT[Worm] Step 5: press 'sdxac'.");
                 missionProcessor.keyPress("sdxac");
                 cs.setCombatStep(6);
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Worm] Step 6: Q+click target_worm (orbit).");
+                log(clientId, "COMBAT[Worm] Step 6: Q+click target_worm (keep at range).");
                 missionProcessor.qClickTemplate("target_worm");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
             }
             case 7: {
-                // WAIT 2s then check keep_at_range — if not found, loop back to Q+click
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 2) return;
+                // Check keep_at_range — if not found, loop back to Q+click
                 String found = missionProcessor.findTemplate("keep_at_range");
                 if (found != null) {
                     log(clientId, "COMBAT[Worm] keep_at_range confirmed — proceeding.");
@@ -1736,7 +1738,8 @@ public class ClientManager {
                 break;
             }
             case 8: {
-                log(clientId, "COMBAT[Worm] Step 8: Alt+F1.");
+                log(clientId, "COMBAT[Worm] Step 8: Alt+F1 x2 (deactivate module).");
+                missionProcessor.altKeyPress("f1");
                 missionProcessor.altKeyPress("f1");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(9);
@@ -1809,6 +1812,13 @@ public class ClientManager {
         // Request next mission immediately and go to CHECKING_MISSIONS
         // instead of IDLE — avoids stale complete_mission being misdetected.
         missionProcessor.clickRequestMission();
+
+        // Switch to other client after requesting — gives the dialog time to load
+        ClientWindowInfo other = findOtherClient(clientId);
+        if (other != null) {
+            log(clientId, "COMPLETING: mission turned in — switching focus to " + other.getClientId());
+            bringToForeground(other);
+        }
         stateManager.getState(clientId).setCurrentMission(null);
         stateManager.getState(clientId).setMissionCheckStartTime(LocalDateTime.MIN);
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);

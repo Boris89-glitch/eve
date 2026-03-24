@@ -194,13 +194,10 @@ public class MissionProcessor {
     }
 
     public void closeAllDialogs() {
-        log("Closing all open dialogs (scan twice to catch late-rendering windows)");
-        for (int pass = 0; pass < 2; pass++) {
-            while (ocrBridge.findAnyTemplate("close_active_window") != null) {
-                ocrBridge.clickTemplate("close_active_window");
-                sleep(500);
-            }
-            if (pass == 0) sleep(1000); // wait for any late-rendering dialogs
+        log("Closing all open dialogs");
+        while (ocrBridge.findAnyTemplate("close_active_window") != null) {
+            ocrBridge.clickTemplate("close_active_window");
+            sleep(500);
         }
         log("No more dialogs visible.");
     }
@@ -233,13 +230,16 @@ public class MissionProcessor {
     public boolean performUndockStart(Mission mission) {
         log("=== Starting undock sequence ===");
 
+        String shipTarget = (mission != null && mission.getShipTarget() != null)
+                ? mission.getShipTarget() : "";
         String missionTarget = (mission != null && mission.getTarget() != null
                 && !mission.getTarget().equals("Unknown"))
                 ? mission.getTarget() : "";
         String missionTitle = (mission != null && mission.getTitle() != null)
                 ? mission.getTitle() : "";
-        String lookup = !missionTarget.isEmpty() ? missionTarget : missionTitle;
-        log("Ship OCR fallback: target='" + missionTarget + "' title='" + missionTitle + "' using='" + lookup + "'");
+        String lookup = !shipTarget.isEmpty() ? shipTarget
+                : !missionTarget.isEmpty() ? missionTarget : missionTitle;
+        log("Ship lookup: shipTarget='" + shipTarget + "' target='" + missionTarget + "' title='" + missionTitle + "' using='" + lookup + "'");
 
         // 1 — Identify ship from open dialog + repair + activate (all in Python)
         log("Step 1: Repair + activate ship");
@@ -393,6 +393,8 @@ public class MissionProcessor {
     public void clickWarpToLocation() {
         log("Clicking WARP TO LOCATION (template)");
         ocrBridge.clickTemplate("warp_to_location");
+        sleep(1000);
+        ocrBridge.clickTemplate("warp_to_location");
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -540,11 +542,13 @@ public class MissionProcessor {
     }
 
     /**
-     * Clicks the self-destruct button on the capsule.
+     * Self-destructs the capsule: right-click capsule → click destruct → click yes.
      */
     public void clickDestruct() {
-        log("Clicking DESTRUCT (template)");
-        ocrBridge.clickTemplate("destruct");
+        log("Self-destruct: right-click capsule → destruct → yes");
+        rightClickAndSelect("capsule", "destruct");
+        sleep(POST_CLICK_DELAY_MS);
+        ocrBridge.clickTemplate("yes");
         sleep(POST_CLICK_DELAY_MS);
     }
 
