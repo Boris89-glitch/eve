@@ -104,6 +104,9 @@ TEMPLATE_FILES = {
     "orbiting": "orbiting",            # HUD indicator confirming orbit is active
     "warp_active": "warp_active",
     "dock": "dock",
+    "dock_safe": "dock_safe",  # safe dock option in Locations submenu (insta-dock)
+    "abort": "abort",          # abort undock button — visible during undock animation
+    "undocking": "undocking",  # undocking text — visible during undock animation
     "ok": "ok",
     "fleet_yes": "fleet_yes",
     "fleet_no": "fleet_no",
@@ -152,6 +155,7 @@ TEMPLATE_FILES = {
     "target_sansha": "target_sansha",    # Sansha burner — overview row
     "target_angel": "target_angel",      # Angel burner — overview row
     "target_worm": "target_worm",        # Worm burner — overview row
+    "target_hive": "target_hive",        # Infested Ruins — overview row
     "hive": "hive",
     "lock_target": "lock_target",
     "jamed": "jamed",  # ECM jam indicator — Angel combat

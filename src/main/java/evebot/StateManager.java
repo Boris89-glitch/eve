@@ -33,6 +33,9 @@ public class StateManager {
      * Once we've attempted it once, skip it on all future accepts.
      */
     private volatile boolean trackAttempted = false;
+
+    /** Global pod-death cooldown — all clients must wait until this time before resuming. */
+    private volatile LocalDateTime podCooldownEnd = LocalDateTime.MIN;
     private static final Path STATE_FILE = Paths.get("config", "bot_state.json");
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss");
     private final Gson gson;
@@ -67,6 +70,9 @@ public class StateManager {
 
     public boolean isTrackAttempted()        { return trackAttempted; }
     public void    setTrackAttempted(boolean v) { this.trackAttempted = v; }
+
+    public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
+    public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }
 
     private void registerHotkey() {
         if (tryRegisterJnaHotkey()) {
@@ -319,13 +325,18 @@ public class StateManager {
             }
 
             case "target": {
-                if (parts.length < 2) { log("[Cmd] Usage: target <TARGET>  (e.g. target jaguar)"); break; }
-                String clientId = firstClientId();
-                if (clientId == null) { log("[Cmd] No clients registered yet."); break; }
+                if (parts.length < 2) { log("[Cmd] Usage: target <TARGET>  or  target <clientId> <TARGET>"); break; }
+                String clientId, targetVal;
+                if (parts.length == 3 && states.containsKey(parts[1])) {
+                    clientId = parts[1]; targetVal = parts[2];
+                } else {
+                    clientId = firstClientId();
+                    targetVal = parts.length == 2 ? parts[1] : parts[1] + " " + parts[2];
+                }
+                if (clientId == null) { log("[Cmd] No clients registered yet. Use: state <clientId> IN_COMBAT first."); break; }
                 ClientState cs = getState(clientId);
                 Mission m = cs.getCurrentMission();
                 if (m == null) { m = new Mission(); cs.setCurrentMission(m); }
-                String targetVal = parts.length == 2 ? parts[1] : parts[1] + " " + parts[2];
                 m.setTarget(targetVal);
                 saveStates();
                 log("[Cmd] Override: " + clientId + " target → '" + targetVal + "'");
@@ -333,24 +344,36 @@ public class StateManager {
             }
 
             case "ship": {
-                if (parts.length < 2) { log("[Cmd] Usage: ship <SHIP_TARGET>"); break; }
-                String clientId = firstClientId();
-                if (clientId == null) { log("[Cmd] No clients registered yet."); break; }
+                if (parts.length < 2) { log("[Cmd] Usage: ship <SHIP_TARGET>  or  ship <clientId> <SHIP_TARGET>"); break; }
+                String clientId, shipVal;
+                if (parts.length == 3 && states.containsKey(parts[1])) {
+                    clientId = parts[1]; shipVal = parts[2];
+                } else {
+                    clientId = firstClientId();
+                    shipVal = parts[1];
+                }
+                if (clientId == null) { log("[Cmd] No clients registered yet. Use: state <clientId> IN_COMBAT first."); break; }
                 ClientState cs = getState(clientId);
                 Mission m = cs.getCurrentMission();
                 if (m == null) { m = new Mission(); cs.setCurrentMission(m); }
-                m.setShipTarget(parts[1]);
+                m.setShipTarget(shipVal);
                 saveStates();
-                log("[Cmd] Override: " + clientId + " shipTarget → '" + parts[1] + "'");
+                log("[Cmd] Override: " + clientId + " shipTarget → '" + shipVal + "'");
                 break;
             }
 
             case "step": {
-                if (parts.length < 2) { log("[Cmd] Usage: step <N>"); break; }
-                String clientId = firstClientId();
-                if (clientId == null) { log("[Cmd] No clients registered yet."); break; }
+                if (parts.length < 2) { log("[Cmd] Usage: step <N>  or  step <clientId> <N>"); break; }
+                String clientId;
+                String stepStr;
+                if (parts.length == 3 && states.containsKey(parts[1])) {
+                    clientId = parts[1]; stepStr = parts[2];
+                } else {
+                    clientId = firstClientId(); stepStr = parts[1];
+                }
+                if (clientId == null) { log("[Cmd] No clients registered yet. Use: state <clientId> IN_COMBAT first."); break; }
                 try {
-                    int n = Integer.parseInt(parts[1]);
+                    int n = Integer.parseInt(stepStr);
                     getState(clientId).setCombatStep(n);
                     saveStates();
                     log("[Cmd] Override: " + clientId + " combatStep → " + n);

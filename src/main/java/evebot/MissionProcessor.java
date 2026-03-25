@@ -258,18 +258,9 @@ public class MissionProcessor {
         }
         sleep(500);
 
-        // 2 — Undock: only click the button if it is still visible.
-        //     Python may have already triggered undock via context menu during repairShip,
-        //     in which case the button is gone and there is nothing to do here.
-        log("Step 2: Clicking Undock (if visible)");
-        if (ocrBridge.findAnyTemplate("undock") != null) {
-            clickUndock();
-        } else {
-            log("Undock button not visible — Python already triggered undock, skipping.");
-        }
-        // No sleep — ClientManager transitions to UNDOCKING and waits via timestamp timer.
-
-        log("=== Undock clicked — entering UNDOCKING state ===");
+        // Python's repair_ship already clicks Board Ship (or falls back to Undock),
+        // so no need to click undock here — just transition to UNDOCKING.
+        log("=== Repair done — entering UNDOCKING state ===");
         return true;
     }
 
@@ -295,6 +286,16 @@ public class MissionProcessor {
         log("Clicking UNDOCK (template)");
         ocrBridge.clickTemplate("undock");
         sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** Returns "undock" if the button is still visible, null otherwise. */
+    public String findUndockButton() {
+        return ocrBridge.findAnyTemplate("undock");
+    }
+
+    /** Returns non-null if abort button or undocking text is visible (undock in progress). */
+    public String findUndockingIndicator() {
+        return ocrBridge.findAnyTemplate("abort", "undocking");
     }
 
     // -----------------------------------------------------------------------
@@ -404,6 +405,11 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    /** Returns "dock_safe" if the safe dock button is visible, null otherwise. */
+    public String detectDockSafe() {
+        return ocrBridge.findAnyTemplate("dock_safe");
+    }
+
     /** Check if enemy icon is visible in local chat. */
     public boolean isEnemyInLocal() {
         return ocrBridge.findAnyTemplate("enemy") != null;
@@ -419,7 +425,7 @@ public class MissionProcessor {
         sleep(800);
         ocrBridge.hoverTemplate("locations"); // hover Locations submenu
         sleep(800);
-        ocrBridge.clickTemplate("dock");      // click Dock from submenu
+        ocrBridge.clickTemplate("dock_safe");  // click Dock from submenu
         sleep(POST_CLICK_DELAY_MS);
         ctrlKeyPress("s");                    // autopilot to insta-dock bookmark
     }
@@ -496,10 +502,10 @@ public class MissionProcessor {
 
     /**
      * Single screenshot scan for returning UI elements.
-     * Returns: "dock", "stargate", or null.
+     * Returns: "dock", "stargate", "agent_icon", or null.
      */
     public String detectReturningUI() {
-        return ocrBridge.findAnyTemplate("dock", "stargate");
+        return ocrBridge.findAnyTemplate("dock", "stargate", "agent_icon");
     }
 
     /**

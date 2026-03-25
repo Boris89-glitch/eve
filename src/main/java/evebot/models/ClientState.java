@@ -33,7 +33,8 @@ public class ClientState {
         WARPING,      // in warp — polling warp_active until it disappears, then → IDLE
         IN_COMBAT,
         RETURNING,    // one-shot setup: set destination home
-        COMPLETING
+        COMPLETING,
+        POD_COOLDOWN  // podded — waiting 10min cooldown before resuming
     }
 
     /** Tracks which leg of navigation IDLE should handle after a warp lands. */
@@ -89,6 +90,9 @@ public class ClientState {
 
     /** True once the gate warp has been verified and landed — combat can begin after a short wait. */
     private boolean combatWarpLanded = false;
+
+    /** When the pod-death cooldown expires for this client. */
+    private LocalDateTime podCooldownEnd = LocalDateTime.MIN;
 
     // -----------------------------------------------------------------------
 
@@ -176,6 +180,9 @@ public class ClientState {
 
     public boolean isCombatWarpLanded()              { return combatWarpLanded; }
     public void    setCombatWarpLanded(boolean v)    { this.combatWarpLanded = v; }
+
+    public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
+    public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }
