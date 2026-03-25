@@ -101,7 +101,9 @@ TEMPLATE_FILES = {
     "jump": "jump",              # context menu item — right-click stargate → Jump
     "mission_start": "mission_start",  # context menu item — right-click mission gate → Activate Gate
     "keep_at_range": "keep_at_range",  # HUD indicator confirming keep-at-range is active
+    "range": "range",  # keep at range button
     "orbiting": "orbiting",            # HUD indicator confirming orbit is active
+    "orbit": "orbit",            # orbit target button
     "warp_active": "warp_active",
     "dock": "dock",
     "dock_safe": "dock_safe",  # safe dock option in Locations submenu (insta-dock)
@@ -803,29 +805,6 @@ class TemplateMatcher:
             return True
         log.warning("Could not E+click '%s' within %.1fs — not found", key, timeout)
         return False
-
-    def w_click(self, key: str, screen=None, threshold=None, delay: float = 1.5) -> bool:
-        """Find template and hold-W left-click its centre (keep at range)."""
-        match = self.find(key, screen=screen, threshold=threshold)
-        if match:
-            cx, cy = self.center(match)
-            log.info("W+left-clicking '%s' at (%d,%d)", key, cx, cy)
-            self._do_w_click(cx, cy, delay=delay)
-            return True
-        log.warning("'%s' not found on screen — cannot W+click", key)
-        return False
-
-    def q_click(self, key: str, screen=None, threshold=None, delay: float = 1.5) -> bool:
-        """Find template and hold-Q left-click its centre (orbit)."""
-        match = self.find(key, screen=screen, threshold=threshold)
-        if match:
-            cx, cy = self.center(match)
-            log.info("Q+left-clicking '%s' at (%d,%d)", key, cx, cy)
-            self._do_q_click(cx, cy, delay=delay)
-            return True
-        log.warning("'%s' not found on screen — cannot Q+click", key)
-        return False
-
     def ctrl_click(self, key: str, screen=None, threshold=None, delay: float = 0.3) -> bool:
         """Find template and hold-Ctrl left-click its centre (lock target)."""
         match = self.find(key, screen=screen, threshold=threshold)
@@ -1109,10 +1088,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
 
     log.info("Step 6b: Clicking 'Board Ship'...")
     if not matcher.wait_and_click("board_ship", timeout=1.0, delay=0.6):
-        log.warning("'Board Ship' not found in context menu — falling back to 'Undock'")
-        if not matcher.wait_and_click("undock", timeout=1.0, delay=0.6):
-            log.error("'Undock' not found either — cannot activate ship")
-            sys.exit(1)
+        log.warning("'Board Ship' not found in context menu — ship may already be active.")
 
     log.info("=== Ship repaired and activated successfully ===")
     # Print JSON result to stdout so Java can read the dialog match

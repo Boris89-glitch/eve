@@ -94,6 +94,9 @@ public class ClientState {
     /** When the pod-death cooldown expires for this client. */
     private LocalDateTime podCooldownEnd = LocalDateTime.MIN;
 
+    /** True after the first re-click of decline in DECLINING — next failure triggers agent double-click. */
+    private boolean declineRetried = false;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -116,6 +119,9 @@ public class ClientState {
         this.lastStateChange = LocalDateTime.now();
         if (state == State.IDLE || state == State.CHECKING_MISSIONS || state == State.DECLINING) {
             this.missionTracked = false;
+        }
+        if (state == State.DECLINING) {
+            this.declineRetried = false;
         }
         if (state != State.CHECKING_MISSIONS && state != State.DECLINING) {
             this.missionCheckStartTime = LocalDateTime.MIN;
@@ -183,6 +189,9 @@ public class ClientState {
 
     public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
     public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }
+
+    public boolean isDeclineRetried()              { return declineRetried; }
+    public void    setDeclineRetried(boolean v)    { this.declineRetried = v; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

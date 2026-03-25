@@ -93,7 +93,7 @@ public class ClientManager {
                 return;
             }
 
-            checkUndockTimers();
+
             ClientWindowInfo fg = getForegroundClient();
             ClientWindowInfo graceClient = findWarpingClientInGracePeriod();
 
@@ -129,7 +129,7 @@ public class ClientManager {
             case DECLINING:         handleDeclining(clientId, window);        break;
             case ACCEPTED:          handleAccepted(clientId, window);         break;
             case REPAIRING:         handleRepairing(clientId, window);        break;
-            case UNDOCKING: /* timer-driven — handled by checkUndockTimers() */  break;
+            case UNDOCKING: handleUndocking(clientId, window);                     break;
             case TRAVEL:    handleTravel(clientId, window);                      break;
             case WARPING:   handleWarping(clientId, window);                     break;
             case IN_COMBAT: handleInCombat(clientId, window);  break;
@@ -464,7 +464,7 @@ public class ClientManager {
             cs.setMissionCheckStartTime(LocalDateTime.now());
         }
         long cycleElapsed = Duration.between(cs.getMissionCheckStartTime(), LocalDateTime.now()).getSeconds();
-        if (cycleElapsed >= 35) {
+        if (cycleElapsed >= 25) {
             ClientWindowInfo other = findOtherClient(clientId);
             if (other != null) {
                 log(clientId, "CHECKING_MISSIONS: 35s in check/decline cycle — returning to IDLE and switching focus to " + other.getClientId());
@@ -517,8 +517,17 @@ public class ClientManager {
         log(clientId, "DECLINING — waiting for offer dialog to close...");
 
         if (!missionProcessor.waitForDialogClosed()) {
-            log(clientId, "Decline still visible — clicking decline to confirm.");
-            missionProcessor.clickDeclineButton();
+            ClientState cs = stateManager.getState(clientId);
+            if (cs.isDeclineRetried()) {
+                log(clientId, "Decline dialog stuck — double-clicking agent to reset.");
+                missionProcessor.doubleClickAgentIcon();
+                cs.setCurrentMission(null);
+                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+            } else {
+                log(clientId, "Decline still visible — clicking decline to confirm.");
+                missionProcessor.clickDeclineButton();
+                cs.setDeclineRetried(true);
+            }
             return;
         }
 
@@ -569,6 +578,8 @@ public class ClientManager {
         boolean success = missionProcessor.performUndockStart(mission);
 
         if (success) {
+            log(clientId, "Clicking undock.");
+            missionProcessor.clickUndock();
             stateManager.getState(clientId).setUndockStartTime(LocalDateTime.now());
             stateManager.setState(clientId, ClientState.State.UNDOCKING);
             // Safe-switch: use undock animation time on the other client
@@ -590,15 +601,6 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
-        // Verify we actually undocked — if undock button is still visible, we're still in station.
-        log(clientId, "TRAVEL: verifying undock completed...");
-        if (missionProcessor.findUndockButton() != null) {
-            log(clientId, "TRAVEL: undock button still visible — still docked. Clicking undock again.");
-            missionProcessor.clickUndock();
-            stateManager.getState(clientId).setUndockStartTime(LocalDateTime.now());
-            stateManager.setState(clientId, ClientState.State.UNDOCKING);
-            return;
-        }
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
         missionProcessor.closeAllDialogs();
@@ -744,7 +746,7 @@ public class ClientManager {
      * Steps:
      *   0 → Right-click 'launcher' (open ammo context menu)
      *   1 → Click 'kin_damage' (load kinetic ammo)
-     *   2 → Click 'target_jaguar' + click 'orbiting' (orbit target)
+     *   2 → Click 'target_jaguar' + click 'orbit' (orbit target)
      *   3 → Check 'orbiting' — if not found, repeat (loop back to 2)
      *   4 → Keypress 's' (activate module)
      *   5 → SAFE WAIT 90s (can switch to other clients)
@@ -769,9 +771,9 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Jaguar] Step 2: click target_jaguar + click orbiting (orbit).");
-                missionProcessor.clickTemplate("target_jaguar");
-                missionProcessor.clickTemplate("orbiting");
+                log(clientId, "COMBAT[Jaguar] Step 2: right-click target_jaguar → click range (range).");
+                missionProcessor.rightClickTemplate("target_jaguar");
+                missionProcessor.clickTemplate("range");
                 cs.setCombatStep(3);
                 break;
             }
@@ -782,7 +784,7 @@ public class ClientManager {
                     log(clientId, "COMBAT[Jaguar] keep_at_range confirmed — proceeding.");
                     cs.setCombatStep(4);
                 } else {
-                    log(clientId, "COMBAT[Jaguar] keep_at_range NOT found — retrying orbit click.");
+                    log(clientId, "COMBAT[Jaguar] keep_at_range NOT found — retrying range click.");
                     cs.setCombatStep(2);
                 }
                 break;
@@ -849,7 +851,7 @@ public class ClientManager {
      * Steps:
      *   0  → Right-click 'launcher' (ammo context menu)
      *   1  → Click 'exp_damage' (load explosive ammo)
-     *   2  → Click 'target_vengeance' + click 'orbiting' (orbit)
+     *   2  → Click 'target_vengeance' + click 'orbit' (orbit)
      *   3  → Check 'orbiting' — if not found, repeat (loop back to 2)
      *   4  → Keypress 's' (activate module)
      *   5  → SAFE WAIT 15s
@@ -873,9 +875,9 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[Vengeance] Step 0: click target_vengeance + click orbiting.");
-                missionProcessor.clickTemplate("target_vengeance");
-                missionProcessor.clickTemplate("orbiting");
+                log(clientId, "COMBAT[Vengeance] Step 0: right-click target_vengeance → click orbit.");
+                missionProcessor.rightClickTemplate("target_vengeance");
+                missionProcessor.clickTemplate("orbit");
                 cs.setCombatStep(1);
                 break;
             }
@@ -1060,7 +1062,7 @@ public class ClientManager {
      * Steps:
      *   0  → Right-click 'launcher' (ammo context menu)
      *   1  → Click 'exp_damage' (load explosive ammo)
-     *   2  → Click 'target_enyo' + click 'orbiting' (orbit)
+     *   2  → Click 'target_enyo' + click 'orbit' (orbit)
      *   3  → Check 'orbiting' — if not found, repeat (loop back to 2)
      *   4  → Keypress 's' (activate module)
      *   5  → SAFE WAIT 15s
@@ -1091,9 +1093,9 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Enyo] Step 2: click target_enyo + click orbiting.");
-                missionProcessor.clickTemplate("target_enyo");
-                missionProcessor.clickTemplate("orbiting");
+                log(clientId, "COMBAT[Enyo] Step 2: right-click target_enyo → click orbit.");
+                missionProcessor.rightClickTemplate("target_enyo");
+                missionProcessor.clickTemplate("orbit");
                 cs.setCombatStep(3);
                 break;
             }
@@ -1224,7 +1226,7 @@ public class ClientManager {
      * Steps:
      *   0  → Right-click 'launcher' (ammo context menu)
      *   1  → Click 'em_damage' (load EM ammo)
-     *   2  → Click 'target_hawk' + click 'orbiting' (orbit)
+     *   2  → Click 'target_hawk' + click 'orbit' (orbit)
      *   3  → Check 'orbiting' — if not found, repeat (loop back to 2)
      *   4  → SAFE WAIT 25s
      *   5  → Ctrl+click-all 'target_hawk' + 'target_bantam' (lock all targets)
@@ -1253,9 +1255,9 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Hawk] Step 2: click target_hawk + click orbiting.");
-                missionProcessor.clickTemplate("target_hawk");
-                missionProcessor.clickTemplate("orbiting");
+                log(clientId, "COMBAT[Hawk] Step 2: right-click target_hawk → click orbit.");
+                missionProcessor.rightClickTemplate("target_hawk");
+                missionProcessor.clickTemplate("orbit");
                 cs.setCombatStep(3);
                 break;
             }
@@ -1365,7 +1367,7 @@ public class ClientManager {
      * Steps:
      *   0  → Ctrl+click 'target_sansha' (lock) + double-click 'target_sansha' (select)
      *   1  → Keypress 'asdxc' (activate modules)
-     *   2  → Click 'target_sansha' + click 'keep_at_range' (keep at range)
+     *   2  → Click 'target_sansha' + click 'range' (keep at range)
      *   3  → Check 'keep_at_range' — if not found, repeat (loop back to 2)
      *   4  → WAIT 10s
      *   5  → Shift+ds (stop overloading afterburner + web)
@@ -1398,9 +1400,9 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                log(clientId, "COMBAT[Sansha] Step 3: click target_sansha + click keep_at_range.");
-                missionProcessor.clickTemplate("target_sansha");
-                missionProcessor.clickTemplate("keep_at_range");
+                log(clientId, "COMBAT[Sansha] Step 3: right-click target_sansha → click range.");
+                missionProcessor.rightClickTemplate("target_sansha");
+                missionProcessor.clickTemplate("range");
                 cs.setCombatStep(4);
                 break;
             }
@@ -1633,7 +1635,8 @@ public class ClientManager {
             case 0: {
                 log(clientId, "COMBAT[Recon] Step 0: right-click activate_gate → mission_start (second gate).");
                 missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
-                log(clientId, "COMBAT[Recon] Step 0: press 's' (activate modules).");
+                log(clientId, "COMBAT[Recon] Step 0: press 's' twice (activate modules).");
+                missionProcessor.keyPress("s");
                 missionProcessor.keyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(1);
@@ -1650,7 +1653,8 @@ public class ClientManager {
                 if (elapsed < 30) {
                     return;
                 }
-                log(clientId, "COMBAT[Recon] 20s gate load complete — docking at home station.");
+                log(clientId, "COMBAT[Recon] 30s gate load complete — pressing 's' and docking at home station.");
+                missionProcessor.keyPress("s");
                 cs.setCombatStep(2);
                 break;
             }
@@ -1682,7 +1686,7 @@ public class ClientManager {
      *   1 → Ctrl+click target_angel (lock)
      *   2 → poll for 'jamed' template, press 'xc' when found
      *   3 → press 'asd'
-     *   4 → Click target_angel + click keep_at_range (keep at range)
+     *   4 → Click target_angel + click range (keep at range)
      *   5 → check keep_at_range — if not found, repeat (loop back to 4)
      *   6 → SAFE WAIT for set_destination (mission complete)
      *   7 → press 'xc' (deactivate modules) → RETURNING
@@ -1720,9 +1724,9 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                log(clientId, "COMBAT[Angel] Step 4: click target_angel + click keep_at_range.");
-                missionProcessor.clickTemplate("target_angel");
-                missionProcessor.clickTemplate("keep_at_range");
+                log(clientId, "COMBAT[Angel] Step 4: right-click target_angel → click range.");
+                missionProcessor.rightClickTemplate("target_angel");
+                missionProcessor.clickTemplate("range");
                 cs.setCombatStep(5);
                 break;
             }
@@ -1789,7 +1793,7 @@ public class ClientManager {
      *   3 → WAIT 10s
      *   4 → Ctrl+click target_worm (lock target)
      *   5 → press 'sdxac'
-     *   6 → Click target_worm + click keep_at_range (keep at range)
+     *   6 → Click target_worm + click range (keep at range)
      *   7 → check keep_at_range — if not found, repeat (loop back to 6)
      *   8 → Alt+F1 x2 (deactivate module) + switch client
      *   9 → SAFE WAIT for set_destination (mission complete → RETURNING)
@@ -1843,9 +1847,9 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Worm] Step 6: click target_worm + click keep_at_range.");
-                missionProcessor.clickTemplate("target_worm");
-                missionProcessor.clickTemplate("keep_at_range");
+                log(clientId, "COMBAT[Worm] Step 6: right-click target_worm → range.");
+                missionProcessor.rightClickTemplate("target_worm");
+                missionProcessor.clickTemplate("range");
                 cs.setCombatStep(7);
                 break;
             }
@@ -1952,33 +1956,24 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // UNDOCKING timer
+    // UNDOCKING — wait for undock animation, verify we left the hangar.
+    // Runs only when this client is in focus (via processClient).
     // -----------------------------------------------------------------------
 
-    /**
-     * Checks all registered clients for an expired UNDOCKING timer.
-     * No screen interaction — just transitions the state to TRAVEL.
-     * closeAllDialogs() runs on the first tick of handleTravel() when the
-     * client is back in focus.
-     */
-    private void checkUndockTimers() {
-        for (ClientWindowInfo window : clientWindows.values()) {
-            String id = window.getClientId();
-            if (stateManager.getStateEnum(id) == ClientState.State.UNDOCKING) {
-                long elapsed = Duration.between(
-                        stateManager.getState(id).getUndockStartTime(), LocalDateTime.now()
-                ).getSeconds();
-                if (elapsed >= UNDOCK_WAIT_SECS) {
-                    // Verify we actually undocked — if undock button still visible, we're still docked.
-                    if (missionProcessor.findUndockButton() != null) {
-                        log(id, "UNDOCKING: still docked — clicking undock again.");
-                        missionProcessor.clickUndock();
-                        stateManager.getState(id).setUndockStartTime(LocalDateTime.now());
-                    } else {
-                        stateManager.setState(id, ClientState.State.TRAVEL);
-                    }
-                }
-            }
+    private void handleUndocking(String clientId, ClientWindowInfo window) {
+        long elapsed = Duration.between(
+                stateManager.getState(clientId).getUndockStartTime(), LocalDateTime.now()
+        ).getSeconds();
+        if (elapsed < UNDOCK_WAIT_SECS) {
+            return; // still waiting for undock animation
+        }
+        // Verify we actually undocked — if undock button still visible, we're still docked.
+        if (missionProcessor.findUndockButton() != null) {
+            log(clientId, "UNDOCKING: still docked — clicking undock again.");
+            missionProcessor.clickUndock();
+            stateManager.getState(clientId).setUndockStartTime(LocalDateTime.now());
+        } else {
+            stateManager.setState(clientId, ClientState.State.TRAVEL);
         }
     }
 
@@ -1987,7 +1982,7 @@ public class ClientManager {
     //
     // Timeline:
     //   0–7s   : grace period — warp_active may not have appeared yet, skip check.
-    //   5s+    : check warp_active every 30s; when gone → IDLE.
+    //   7s+    : check warp_active every 5s; when gone → IDLE.
     // -----------------------------------------------------------------------
 
     private void handleWarping(String clientId, ClientWindowInfo window) {
@@ -2004,6 +1999,13 @@ public class ClientManager {
         }
 
         boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
+        // After the first check, only poll every 5s to reduce OCR calls.
+        if (!firstCheck) {
+            long sinceLastCheck = Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds();
+            if (sinceLastCheck < 5) {
+                return;
+            }
+        }
         cs.setLastWarpCheck(LocalDateTime.now());
         if (!missionProcessor.isWarpActive()) {
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
