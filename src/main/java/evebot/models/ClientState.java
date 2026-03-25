@@ -91,6 +91,13 @@ public class ClientState {
     /** True once the gate warp has been verified and landed — combat can begin after a short wait. */
     private boolean combatWarpLanded = false;
 
+    /** Saved launcher coordinates from first right-click — reused for ammo switches mid-combat. */
+    private int launcherX = -1;
+    private int launcherY = -1;
+
+    /** True when docking to home station after combat — WARPING should transition to COMPLETING. */
+    private boolean dockingToStation = false;
+
     /** When the pod-death cooldown expires for this client. */
     private LocalDateTime podCooldownEnd = LocalDateTime.MIN;
 
@@ -138,6 +145,8 @@ public class ClientState {
             this.combatStep = 0;
             this.combatWaitStart = LocalDateTime.MIN;
             this.combatWarpLanded = false;
+            this.launcherX = -1;
+            this.launcherY = -1;
         }
     }
 
@@ -186,6 +195,13 @@ public class ClientState {
 
     public boolean isCombatWarpLanded()              { return combatWarpLanded; }
     public void    setCombatWarpLanded(boolean v)    { this.combatWarpLanded = v; }
+
+    public int  getLauncherX()              { return launcherX; }
+    public int  getLauncherY()              { return launcherY; }
+    public void setLauncherPos(int x, int y) { this.launcherX = x; this.launcherY = y; }
+
+    public boolean isDockingToStation()             { return dockingToStation; }
+    public void    setDockingToStation(boolean v)   { this.dockingToStation = v; }
 
     public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
     public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }

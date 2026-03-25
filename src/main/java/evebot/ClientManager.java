@@ -149,7 +149,7 @@ public class ClientManager {
     // POD_COOLDOWN — wait for global 10-minute cooldown after a pod death.
     // -----------------------------------------------------------------------
 
-    private static final int POD_COOLDOWN_MINUTES = 10;
+    private static final int POD_COOLDOWN_MINUTES = 12;
 
     private void handlePodCooldown(String clientId) {
         LocalDateTime cooldownEnd = stateManager.getPodCooldownEnd();
@@ -166,12 +166,16 @@ public class ClientManager {
                 stateManager.setState(clientId, ClientState.State.IDLE);
             }
         } else {
-            // Log every ~60s (check if lastStateChange is old enough to avoid spam).
+            // Log every 60s and switch to other client.
             long elapsed = Duration.between(
                     stateManager.getState(clientId).getLastStateChange(), LocalDateTime.now()
             ).getSeconds();
             if (elapsed % 60 < 2) {
                 log(clientId, "POD_COOLDOWN: " + (remaining / 60) + "m " + (remaining % 60) + "s remaining...");
+            }
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) {
+                bringToForeground(other);
             }
         }
     }
@@ -633,8 +637,12 @@ public class ClientManager {
                 return;
             }
 
-            // 3s+: poll warp_active — when it disappears, warp has landed.
+            // 7s+: poll warp_active every 5s — when it disappears, warp has landed.
             boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
+            long sinceLastCheck = Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds();
+            if (!firstCheck && sinceLastCheck < 5) {
+                return; // throttle to 5s intervals
+            }
             cs.setLastWarpCheck(LocalDateTime.now());
 
             if (missionProcessor.isWarpActive()) {
@@ -661,9 +669,17 @@ public class ClientManager {
                 : null;
 
         if (resolvedTarget == null) {
-            log(clientId, "IN_COMBAT: no mission/shipTarget — falling back to set_destination polling."
+            log(clientId, "IN_COMBAT: no mission/shipTarget — falling back to completion polling."
                     + " (mission=" + mission + ")");
-            if (missionProcessor.isSetDestinationVisible()) {
+            String completed = missionProcessor.detectCombatComplete();
+            if ("dock".equals(completed)) {
+                log(clientId, "IN_COMBAT: dock detected — same system, docking.");
+                missionProcessor.clickTemplate("dock");
+                cs.setDockingToStation(true);
+                cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                cs.setWarpStartTime(LocalDateTime.now());
+                stateManager.setState(clientId, ClientState.State.WARPING);
+            } else if (completed != null) {
                 log(clientId, "IN_COMBAT: set_destination detected — mission complete.");
                 stateManager.setState(clientId, ClientState.State.RETURNING);
             }
@@ -682,6 +698,7 @@ public class ClientManager {
                 handleCombatVengeance(clientId, cs);
                 break;
             case "enyo":
+            case "enya":
                 handleCombatEnyo(clientId, cs);
                 break;
             case "hawk":
@@ -703,8 +720,16 @@ public class ClientManager {
                 handleCombatWorm(clientId, cs);
                 break;
             default:
-                // Unknown target — fall back to set_destination polling.
-                if (missionProcessor.isSetDestinationVisible()) {
+                // Unknown target — fall back to completion polling.
+                String fallback = missionProcessor.detectCombatComplete();
+                if ("dock".equals(fallback)) {
+                    log(clientId, "IN_COMBAT: dock detected — same system, docking.");
+                    missionProcessor.clickTemplate("dock");
+                    cs.setDockingToStation(true);
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                } else if (fallback != null) {
                     log(clientId, "IN_COMBAT: set_destination detected — mission complete.");
                     stateManager.setState(clientId, ClientState.State.RETURNING);
                 }
@@ -719,9 +744,19 @@ public class ClientManager {
 
     private void pollSetDestinationOrCapsule(String clientId, ClientState cs,
                                               String combatLabel, boolean allowClientSwitch) {
-        if (missionProcessor.isSetDestinationVisible()) {
-            log(clientId, "COMBAT[" + combatLabel + "] set_destination detected — mission complete!");
-            stateManager.setState(clientId, ClientState.State.RETURNING);
+        String completed = missionProcessor.detectCombatComplete();
+        if (completed != null) {
+            if ("dock".equals(completed)) {
+                log(clientId, "COMBAT[" + combatLabel + "] dock detected — same system, docking.");
+                missionProcessor.clickTemplate("dock");
+                cs.setDockingToStation(true);
+                cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                cs.setWarpStartTime(LocalDateTime.now());
+                stateManager.setState(clientId, ClientState.State.WARPING);
+            } else {
+                log(clientId, "COMBAT[" + combatLabel + "] set_destination detected — mission complete!");
+                stateManager.setState(clientId, ClientState.State.RETURNING);
+            }
             return;
         }
 
@@ -734,9 +769,12 @@ public class ClientManager {
         }
 
         log(clientId, "COMBAT[" + combatLabel + "] waiting for mission complete (" + elapsed + "s)...");
-        if (allowClientSwitch && elapsed > 0 && elapsed % 30 == 0) {
+        if (allowClientSwitch && elapsed > 0 && elapsed % 10 == 0) {
             ClientWindowInfo other = findOtherClient(clientId);
-            if (other != null) bringToForeground(other);
+            if (other != null) {
+                log(clientId, "COMBAT[" + combatLabel + "] safe wait — switching to: " + other.getClientId());
+                bringToForeground(other);
+            }
         }
     }
 
@@ -875,6 +913,12 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
+                // Save launcher position for later ammo switch (step 11).
+                int[] launcherPos = missionProcessor.findTemplatePos("launcher");
+                if (launcherPos != null) {
+                    cs.setLauncherPos(launcherPos[0], launcherPos[1]);
+                    log(clientId, "COMBAT[Vengeance] Saved launcher pos: (" + launcherPos[0] + "," + launcherPos[1] + ").");
+                }
                 log(clientId, "COMBAT[Vengeance] Step 0: right-click target_vengeance → click orbit.");
                 missionProcessor.rightClickTemplate("target_vengeance");
                 missionProcessor.clickTemplate("orbit");
@@ -996,8 +1040,13 @@ public class ClientManager {
                 break;
             }
             case 11: {
-                log(clientId, "COMBAT[Vengeance] Step 11: right-click launcher (ammo menu).");
-                missionProcessor.rightClickTemplate("launcher");
+                if (cs.getLauncherX() >= 0) {
+                    log(clientId, "COMBAT[Vengeance] Step 11: right-click launcher at saved pos (" + cs.getLauncherX() + "," + cs.getLauncherY() + ").");
+                    missionProcessor.rightClickPos(cs.getLauncherX(), cs.getLauncherY());
+                } else {
+                    log(clientId, "COMBAT[Vengeance] Step 11: right-click launcher (template fallback).");
+                    missionProcessor.rightClickTemplate("launcher");
+                }
                 cs.setCombatStep(12);
                 break;
             }
@@ -1458,7 +1507,7 @@ public class ClientManager {
                 break;
             }
             case 10: {
-                pollSetDestinationOrCapsule(clientId, cs, "Sansha", false);
+                pollSetDestinationOrCapsule(clientId, cs, "Sansha", true);
                 break;
             }
             default:
@@ -1744,9 +1793,10 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                // SAFE WAIT for set_destination — but intercept to add xc deactivation
-                if (missionProcessor.isSetDestinationVisible()) {
-                    log(clientId, "COMBAT[Angel] set_destination detected — deactivating modules.");
+                // SAFE WAIT for set_destination/dock — intercept to add xc deactivation
+                String completed = missionProcessor.detectCombatComplete();
+                if (completed != null) {
+                    log(clientId, "COMBAT[Angel] " + completed + " detected — deactivating modules.");
                     cs.setCombatStep(7);
                     break;
                 }
@@ -1755,26 +1805,35 @@ public class ClientManager {
 
                 // Capsule check after 30s
                 if (elapsed >= 30 && missionProcessor.isCapsuleVisible()) {
-                    log(clientId, "COMBAT[Angel] *** CAPSULE DETECTED — ship destroyed! Self-destructing...");
-                    missionProcessor.clickDestruct();
-                    log(clientId, "COMBAT[Angel] waiting 120s for self-destruct respawn...");
-                    try { Thread.sleep(120_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                    log(clientId, "COMBAT[Angel] respawned — transitioning to REPAIRING.");
-                    stateManager.setState(clientId, ClientState.State.REPAIRING);
+                    handlePodDeath(clientId, true);
                     return;
                 }
 
                 log(clientId, "COMBAT[Angel] waiting for mission complete (" + elapsed + "s)...");
-                if (elapsed > 0 && elapsed % 30 == 0) {
+                if (elapsed > 0 && elapsed % 10 == 0) {
                     ClientWindowInfo other = findOtherClient(clientId);
-                    if (other != null) bringToForeground(other);
+                    if (other != null) {
+                        log(clientId, "COMBAT[Angel] safe wait — switching to: " + other.getClientId());
+                        bringToForeground(other);
+                    }
                 }
                 break;
             }
             case 7: {
                 log(clientId, "COMBAT[Angel] Step 7: press 'xc' (deactivate modules).");
                 missionProcessor.keyPress("xc");
-                stateManager.setState(clientId, ClientState.State.RETURNING);
+                // Re-detect: dock = same system, set_destination = different system
+                String result = missionProcessor.detectCombatComplete();
+                if ("dock".equals(result)) {
+                    log(clientId, "COMBAT[Angel] dock detected — same system, docking.");
+                    missionProcessor.clickTemplate("dock");
+                    cs.setDockingToStation(true);
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                } else {
+                    stateManager.setState(clientId, ClientState.State.RETURNING);
+                }
                 break;
             }
             default:
@@ -2008,17 +2067,19 @@ public class ClientManager {
         }
         cs.setLastWarpCheck(LocalDateTime.now());
         if (!missionProcessor.isWarpActive()) {
+            if (cs.isDockingToStation()) {
+                log(clientId, "WARPING: dock warp complete after " + elapsed + "s — transitioning to COMPLETING.");
+                cs.setDockingToStation(false);
+                stateManager.setState(clientId, ClientState.State.COMPLETING);
+                return;
+            }
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
             cs.setJustExitedWarp(true);
             // Brief pause to let the game UI finish rendering after warp landing
             // before taking a navigation screenshot — avoids false template matches.
             try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            // Press 's' on short stargate warps to activate prop mod — helps escape bubbles.
-            if (elapsed < 30 && !cs.isWarpedToLocation()) {
-                log(clientId, "WARPING: short gate warp (" + elapsed + "s) — pressing 's' to run.");
-                missionProcessor.keyPress("s");
-            }
+            // TODO: re-add prop mod activation here once bubble detection is implemented
             // Process IDLE immediately so this client handles the next action
             // (gate jump, warp-to, etc.) before any switch occurs.
             handleIdle(clientId, window);

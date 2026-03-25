@@ -355,6 +355,16 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    public int[] findTemplatePos(String key) {
+        return ocrBridge.findTemplatePos(key);
+    }
+
+    public void rightClickPos(int x, int y) {
+        log("Right-clicking at (" + x + "," + y + ")");
+        ocrBridge.rightClickPos(x, y);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void keyPress(String keys) {
         log("Pressing keys: " + keys);
         ocrBridge.keyPress(keys);
@@ -530,6 +540,14 @@ public class MissionProcessor {
      */
     public boolean isSetDestinationVisible() {
         return ocrBridge.findAnyTemplate("set_destination") != null;
+    }
+
+    /**
+     * Checks for mission completion after combat — returns "set_destination" (different system)
+     * or "dock" (same system as station), or null if neither visible.
+     */
+    public String detectCombatComplete() {
+        return ocrBridge.findAnyTemplate("set_destination", "dock");
     }
 
     /**

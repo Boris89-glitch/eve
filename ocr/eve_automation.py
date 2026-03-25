@@ -1639,6 +1639,11 @@ Examples:
         "--wait-gone", metavar="KEY", help="Wait for template to disappear, then exit"
     )
     parser.add_argument(
+        "--find-pos",
+        metavar="KEY",
+        help="Find template and print 'x,y' centre coordinates to stdout; exit 1 if not found",
+    )
+    parser.add_argument(
         "--find-any",
         nargs="+",
         metavar="KEY",
@@ -1755,6 +1760,15 @@ Examples:
             args.repair_ship, dry_run=args.dry_run, threshold=args.threshold
         )
         return
+
+    if getattr(args, "find_pos", None):
+        matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)
+        match = matcher.find(args.find_pos)
+        if match:
+            cx, cy = matcher.center(match)
+            print(f"{cx},{cy}")
+            sys.exit(0)
+        sys.exit(1)
 
     if getattr(args, "find_any", None):
         matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)

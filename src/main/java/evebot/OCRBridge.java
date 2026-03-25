@@ -401,6 +401,23 @@ public class OCRBridge {
     }
 
     /**
+     * Find a template and return its centre coordinates as {x, y}, or null if not found.
+     */
+    public int[] findTemplatePos(String key) {
+        System.out.printf("[%s] [OCRBridge] findTemplatePos: %s%n", ts(), key);
+        String result = runPython("python", automationScriptPath, "--find-pos", key);
+        if (result != null && result.contains(",")) {
+            String[] parts = result.trim().split(",");
+            try {
+                return new int[]{ Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) };
+            } catch (NumberFormatException e) {
+                System.err.printf("[%s] [OCRBridge] findTemplatePos: bad output '%s'%n", ts(), result);
+            }
+        }
+        return null;
+    }
+
+    /**
      * Wait up to timeoutSeconds for a template to appear. Returns true if found.
      */
     public boolean waitForTemplate(String key, int timeoutSeconds) {
