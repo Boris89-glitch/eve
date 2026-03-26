@@ -259,6 +259,14 @@ public class MissionProcessor {
             String combatTarget = dialogMatched.substring("mission_".length());
             log("Dialog template identified combat target: '" + combatTarget + "'");
             mission.setShipTarget(combatTarget);
+        } else if (mission != null && mission.getShipTarget() == null) {
+            // No dialog template match — resolve combat target from OCR keywords
+            // using the same logic as ship_mission_map.json.
+            String resolved = resolveCombatTargetFromKeywords(lookup);
+            if (resolved != null) {
+                log("Keyword fallback identified combat target: '" + resolved + "'");
+                mission.setShipTarget(resolved);
+            }
         }
         sleep(500);
 
@@ -596,6 +604,31 @@ public class MissionProcessor {
 
     private static final java.time.format.DateTimeFormatter TS =
             java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss");
+
+    /**
+     * Keyword → combat target fallback, mirrors ship_mission_map.json logic.
+     * Returns the combat target string (e.g. "worm", "sansha") or null.
+     */
+    private String resolveCombatTargetFromKeywords(String text) {
+        if (text == null || text.isEmpty()) return null;
+        String lower = text.toLowerCase();
+        // Order matters — more specific keywords first, same as ship_mission_map.json.
+        // ship_garmur missions: each keyword maps to a distinct combat target.
+        if (lower.contains("jaguar"))                        return "jaguar";
+        if (lower.contains("enyo"))                          return "enyo";
+        if (lower.contains("hawk"))                          return "hawk";
+        if (lower.contains("vengeance"))                     return "vengeance";
+        // ship_worm
+        if (lower.contains("worm") || lower.contains("guristas")) return "worm";
+        // ship_sansha
+        if (lower.contains("sansha") || lower.contains("sansa"))   return "sansha";
+        // ship_angel
+        if (lower.contains("angel") || lower.contains("dramiel"))  return "angel";
+        // ship_sk
+        if (lower.contains("infested") || lower.contains("ruins")) return "infested";
+        if (lower.contains("recon"))                         return "recon1";
+        return null;
+    }
 
     private void log(String msg) {
         System.out.printf("[%s] [MissionProcessor] %s%n",

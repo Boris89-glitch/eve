@@ -19,6 +19,7 @@
     { "title_contains": "Recon1of3",         "comment": "Recon missions"         }],
   "decline": [
     { "title_contains": "anomic base",    "comment": "Burner base missions"   },
+    { "title_contains": "base",    "comment": "Burner base missions"   },
     { "title_contains": "spies",    "comment": "guristas spies"   },
     { "title_contains": "Recon2of3",    "comment": "recon 2"   },
     { "title_contains": "blaad",    "comment": "br"   },

@@ -743,6 +743,8 @@ public class ClientManager {
                 handleCombatAngel(clientId, cs);
                 break;
             case "worm":
+            case "guristas":
+            case "guristasbumer":
                 handleCombatWorm(clientId, cs);
                 break;
             default:
