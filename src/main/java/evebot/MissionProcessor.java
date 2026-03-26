@@ -187,6 +187,10 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate(key);
     }
 
+    public String findAnyTemplate(String... keys) {
+        return ocrBridge.findAnyTemplate(keys);
+    }
+
     public void pressCtrlR() {
         log("Pressing Ctrl+R (reload modules)");
         ocrBridge.ctrlR();
@@ -555,7 +559,7 @@ public class MissionProcessor {
      * Used by the WARPING state to know when warp has ended.
      */
     public boolean isWarpActive() {
-        return ocrBridge.findAnyTemplate("warp_active") != null;
+        return ocrBridge.findAnyTemplate("warp_active", "warp_active2") != null;
     }
 
     /**

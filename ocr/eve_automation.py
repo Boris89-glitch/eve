@@ -105,6 +105,7 @@ TEMPLATE_FILES = {
     "orbiting": "orbiting",            # HUD indicator confirming orbit is active
     "orbit": "orbit",            # orbit target button
     "warp_active": "warp_active",
+    "warp_active2": "warp_active2",
     "dock": "dock",
     "dock_safe": "dock_safe",  # safe dock option in Locations submenu (insta-dock)
     "abort": "abort",          # abort undock button — visible during undock animation
@@ -149,6 +150,13 @@ TEMPLATE_FILES = {
     "target_jaguar": "target_jaguar",
     "target_vengeance": "target_vengeance",
     "target_inquisitor": "target_inquisitor",
+    "locked_vengeance": "locked_vengeance",
+    "locked_inquisitor": "locked_inquisitor",
+    "locked_jaguar": "locked_jaguar",
+    "locked_enyo": "locked_enyo",
+    "locked_navitas": "locked_navitas",
+    "locked_hawk": "locked_hawk",
+    "locked_bantam": "locked_bantam",
     "target_enyo": "target_enyo",
     "target_navitas": "target_navitas",
     "em_damage": "em_damage",
@@ -158,6 +166,9 @@ TEMPLATE_FILES = {
     "target_angel": "target_angel",      # Angel burner — overview row
     "target_worm": "target_worm",        # Worm burner — overview row
     "target_hive": "target_hive",        # Infested Ruins — overview row
+    "target_hive1": "target_hive1",
+    "target_hive2": "target_hive2",
+    "target_hive3": "target_hive3",
     "hive": "hive",
     "lock_target": "lock_target",
     "jamed": "jamed",  # ECM jam indicator — Angel combat
