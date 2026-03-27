@@ -123,6 +123,7 @@ TEMPLATE_FILES = {
     "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
     "enemy2": "enemy2",        # alternate enemy icon in local chat
     "warp_bubble1": "warp_bubble1",  # warp bubble on undock — bubble camp indicator
+    "bubble_text": "bubble_text",    # warp disruption bubble text — checked on warp/jump initiation
     "locations": "locations",  # locations submenu in right-click context menu (hover target)
     # Safe-spot & system-detection templates for enemy evasion
     "jcv_spot": "jcv_spot",      # JCV safe spot bookmark in Locations submenu

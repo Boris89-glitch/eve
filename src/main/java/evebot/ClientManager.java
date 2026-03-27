@@ -95,16 +95,6 @@ public class ClientManager {
 
 
             ClientWindowInfo fg = getForegroundClient();
-            ClientWindowInfo graceClient = findWarpingClientInGracePeriod();
-
-            if (graceClient != null) {
-                // Grace period takes priority — ensure this client stays focused.
-                if (fg == null || !fg.getClientId().equals(graceClient.getClientId())) {
-                    bringToForeground(graceClient);
-                }
-            } else if (fg == null || stateManager.getStateEnum(fg.getClientId()) != ClientState.State.IDLE) {
-                //TODO: what to do here, loop other clients?  I think not
-            }
 
             if (fg == null) {
                 log("[ClientManager] No EVE client in foreground — skipping tick.");
@@ -283,9 +273,9 @@ public class ClientManager {
             }
 
             // Normal tick (or post-8s-wait): full travel UI check including stargate.
-            // But first, if we're in KLY, check for hostiles before jumping the next gate.
-            if (missionProcessor.isKlySystem() && missionProcessor.isEnemyInLocal()) {
-                log(clientId, "IDLE[TO_MISSION]: enemy in KLY — warping to 7RM gate.");
+            // But first, if we've jumped at least one gate and are in KLY, check for hostiles.
+            if (cs.getJumpCount() >= 1 && missionProcessor.isKlySystem() && missionProcessor.isEnemyInLocal()) {
+                log(clientId, "IDLE[TO_MISSION]: enemy in KLY — warping to 7RM gate. (jumpCount=" + cs.getJumpCount() + ")");
                 cs.setWarpStartTime(LocalDateTime.now());
                 stateManager.setState(clientId, ClientState.State.WARPING);
                 new Thread(() -> missionProcessor.warpTo7rmGate()).start();
@@ -639,7 +629,7 @@ public class ClientManager {
         missionProcessor.clickSetDestination();
 
         // After setting destination, check for hostiles — warp to safe spot if needed
-        if (missionProcessor.isEnemyInLocal()) {
+        if (missionProcessor.findTemplate("enemy") != null) {
             log(clientId, "TRAVEL: enemy in local after undock — warping to safe spot.");
             missionProcessor.warpToSafeSpot();
         }
@@ -2151,24 +2141,34 @@ public class ClientManager {
         ClientState cs = stateManager.getState(clientId);
         long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
-        if (elapsed < 7) {
-            // Log only on the very first tick of the grace period to avoid spam.
-            if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
-                log(clientId, "WARPING: waiting for warp to begin.");
-                cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker (not a real check time)
+        boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
+
+        if (firstCheck) {
+            cs.setLastWarpCheck(LocalDateTime.now());
+            // Check for warp disruption bubble before assuming warp will start.
+            if (missionProcessor.findTemplate("bubble_text") != null) {
+                log(clientId, "WARPING: bubble detected!");
+                // TODO: bubble handling logic
+                return;
+            }
+            // No bubble — assume warp will activate, switch to other client.
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) {
+                log(clientId, "WARPING: no bubble — switching focus to: " + other.getClientId());
+                bringToForeground(other);
+            } else {
+                log(clientId, "WARPING: no bubble — no other clients to switch to.");
             }
             return;
         }
 
-        boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
-        // After the first check, only poll every 5s to reduce OCR calls.
-        if (!firstCheck) {
-            long sinceLastCheck = Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds();
-            if (sinceLastCheck < 5) {
-                return;
-            }
+        // Poll every 2s for warp_active.
+        long sinceLastCheck = Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds();
+        if (sinceLastCheck < 2) {
+            return;
         }
         cs.setLastWarpCheck(LocalDateTime.now());
+
         if (!missionProcessor.isWarpActive()) {
             if (cs.isDockingToStation()) {
                 log(clientId, "WARPING: dock warp complete after " + elapsed + "s — transitioning to COMPLETING.");
@@ -2182,20 +2182,11 @@ public class ClientManager {
             // Brief pause to let the game UI finish rendering after warp landing
             // before taking a navigation screenshot — avoids false template matches.
             try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            // TODO: re-add prop mod activation here once bubble detection is implemented
             // Process IDLE immediately so this client handles the next action
             // (gate jump, warp-to, etc.) before any switch occurs.
             handleIdle(clientId, window);
         } else {
-            if (firstCheck) {
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "warp confirmed — switching focus to: " + other.getClientId());
-                    bringToForeground(other);
-                } else {
-                    log(clientId, "warp confirmed — no other clients to switch to.");
-                }
-            } else if (elapsed >= 30) {
+            if (elapsed >= 30) {
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "WARPING: 30s elapsed — switching focus to: " + other.getClientId());
@@ -2212,20 +2203,6 @@ public class ClientManager {
     // -----------------------------------------------------------------------
     // Window focus switching
     // -----------------------------------------------------------------------
-
-    /** Returns a WARPING client still in its grace period (< 6s), or null. */
-    private ClientWindowInfo findWarpingClientInGracePeriod() {
-        for (ClientWindowInfo info : clientWindows.values()) {
-            String id = info.getClientId();
-            if (stateManager.getStateEnum(id) == ClientState.State.WARPING) {
-                long elapsed = java.time.Duration.between(
-                        stateManager.getState(id).getWarpStartTime(),
-                        java.time.LocalDateTime.now()).getSeconds();
-                if (elapsed < 7) return info;
-            }
-        }
-        return null;
-    }
 
     /** Returns the first registered client that is not {@code excludeId}. */
     private ClientWindowInfo findOtherClient(String excludeId) {
