@@ -32,7 +32,7 @@ public class MissionProcessor {
 
     private final OCRBridge ocrBridge;
 
-    private static final int POST_CLICK_DELAY_MS = 600;
+    private static final int POST_CLICK_DELAY_MS = 100;
 
     public MissionProcessor() {
         this.ocrBridge = new OCRBridge();
@@ -322,7 +322,7 @@ public class MissionProcessor {
     public void rightClickAndSelect(String targetKey, String menuKey) {
         log("Right-clicking '" + targetKey + "' → clicking '" + menuKey + "'");
         ocrBridge.rightClickTemplate(targetKey);
-        sleep(800);
+        sleep(100);
         ocrBridge.clickTemplate(menuKey);
         sleep(POST_CLICK_DELAY_MS);
     }

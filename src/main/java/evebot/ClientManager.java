@@ -208,29 +208,17 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     /**
-     * Right-click the launcher module. Tries template matching first; if that fails,
-     * falls back to saved launcher coordinates (from Vengeance step 0).
-     * Also saves/updates launcher coords on successful template match.
-     *
-     * @return true if right-click was performed (template or fallback), false if neither available.
+     * Right-click the launcher module. Tries template matching first;
+     * falls back to hardcoded position (1093, 1028) if not found.
      */
-    private boolean rightClickLauncher(String clientId, ClientState cs) {
+    private void rightClickLauncher(String clientId) {
         int[] pos = missionProcessor.findTemplatePos("launcher");
         if (pos != null) {
-            if (cs.getLauncherX() < 0) {
-                cs.setLauncherPos(pos[0], pos[1]);
-            }
             missionProcessor.rightClickPos(pos[0], pos[1]);
-            return true;
+        } else {
+            log(clientId, "launcher template not found — using hardcoded pos (1093,1028).");
+            missionProcessor.rightClickPos(1093, 1028);
         }
-        // Template not found — try saved coords.
-        if (cs.getLauncherX() >= 0) {
-            log(clientId, "launcher template not found — using saved pos (" + cs.getLauncherX() + "," + cs.getLauncherY() + ").");
-            missionProcessor.rightClickPos(cs.getLauncherX(), cs.getLauncherY());
-            return true;
-        }
-        log(clientId, "launcher template not found and no saved position — skipping.");
-        return false;
     }
 
     /**
@@ -245,10 +233,7 @@ public class ClientManager {
         if (target == null || !target.equalsIgnoreCase("vengeance")) return;
 
         log(clientId, "PRE-GATE: loading explosive rockets for Vengeance.");
-        if (!rightClickLauncher(clientId, cs)) {
-            log(clientId, "PRE-GATE: launcher not found — skipping ammo load.");
-            return;
-        }
+        rightClickLauncher(clientId);
         try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         missionProcessor.clickTemplate("exp_damage");
         try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -288,27 +273,11 @@ public class ClientManager {
                     }
                     return;
                 }
-
-                // Neither activate_gate nor warp_to_location visible.
-                // Short warp (<30s) = likely mid-jump through a gate tunnel — wait 8s.
-                // Long warp (≥30s) = already jumped, skip wait and check stargate immediately.
-                if (warpSecs < 30) {
-                    log(clientId, "IDLE[TO_MISSION]: no mission-specific element — waiting 8s (possible jump transition).");
-                    // TODO: bubble detection — ship may be caught in an interdictor bubble; needs separate handling
-                    try { Thread.sleep(8000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                } else {
-                    log(clientId, "IDLE[TO_MISSION]: no mission-specific element after " + warpSecs + "s warp — checking stargate.");
-                }
             }
 
             // Normal tick (or post-8s-wait): full travel UI check including stargate.
             String found = missionProcessor.detectTravelUI();
             if (found == null) {
-                // No travel UI — check if we got podded.
-                if (missionProcessor.isCapsuleVisible()) {
-                    handlePodDeath(clientId, true);
-                    return;
-                }
                 if (missionProcessor.detectCompletingUI() != null) {
                     // Agent icon visible during TO_MISSION = respawned at station after pod death.
                     handlePodDeath(clientId, false);
@@ -338,7 +307,6 @@ public class ClientManager {
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
                     break;
-                    //TODO: case jumping! check if invisible on next gate or jumping, dont just click on some stargate
                 default:
                     log(clientId, "unexpected '" + found + "' — ignoring.");
             }
@@ -767,7 +735,7 @@ public class ClientManager {
 
     // -----------------------------------------------------------------------
     // Shared final-step logic for all combat sequences.
-    // Polls set_destination; after 30s also checks for capsule (ship destroyed).
+    // Polls set_destination; after 80s also checks for capsule (ship destroyed).
     // -----------------------------------------------------------------------
 
     private void pollSetDestinationOrCapsule(String clientId, ClientState cs,
@@ -790,8 +758,8 @@ public class ClientManager {
 
         long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-        // After 30s without set_destination, start checking for capsule (ship destroyed).
-        if (elapsed >= 30 && missionProcessor.isCapsuleVisible()) {
+        // After 80s without set_destination, start checking for capsule (ship destroyed).
+        if (elapsed >= 80 && missionProcessor.isCapsuleVisible()) {
             handlePodDeath(clientId, true);
             return;
         }
@@ -827,7 +795,7 @@ public class ClientManager {
         switch (step) {
             case 0: {
                 log(clientId, "COMBAT[Jaguar] Step 0: right-click launcher (ammo menu).");
-                rightClickLauncher(clientId, cs);
+                rightClickLauncher(clientId);
                 cs.setCombatStep(1);
                 break;
             }
@@ -1093,7 +1061,7 @@ public class ClientManager {
             }
             case 11: {
                 log(clientId, "COMBAT[Vengeance] Step 11: right-click launcher (ammo switch).");
-                rightClickLauncher(clientId, cs);
+                rightClickLauncher(clientId);
                 cs.setCombatStep(12);
                 break;
             }
@@ -1188,7 +1156,7 @@ public class ClientManager {
         switch (step) {
             case 0: {
                 log(clientId, "COMBAT[Enyo] Step 0: right-click launcher (ammo menu).");
-                rightClickLauncher(clientId, cs);
+                rightClickLauncher(clientId);
                 cs.setCombatStep(1);
                 break;
             }
@@ -1366,7 +1334,7 @@ public class ClientManager {
         switch (step) {
             case 0: {
                 log(clientId, "COMBAT[Hawk] Step 0: right-click launcher (ammo menu).");
-                rightClickLauncher(clientId, cs);
+                rightClickLauncher(clientId);
                 cs.setCombatStep(1);
                 break;
             }
@@ -1723,7 +1691,7 @@ public class ClientManager {
 
                 long elapsed8 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-                if (elapsed8 >= 30 && missionProcessor.isCapsuleVisible()) {
+                if (elapsed8 >= 120 && missionProcessor.isCapsuleVisible()) {
                     handlePodDeath(clientId, true);
                     return;
                 }
@@ -1742,13 +1710,13 @@ public class ClientManager {
                 break;
             }
             case 9: {
-                // WAIT 10s after being jamed — let prop mod burn away
+                // WAIT 5s after being jamed — let prop mod burn away
                 long elapsed9 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed9 < 10) {
-                    log(clientId, "COMBAT[Infested] jamed escape wait: " + elapsed9 + "s / 10s.");
+                if (elapsed9 < 5) {
+                    log(clientId, "COMBAT[Infested] jamed escape wait: " + elapsed9 + "s / 5s.");
                     return;
                 }
-                log(clientId, "COMBAT[Infested] 10s escape wait complete — attempting stargate jump.");
+                log(clientId, "COMBAT[Infested] 5s escape wait complete — attempting stargate jump.");
                 cs.setCombatStep(10);
                 break;
             }
@@ -1901,8 +1869,8 @@ public class ClientManager {
 
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-                // Capsule check after 30s
-                if (elapsed >= 30 && missionProcessor.isCapsuleVisible()) {
+                // Capsule check after 90s
+                if (elapsed >= 90 && missionProcessor.isCapsuleVisible()) {
                     handlePodDeath(clientId, true);
                     return;
                 }
@@ -2017,9 +1985,9 @@ public class ClientManager {
                 break;
             }
             case 8: {
-                // WAIT 5s before deactivating module
+                // WAIT 8s before deactivating module
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 5) return;
+                if (elapsed < 8) return;
                 log(clientId, "COMBAT[Worm] Step 8: Alt+F1 (deactivate module).");
                 missionProcessor.altKeyPress("f1");
                 cs.setCombatWaitStart(LocalDateTime.now());
