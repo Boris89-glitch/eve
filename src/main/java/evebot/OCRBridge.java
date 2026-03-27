@@ -361,8 +361,11 @@ public class OCRBridge {
      */
     /**
      * @return dialog_matched key (e.g. "mission_hawk") if identified, empty string
-     *         if repair succeeded but no dialog matched, or null on failure.
+     *         if repair succeeded but no dialog matched, "SHIP_NOT_FOUND" if the
+     *         ship was not in hangar (mission quit + new mission requested), or null on failure.
      */
+    public static final String SHIP_NOT_FOUND = "SHIP_NOT_FOUND";
+
     public String repairShip(String missionTitle) {
         System.out.printf("[%s] [OCRBridge] repairShip for mission: %s%n", ts(), missionTitle);
         String output = runPython("python", automationScriptPath,
@@ -374,6 +377,9 @@ public class OCRBridge {
         System.out.printf("[%s] [OCRBridge] repairShip result: %s%n", ts(), output);
         try {
             JsonObject json = gson.fromJson(output, JsonObject.class);
+            if (json.has("ship_not_found") && json.get("ship_not_found").getAsBoolean()) {
+                return SHIP_NOT_FOUND;
+            }
             if (json.has("dialog_matched")) {
                 return json.get("dialog_matched").getAsString();
             }

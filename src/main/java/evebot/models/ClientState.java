@@ -100,6 +100,12 @@ public class ClientState {
     /** True after the first re-click of decline in DECLINING — next failure triggers agent double-click. */
     private boolean declineRetried = false;
 
+    /** Number of stargate jumps since undocking — logged on pod death for location context. */
+    private int jumpCount = 0;
+
+    /** Last time the POD_COOLDOWN handler swapped clients — prevents rapid-fire switching. */
+    private LocalDateTime lastCooldownSwap = LocalDateTime.MIN;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -133,6 +139,7 @@ public class ClientState {
             this.destinationSet   = false;
             this.warpedToLocation = false;
             this.lastTravelAction = LocalDateTime.MIN;
+            this.jumpCount        = 0;
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
@@ -198,6 +205,12 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isDeclineRetried()              { return declineRetried; }
     public void    setDeclineRetried(boolean v)    { this.declineRetried = v; }
+
+    public int  getJumpCount()          { return jumpCount; }
+    public void incrementJumpCount()    { this.jumpCount++; }
+
+    public LocalDateTime getLastCooldownSwap()                { return lastCooldownSwap; }
+    public void          setLastCooldownSwap(LocalDateTime t) { this.lastCooldownSwap = t; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

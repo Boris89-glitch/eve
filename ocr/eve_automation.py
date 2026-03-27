@@ -90,6 +90,7 @@ TEMPLATE_FILES = {
     "repair_yes": "repair_yes",
     "already_repaired": "already_repaired",  # "nothing to repair" dialog — skip repair, proceed to activation
     "board_ship": "board_ship",  # context menu item — right-click ship → Board Ship
+    "quit_mission": "quit_mission",  # quit/abandon mission button in journal
     # Hangar / navigation
     "undock": "undock",
     "ship_hangar": "ship_hangar",
@@ -120,7 +121,17 @@ TEMPLATE_FILES = {
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
     "agent_standings": "agent_standings",  # standings info button in agent dialog
     "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
+    "enemy2": "enemy2",        # alternate enemy icon in local chat
+    "warp_bubble1": "warp_bubble1",  # warp bubble on undock — bubble camp indicator
     "locations": "locations",  # locations submenu in right-click context menu (hover target)
+    # Safe-spot & system-detection templates for enemy evasion
+    "jcv_spot": "jcv_spot",      # JCV safe spot bookmark in Locations submenu
+    "kly_spot": "kly_spot",      # KLY safe spot bookmark in Locations submenu
+    "7rm_gate": "7rm_gate",      # 7RM stargate template
+    "kly_system": "kly_system",  # KLY-C0 system name in UI
+    "jcv_system": "jcv_system",  # J-CIJV system name in UI
+    "kly_next": "kly_next",      # KLY-C0 next-system indicator on route
+    "jcv_next": "jcv_next",      # J-CIJV next-system indicator on route
     # Mission dialog detection templates — crop these from the mission dialog window.
     # Name them mission_<target>.png. They are matched against the open dialog to
     # identify the mission type without relying on OCR text parsing.
@@ -1049,8 +1060,17 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     log.info("Step 1: Locating ship icon '%s'...", ship_template)
     ship_match = matcher.wait_for(ship_template, timeout=2.0)
     if not ship_match:
-        log.error("Ship icon '%s' not found — cannot repair", ship_template)
-        sys.exit(1)
+        log.warning("Ship icon '%s' not found — quitting mission and requesting new one", ship_template)
+        # Click quit_mission -> yes (repair_yes) -> request_mission
+        if matcher.wait_and_click("quit_mission", timeout=2.0, delay=1.0):
+            log.info("Clicked 'Quit Mission' — confirming with Yes...")
+            matcher.wait_and_click("repair_yes", timeout=2.0, delay=1.0)
+            log.info("Clicking 'Request Mission' to get a new offer...")
+            matcher.wait_and_click("request_mission", timeout=2.0, delay=1.0)
+        else:
+            log.error("'quit_mission' template not found — cannot abandon mission")
+        print(json.dumps({"ship_not_found": True}), flush=True)
+        sys.exit(0)
     ship_cx, ship_cy = matcher.center(ship_match)
     log.info(
         "Ship icon locked at (%d,%d) — will reuse for repair and activation",

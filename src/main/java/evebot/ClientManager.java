@@ -166,11 +166,11 @@ public class ClientManager {
                 stateManager.setState(clientId, ClientState.State.IDLE);
             }
         } else {
-            // Log and switch to other client every 5s.
-            long elapsed = Duration.between(
-                    stateManager.getState(clientId).getLastStateChange(), LocalDateTime.now()
-            ).getSeconds();
-            if (elapsed % 5 < 2) {
+            // Log and switch to other client every 10s.
+            ClientState cs = stateManager.getState(clientId);
+            long sinceLast = Duration.between(cs.getLastCooldownSwap(), LocalDateTime.now()).getSeconds();
+            if (sinceLast >= 10) {
+                cs.setLastCooldownSwap(LocalDateTime.now());
                 log(clientId, "POD_COOLDOWN: " + (remaining / 60) + "m " + (remaining % 60) + "s remaining...");
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
@@ -188,13 +188,20 @@ public class ClientManager {
      * @param inSpace        true if capsule is in space (needs self-destruct); false if already at station
      */
     private void handlePodDeath(String clientId, boolean inSpace) {
+        ClientState cs = stateManager.getState(clientId);
+        int jumps = cs.getJumpCount();
+        String phase = cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION ? "to mission"
+                     : cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME ? "returning"
+                     : "unknown";
         if (inSpace) {
             log(clientId, "*** CAPSULE DETECTED — ship destroyed! Self-destructing...");
+            EventLog.log("POD_DEATH", clientId + " — ship destroyed in space, self-destructing (" + phase + ", jumps: " + jumps + ")");
             missionProcessor.clickDestruct();
             log(clientId, "Waiting 120s for self-destruct respawn...");
             try { Thread.sleep(120_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         } else {
             log(clientId, "*** PODDED — respawned at station (agent_icon visible).");
+            EventLog.log("POD_DEATH", clientId + " — respawned at station (" + phase + ", jumps: " + jumps + ")");
         }
 
         LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
@@ -276,6 +283,14 @@ public class ClientManager {
             }
 
             // Normal tick (or post-8s-wait): full travel UI check including stargate.
+            // But first, if we're in KLY, check for hostiles before jumping the next gate.
+            if (missionProcessor.isKlySystem() && missionProcessor.isEnemyInLocal()) {
+                log(clientId, "IDLE[TO_MISSION]: enemy in KLY — warping to 7RM gate.");
+                cs.setWarpStartTime(LocalDateTime.now());
+                stateManager.setState(clientId, ClientState.State.WARPING);
+                new Thread(() -> missionProcessor.warpTo7rmGate()).start();
+                return;
+            }
             String found = missionProcessor.detectTravelUI();
             if (found == null) {
                 if (missionProcessor.detectCompletingUI() != null) {
@@ -302,7 +317,8 @@ public class ClientManager {
                     new Thread(() -> missionProcessor.clickWarpToLocation()).start();
                     break;
                 case "stargate":
-                    log(clientId, "IDLE[TO_MISSION]: stargate — right-click → jump.");
+                    cs.incrementJumpCount();
+                    log(clientId, "IDLE[TO_MISSION]: stargate — right-click → jump. (jump #" + cs.getJumpCount() + ")");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
@@ -364,7 +380,8 @@ public class ClientManager {
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     break;
                 case "stargate":
-                    log(clientId, "stargate — right-click → jump.");
+                    cs.incrementJumpCount();
+                    log(clientId, "stargate — right-click → jump. (jump #" + cs.getJumpCount() + ")");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
@@ -573,9 +590,9 @@ public class ClientManager {
         log(clientId, "Starting repair + undock flow for: "
                 + (mission != null ? mission.getTitle() : "unknown mission"));
 
-        boolean success = missionProcessor.performUndockStart(mission);
+        String result = missionProcessor.performUndockStart(mission);
 
-        if (success) {
+        if (MissionProcessor.UNDOCK_OK.equals(result)) {
             log(clientId, "Clicking undock.");
             missionProcessor.clickUndock();
             stateManager.getState(clientId).setUndockStartTime(LocalDateTime.now());
@@ -586,6 +603,12 @@ public class ClientManager {
                 log(clientId, "UNDOCKING: switching to " + other.getClientId() + " during 15s animation.");
                 bringToForeground(other);
             }
+        } else if (MissionProcessor.UNDOCK_SHIP_NOT_FOUND.equals(result)) {
+            String mTitle = mission != null ? mission.getTitle() : "unknown";
+            log(clientId, "Ship not found — mission quit, returning to CHECKING_MISSIONS.");
+            EventLog.log("SHIP_NOT_FOUND", clientId + " — mission: " + mTitle);
+            stateManager.getState(clientId).setCurrentMission(null);
+            stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
         } else {
             System.err.println("[" + clientId + "] Repair/undock flow failed — returning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
@@ -599,10 +622,28 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
+        // First thing after undock: check for bubble camp — redock immediately if detected.
+        if (missionProcessor.isBubbleCampOnUndock()) {
+            log(clientId, "TRAVEL: bubble camp detected on undock — emergency redock!");
+            missionProcessor.emergencyRedock();
+            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
+            stateManager.setPodCooldownEnd(cooldownEnd);
+            log(clientId, "BUBBLE_CAMP: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown for both clients.");
+            stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
+            return;
+        }
+
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
         missionProcessor.closeAllDialogs();
         missionProcessor.clickSetDestination();
+
+        // After setting destination, check for hostiles — warp to safe spot if needed
+        if (missionProcessor.isEnemyInLocal()) {
+            log(clientId, "TRAVEL: enemy in local after undock — warping to safe spot.");
+            missionProcessor.warpToSafeSpot();
+        }
+
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.TO_MISSION);
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
@@ -2047,6 +2088,9 @@ public class ClientManager {
             missionProcessor.clickFleetYes();
         } else if (standings < -1.0) {
             log(clientId, String.format("COMPLETING: standings %.2f (critical) — fleet NO.", standings));
+            if (standings < -1.5) {
+                EventLog.log("STANDINGS_LOW", clientId + String.format(" — standings: %.2f", standings));
+            }
             missionProcessor.clickFleetNo();
         } else if (standings < 0.0) {
             log(clientId, String.format("COMPLETING: standings %.2f (low) — fleet NO.", standings));

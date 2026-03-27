@@ -231,7 +231,14 @@ public class MissionProcessor {
     //   - Clicking ship_hangar again would close it.
     // -----------------------------------------------------------------------
 
-    public boolean performUndockStart(Mission mission) {
+    public static final String UNDOCK_OK = "ok";
+    public static final String UNDOCK_SHIP_NOT_FOUND = "ship_not_found";
+
+    /**
+     * @return UNDOCK_OK on success, UNDOCK_SHIP_NOT_FOUND if ship was missing
+     *         (mission quit + new mission requested by Python), or null on failure.
+     */
+    public String performUndockStart(Mission mission) {
         log("=== Starting undock sequence ===");
 
         String shipTarget = (mission != null && mission.getShipTarget() != null)
@@ -250,7 +257,11 @@ public class MissionProcessor {
         String dialogMatched = ocrBridge.repairShip(lookup);
         if (dialogMatched == null) {
             System.err.println("[MissionProcessor] repairShip failed — aborting.");
-            return false;
+            return null;
+        }
+        if (OCRBridge.SHIP_NOT_FOUND.equals(dialogMatched)) {
+            log("Ship not found in hangar — mission quit, new mission requested.");
+            return UNDOCK_SHIP_NOT_FOUND;
         }
 
         // If Python matched a dialog template (e.g. "mission_hawk"), extract the
@@ -273,7 +284,7 @@ public class MissionProcessor {
         // Python's repair_ship already clicks Board Ship (or falls back to Undock),
         // so no need to click undock here — just transition to UNDOCKING.
         log("=== Repair done — entering UNDOCKING state ===");
-        return true;
+        return UNDOCK_OK;
     }
 
     /**
@@ -432,9 +443,30 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate("dock_safe");
     }
 
+    /** Check if warp bubble or enemy2 is visible on undock (bubble camp). */
+    public boolean isBubbleCampOnUndock() {
+        return ocrBridge.findAnyTemplate("enemy2", "warp_bubble1") != null;
+    }
+
+    /**
+     * Emergency re-dock: right-click home_station → click dock_safe.
+     */
+    public void emergencyRedock() {
+        log("EMERGENCY-REDOCK: bubble camp detected — docking back");
+        ocrBridge.rightClickTemplate("home_station");
+        sleep(800);
+        ocrBridge.clickTemplate("dock_safe");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** Check if we are in the KLY-C0 system. */
+    public boolean isKlySystem() {
+        return ocrBridge.findAnyTemplate("kly_system") != null;
+    }
+
     /** Check if enemy icon is visible in local chat. */
     public boolean isEnemyInLocal() {
-        return ocrBridge.findAnyTemplate("enemy") != null;
+        return ocrBridge.findAnyTemplate("enemy", "enemy2") != null;
     }
 
     /**
@@ -450,6 +482,48 @@ public class MissionProcessor {
         ocrBridge.clickTemplate("dock_safe");  // click Dock from submenu
         sleep(POST_CLICK_DELAY_MS);
         ctrlKeyPress("s");                    // autopilot to insta-dock bookmark
+    }
+
+    /**
+     * Warp to a safe spot after undocking when enemy is in local.
+     * Checks jcv_next / kly_next to determine which safe spot to use.
+     * Right-click space → hover Locations → click the matching spot template.
+     *
+     * @return true if a safe spot was found and clicked, false otherwise
+     */
+    public boolean warpToSafeSpot() {
+        String spot;
+        if (ocrBridge.findAnyTemplate("jcv_next") != null) {
+            spot = "jcv_spot";
+            log("SAFE-SPOT: jcv_next detected — warping to JCV safe spot");
+        } else if (ocrBridge.findAnyTemplate("kly_next") != null) {
+            spot = "kly_spot";
+            log("SAFE-SPOT: kly_next detected — warping to KLY safe spot");
+        } else {
+            log("SAFE-SPOT: enemy in local but no jcv_next/kly_next found");
+            return false;
+        }
+        ocrBridge.rightClickPos(960, 540);   // right-click centre of space view
+        sleep(800);
+        ocrBridge.hoverTemplate("locations"); // hover Locations submenu
+        sleep(800);
+        ocrBridge.clickTemplate(spot);        // click the safe spot bookmark
+        sleep(POST_CLICK_DELAY_MS);
+        return true;
+    }
+
+    /**
+     * Warp to 7RM gate when enemy detected in KLY system.
+     * Right-click space → hover Locations → click 7rm_gate.
+     */
+    public void warpTo7rmGate() {
+        log("SAFE-SPOT: enemy in KLY — warping to 7RM gate via Locations");
+        ocrBridge.rightClickPos(960, 540);
+        sleep(800);
+        ocrBridge.hoverTemplate("locations");
+        sleep(800);
+        ocrBridge.clickTemplate("7rm_gate");
+        sleep(POST_CLICK_DELAY_MS);
     }
 
     public void clickOk() {
