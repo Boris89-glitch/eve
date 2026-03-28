@@ -445,7 +445,7 @@ public class MissionProcessor {
 
     /** Check if warp bubble or enemy2 is visible on undock (bubble camp). */
     public boolean isBubbleCampOnUndock() {
-        return ocrBridge.findAnyTemplate("enemy2", "warp_bubble1") != null;
+        return ocrBridge.findAnyTemplate("enemy2", "warp_bubble1", "warp_bubble2") != null;
     }
 
     /**
@@ -510,6 +510,20 @@ public class MissionProcessor {
         ocrBridge.clickTemplate(spot);        // click the safe spot bookmark
         sleep(POST_CLICK_DELAY_MS);
         return true;
+    }
+
+    /**
+     * Warp to a generic safe spot when enemy detected in local after a jump.
+     * Right-click space → hover Locations → click safe_spot.
+     */
+    public void warpToGenericSafeSpot() {
+        log("SAFE-SPOT: enemy in local — warping to safe spot via Locations");
+        ocrBridge.rightClickPos(960, 540);
+        sleep(800);
+        ocrBridge.hoverTemplate("locations");
+        sleep(800);
+        ocrBridge.clickTemplate("safe_spot");
+        sleep(POST_CLICK_DELAY_MS);
     }
 
     /**

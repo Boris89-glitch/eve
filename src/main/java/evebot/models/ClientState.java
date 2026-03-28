@@ -82,6 +82,12 @@ public class ClientState {
     /** True on the first IDLE tick right after exiting WARPING — triggers the 8s jump-settle wait. */
     private boolean justExitedWarp = false;
 
+    /** Current step in the bubble escape sequence (0 = not in bubble escape). Reset on entering WARPING. */
+    private int bubbleEscapeStep = 0;
+
+    /** Timestamp when the current bubble escape wait began. */
+    private LocalDateTime bubbleEscapeStart = LocalDateTime.MIN;
+
     /** Current step in the combat sequence (0 = first step). Reset on entering IN_COMBAT. */
     private int combatStep = 0;
 
@@ -102,6 +108,9 @@ public class ClientState {
 
     /** Number of stargate jumps since undocking — logged on pod death for location context. */
     private int jumpCount = 0;
+
+    /** True once KLY system check has been performed after first jump — skip further checks. */
+    private boolean klyChecked = false;
 
     /** Last time the POD_COOLDOWN handler swapped clients — prevents rapid-fire switching. */
     private LocalDateTime lastCooldownSwap = LocalDateTime.MIN;
@@ -140,9 +149,12 @@ public class ClientState {
             this.warpedToLocation = false;
             this.lastTravelAction = LocalDateTime.MIN;
             this.jumpCount        = 0;
+            this.klyChecked       = false;
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
+            this.bubbleEscapeStep = 0;
+            this.bubbleEscapeStart = LocalDateTime.MIN;
         }
         if (state == State.IN_COMBAT) {
             this.combatStep = 0;
@@ -197,6 +209,12 @@ public class ClientState {
     public boolean isCombatWarpLanded()              { return combatWarpLanded; }
     public void    setCombatWarpLanded(boolean v)    { this.combatWarpLanded = v; }
 
+    public int  getBubbleEscapeStep()             { return bubbleEscapeStep; }
+    public void setBubbleEscapeStep(int step)     { this.bubbleEscapeStep = step; }
+
+    public LocalDateTime getBubbleEscapeStart()                { return bubbleEscapeStart; }
+    public void          setBubbleEscapeStart(LocalDateTime t) { this.bubbleEscapeStart = t; }
+
 public boolean isDockingToStation()             { return dockingToStation; }
     public void    setDockingToStation(boolean v)   { this.dockingToStation = v; }
 
@@ -208,6 +226,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public int  getJumpCount()          { return jumpCount; }
     public void incrementJumpCount()    { this.jumpCount++; }
+
+    public boolean isKlyChecked()           { return klyChecked; }
+    public void    setKlyChecked(boolean v) { this.klyChecked = v; }
 
     public LocalDateTime getLastCooldownSwap()                { return lastCooldownSwap; }
     public void          setLastCooldownSwap(LocalDateTime t) { this.lastCooldownSwap = t; }

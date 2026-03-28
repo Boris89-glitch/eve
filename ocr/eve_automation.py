@@ -123,11 +123,13 @@ TEMPLATE_FILES = {
     "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
     "enemy2": "enemy2",        # alternate enemy icon in local chat
     "warp_bubble1": "warp_bubble1",  # warp bubble on undock — bubble camp indicator
+    "warp_bubble2": "warp_bubble2",  # warp bubble variant — bubble camp indicator
     "bubble_text": "bubble_text",    # warp disruption bubble text — checked on warp/jump initiation
     "locations": "locations",  # locations submenu in right-click context menu (hover target)
     # Safe-spot & system-detection templates for enemy evasion
     "jcv_spot": "jcv_spot",      # JCV safe spot bookmark in Locations submenu
     "kly_spot": "kly_spot",      # KLY safe spot bookmark in Locations submenu
+    "safe_spot": "safe_spot",    # Generic safe spot bookmark in Locations submenu
     "7rm_gate": "7rm_gate",      # 7RM stargate template
     "kly_system": "kly_system",  # KLY-C0 system name in UI
     "jcv_system": "jcv_system",  # J-CIJV system name in UI
