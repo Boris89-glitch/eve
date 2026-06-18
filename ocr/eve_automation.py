@@ -193,15 +193,18 @@ TEMPLATE_FILES = {
 # Maps mission dialog template keys → ship template keys.
 # Checked in order; first match wins.
 MISSION_TEMPLATE_TO_SHIP = [
-    ("mission_recon1", "ship_garmur"),     # Recon 1 of 3 — must be before vengeance (false-match risk)
-    ("mission_vengeance", "ship_garmur"),
-    ("mission_jaguar", "ship_garmur"),
-    ("mission_enyo", "ship_garmur"),
-    ("mission_hawk", "ship_garmur"),
-    ("mission_worm", "ship_worm"),
-    ("mission_sansha", "ship_sansha"),
-    ("mission_angel", "ship_angel"),
-    ("mission_infested", "ship_sk"),
+    # (dialog_key, ship_key, ocr_keywords or None)
+    # When ocr_keywords is set, the OCR text must contain at least one keyword
+    # (substring, case-insensitive) for the match to be accepted.
+    ("mission_recon1",    "ship_garmur", ["recon"]),
+    ("mission_vengeance", "ship_garmur", None),
+    ("mission_jaguar",    "ship_garmur", None),
+    ("mission_enyo",      "ship_garmur", None),
+    ("mission_hawk",      "ship_garmur", None),
+    ("mission_worm",      "ship_worm",   None),
+    ("mission_sansha",    "ship_sansha",  None),
+    ("mission_angel",     "ship_angel",   None),
+    ("mission_infested",  "ship_sk",     ["infested", "hive", "ruins"]),
 ]
 
 # -----------------------------------------------------------------------------
@@ -218,19 +221,32 @@ def load_ship_mission_map() -> dict:
     return {"ship_missions": [], "default_ship_template": "ship_garmur"}
 
 
-def resolve_ship_via_dialog_templates(matcher: "TemplateMatcher") -> tuple[Optional[str], Optional[str]]:
+def resolve_ship_via_dialog_templates(
+    matcher: "TemplateMatcher", mission_title: str = ""
+) -> tuple[Optional[str], Optional[str]]:
     """
     Scan the current screen for mission dialog templates (mission_*).
     Returns (ship_template_key, dialog_key) for the first match,
     or (None, None) if nothing matched.
-    This is the primary identification method — no OCR involved.
+
+    When an entry has ocr_keywords, the OCR mission_title must contain at least
+    one keyword (substring, case-insensitive) for the match to be accepted.
     """
     screen = matcher.screenshot_cv()
-    for dialog_key, ship_key in MISSION_TEMPLATE_TO_SHIP:
+    title_lower = mission_title.lower() if mission_title else ""
+    for dialog_key, ship_key, ocr_keywords in MISSION_TEMPLATE_TO_SHIP:
         if dialog_key not in matcher.templates:
             continue  # template image not provided yet — skip silently
         match = matcher.find(dialog_key, screen=screen)
         if match:
+            if ocr_keywords and title_lower:
+                if not any(kw in title_lower for kw in ocr_keywords):
+                    log.warning(
+                        "Dialog template '%s' matched visually but OCR text '%s' "
+                        "contains none of %s — skipping",
+                        dialog_key, mission_title, ocr_keywords,
+                    )
+                    continue
             log.info("Dialog template matched: '%s' → ship: '%s'", dialog_key, ship_key)
             return ship_key, dialog_key
     return None, None
@@ -265,7 +281,7 @@ def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
 class TemplateMatcher:
     """Loads PNG templates once and exposes find / click / right-click helpers."""
 
-    def __init__(self, templates_dir: Path, threshold: float = 0.80):
+    def __init__(self, templates_dir: Path, threshold: float = 0.83):
         self.threshold = threshold
         self.templates: Dict[str, np.ndarray] = {}
         self.templates_dir = templates_dir
@@ -1004,7 +1020,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     ship_map = load_ship_mission_map()
 
     # Primary: scan the open mission dialog for a known visual template
-    ship_template, dialog_matched = resolve_ship_via_dialog_templates(matcher)
+    ship_template, dialog_matched = resolve_ship_via_dialog_templates(matcher, mission_title)
     if ship_template:
         log.info("Ship identified via dialog template: %s", ship_template)
     else:
@@ -1102,11 +1118,18 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             log.error("'Repair' button not found in repair dialog")
             sys.exit(1)
 
-        # --- Step 5: Confirm with "Yes" ---
-        log.info("Step 5: Clicking 'Yes' to confirm repair...")
-        if not matcher.wait_and_click("repair_yes", timeout=2.0, delay=0.6):
+        # --- Step 5: Confirm with "Yes" or "OK" ---
+        log.info("Step 5: Clicking 'Yes'/'OK' to confirm repair...")
+        confirm_key, confirm_match = matcher.wait_for_any(
+            ["repair_yes", "ok"], timeout=2.0
+        )
+        if confirm_match:
+            cx, cy = matcher.center(confirm_match)
+            log.info("Confirming repair via '%s' at (%d,%d)", confirm_key, cx, cy)
+            matcher._do_click(cx, cy, button="left", delay=0.6)
+        else:
             log.warning(
-                "'repair_yes' not found — repair may have completed without confirmation"
+                "Neither 'repair_yes' nor 'ok' found — repair may have completed without confirmation"
             )
 
     log.info("Repair complete. Waiting for dialog to settle...")

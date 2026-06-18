@@ -286,10 +286,12 @@ public class ClientManager {
                 cs.setKlyChecked(true);
                 if (missionProcessor.isEnemyInLocal()) {
                     log(clientId, "IDLE[TO_MISSION]: enemy in local after jump — warping to safe spot. (jumpCount=" + cs.getJumpCount() + ")");
-                    cs.setWarpStartTime(LocalDateTime.now());
-                    stateManager.setState(clientId, ClientState.State.WARPING);
-                    new Thread(() -> missionProcessor.warpToGenericSafeSpot()).start();
-                    return;
+                    if (missionProcessor.warpToGenericSafeSpot()) {
+                        cs.setWarpStartTime(LocalDateTime.now());
+                        stateManager.setState(clientId, ClientState.State.WARPING);
+                        return;
+                    }
+                    log(clientId, "IDLE[TO_MISSION]: safe spot not found — falling through to stargate.");
                 }
             }
             String found = missionProcessor.detectTravelUI();
@@ -355,10 +357,12 @@ public class ClientManager {
                 // Dock not visible — check for hostiles before proceeding to stargate.
                 if (missionProcessor.isEnemyInLocal()) {
                     log(clientId, "IDLE[RETURNING_HOME]: enemy in local after jump — warping to safe spot. (jumpCount=" + cs.getJumpCount() + ")");
-                    cs.setWarpStartTime(LocalDateTime.now());
-                    stateManager.setState(clientId, ClientState.State.WARPING);
-                    new Thread(() -> missionProcessor.warpToGenericSafeSpot()).start();
-                    return;
+                    if (missionProcessor.warpToGenericSafeSpot()) {
+                        cs.setWarpStartTime(LocalDateTime.now());
+                        stateManager.setState(clientId, ClientState.State.WARPING);
+                        return;
+                    }
+                    log(clientId, "IDLE[RETURNING_HOME]: safe spot not found — falling through to stargate.");
                 }
                 log(clientId, "IDLE[RETURNING_HOME]: dock not visible — checking stargate.");
             }
@@ -485,7 +489,7 @@ public class ClientManager {
         if (cycleElapsed >= 25) {
             ClientWindowInfo other = findOtherClient(clientId);
             if (other != null) {
-                log(clientId, "CHECKING_MISSIONS: 35s in check/decline cycle — returning to IDLE and switching focus to " + other.getClientId());
+                log(clientId, "CHECKING_MISSIONS: 25s in check/decline cycle — returning to IDLE and switching focus to " + other.getClientId());
                 cs.setCurrentMission(null);
                 stateManager.setState(clientId, ClientState.State.IDLE);
                 bringToForeground(other);
@@ -1540,15 +1544,15 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Sansha] Step 1: Ctrl+click target_sansha (lock) + double-click (select) + press 's'.");
-                missionProcessor.ctrlClickTemplate("target_sansha");
-                missionProcessor.doubleClickTemplate("target_sansha");
+                log(clientId, "COMBAT[Sansha] Step 1: press 's' (pre-lock).");
                 missionProcessor.keyPress("s");
                 cs.setCombatStep(2);
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Sansha] Step 2: press 'adxc' (activate modules).");
+                log(clientId, "COMBAT[Sansha] Step 2: double-click target_sansha (select) + Ctrl+click (lock) + press 'adxc' (activate modules).");
+                missionProcessor.doubleClickTemplate("target_sansha");
+                missionProcessor.ctrlClickTemplate("target_sansha");
                 missionProcessor.keyPress("adxc");
                 cs.setCombatStep(3);
                 break;

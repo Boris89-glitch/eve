@@ -515,29 +515,23 @@ public class MissionProcessor {
     /**
      * Warp to a generic safe spot when enemy detected in local after a jump.
      * Right-click space → hover Locations → click safe_spot.
+     *
+     * @return true if safe_spot was found and clicked, false otherwise (menu dismissed with Escape)
      */
-    public void warpToGenericSafeSpot() {
+    public boolean warpToGenericSafeSpot() {
         log("SAFE-SPOT: enemy in local — warping to safe spot via Locations");
         ocrBridge.rightClickPos(960, 540);
-        sleep(800);
+        sleep(300);
         ocrBridge.hoverTemplate("locations");
-        sleep(800);
-        ocrBridge.clickTemplate("safe_spot");
-        sleep(POST_CLICK_DELAY_MS);
-    }
-
-    /**
-     * Warp to 7RM gate when enemy detected in KLY system.
-     * Right-click space → hover Locations → click 7rm_gate.
-     */
-    public void warpTo7rmGate() {
-        log("SAFE-SPOT: enemy in KLY — warping to 7RM gate via Locations");
-        ocrBridge.rightClickPos(960, 540);
-        sleep(800);
-        ocrBridge.hoverTemplate("locations");
-        sleep(800);
-        ocrBridge.clickTemplate("7rm_gate");
-        sleep(POST_CLICK_DELAY_MS);
+        sleep(300);
+        if (ocrBridge.findAnyTemplate("safe_spot") != null) {
+            ocrBridge.clickTemplate("safe_spot");
+            sleep(POST_CLICK_DELAY_MS);
+            return true;
+        }
+        log("SAFE-SPOT: safe_spot not found — dismissing menu");
+        sleep(100);
+        return false;
     }
 
     public void clickOk() {
