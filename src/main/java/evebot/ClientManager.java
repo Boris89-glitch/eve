@@ -175,6 +175,29 @@ public class ClientManager {
         }
     }
 
+    private static final int POD_CHECK_INTERVAL_MINUTES = 5;
+
+    /**
+     * Periodic pod check for in-space states (WARPING, and IDLE while travelling).
+     * Throttled to every {@link #POD_CHECK_INTERVAL_MINUTES} minutes so the
+     * eject-menu probe doesn't run constantly. Returns true if a pod was detected
+     * and handled (the caller should then return).
+     */
+    private boolean runPeriodicPodCheck(String clientId, ClientState cs) {
+        long sinceLast = Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes();
+        if (sinceLast < POD_CHECK_INTERVAL_MINUTES) {
+            return false;
+        }
+        cs.setLastPodCheck(LocalDateTime.now());
+        log(clientId, "Periodic pod check (every " + POD_CHECK_INTERVAL_MINUTES + "m).");
+        if (missionProcessor.isFlyingPod()) {
+            log(clientId, "Periodic pod check: pod detected — self-destructing.");
+            handlePodDeath(clientId, true);
+            return true;
+        }
+        return false;
+    }
+
     /**
      * Shared pod-death handler. Self-destructs capsule (if in space), sets global
      * cooldown, and transitions the client to POD_COOLDOWN.
@@ -206,6 +229,10 @@ public class ClientManager {
             stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         } else {
             log(clientId, "POD_DEATH: jumps=" + jumps + " (>1) — skipping cooldown, resuming immediately.");
+            // Clear the travel phase — we respawned at the station, so the next IDLE
+            // tick must not keep reading the station agent_icon as another pod death
+            // (TO_MISSION + agent_icon loops back into handlePodDeath forever).
+            cs.setTravelPhase(ClientState.TravelPhase.NONE);
             if (cs.getCurrentMission() != null) {
                 stateManager.setState(clientId, ClientState.State.REPAIRING);
             } else {
@@ -253,6 +280,13 @@ public class ClientManager {
     private void handleIdle(String clientId, ClientWindowInfo window) {
         // 2. Phase-based navigation — handles transit after each warp lands.
         ClientState cs = stateManager.getState(clientId);
+
+        // Periodic pod check while in space (travelling). Skipped at station
+        // (travelPhase NONE), where a missing module sliver would falsely read podded.
+        if (cs.getTravelPhase() != ClientState.TravelPhase.NONE
+                && runPeriodicPodCheck(clientId, cs)) {
+            return;
+        }
 
         if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION) {
             boolean justLanded = cs.isJustExitedWarp();
@@ -534,6 +568,17 @@ public class ClientManager {
             return;
         }
 
+        // A wanted template matched — but template matching also fires on the
+        // just-completed mission still shown in the agent window right after
+        // turn-in (e.g. mission_worm). Confirm a live OFFER dialog (accept/decline
+        // present) before acting; otherwise the on-screen dialog is stale, so
+        // request a fresh mission and retry next tick (25s cycle is the backstop).
+        if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
+            log(clientId, "Template '" + missionTemplate + "' matched but no live OFFER dialog — stale completed mission, requesting new mission.");
+            missionProcessor.clickRequestMission();
+            return;
+        }
+
         // Wanted type matched — OCR now (only here) to check distance / nuances.
         log(clientId, "Mission template matched: " + missionTemplate + " — OCR for distance check.");
         Rectangle missionArea = getMissionAreaForClient(clientId);
@@ -662,18 +707,28 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
+        ClientState cs = stateManager.getState(clientId);
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
         missionProcessor.closeAllDialogs();
         missionProcessor.clickSetDestination();
 
-        // After setting destination, check for hostiles — warp to safe spot if needed
+        // After setting destination, check for hostiles — warp to safe spot if needed.
         if (missionProcessor.findTemplate("enemy") != null) {
             log(clientId, "TRAVEL: enemy in local after undock — warping to safe spot.");
-            missionProcessor.warpToSafeSpot();
+            if (missionProcessor.warpToSafeSpot()) {
+                // Evaded — enter WARPING so the safe-spot warp completes, instead of
+                // dropping to IDLE and immediately jumping the next stargate. Mark the
+                // enemy check done so IDLE[TO_MISSION] doesn't re-check after landing.
+                cs.setKlyChecked(true);
+                cs.setWarpStartTime(LocalDateTime.now());
+                cs.setTravelPhase(ClientState.TravelPhase.TO_MISSION);
+                stateManager.setState(clientId, ClientState.State.WARPING);
+                return;
+            }
         }
 
-        stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.TO_MISSION);
+        cs.setTravelPhase(ClientState.TravelPhase.TO_MISSION);
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
 
@@ -805,7 +860,7 @@ public class ClientManager {
 
     // -----------------------------------------------------------------------
     // Shared final-step logic for all combat sequences.
-    // Polls set_destination; after 80s also checks for capsule (ship destroyed).
+    // Polls set_destination; also runs the eject-menu pod check (ship destroyed).
     // -----------------------------------------------------------------------
 
     private void pollSetDestinationOrCapsule(String clientId, ClientState cs,
@@ -819,9 +874,9 @@ public class ClientManager {
      * When {@code lockedTargetKey} is supplied (e.g. "locked_worm"), the locked
      * target bracket disappearing is treated as the primary "target destroyed →
      * mission complete" signal — faster and more reliable than waiting for the
-     * set_destination prompt. The capsule (pod-death) check runs first, because
-     * being podded also clears our locked target and would otherwise look like a
-     * kill. A 60s timeout remains as a backstop.
+     * set_destination prompt. After 120s with no signal, an eject-menu pod check
+     * runs (only there, since it right-clicks our ship) before assuming completion,
+     * because being podded clears the locked target and would otherwise look complete.
      */
     private void pollSetDestinationOrCapsule(String clientId, ClientState cs,
                                               String combatLabel, boolean allowClientSwitch,
@@ -844,13 +899,6 @@ public class ClientManager {
 
         long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-        // Pod death first — a capsule clears our locked target too, so this must be
-        // ruled out before treating a missing lock as a kill.
-        if (missionProcessor.isCapsuleVisible()) {
-            handlePodDeath(clientId, true);
-            return;
-        }
-
         // Primary completion signal: the locked target bracket is gone → destroyed.
         // Guarded by a few seconds so a transient miss right after entering this step
         // (or before combat has applied) can't fire it prematurely.
@@ -862,9 +910,18 @@ public class ClientManager {
             return;
         }
 
-        // Backstop: assume complete after 60s even if no signal was detected.
-        if (elapsed >= 60) {
-            log(clientId, "COMBAT[" + combatLabel + "] no completion signal after 60s — assuming mission complete.");
+        // Backstop with no completion signal. Jaguar fights run longer, so they get
+        // 300s; every other combat uses 120s. The eject-menu pod check is invasive
+        // (right-clicks our ship), so it only runs here — not every tick. Being
+        // podded clears the locked target, so a long silence can mean we were
+        // destroyed; check for a pod before assuming the mission completed.
+        int backstopSecs = "Jaguar".equals(combatLabel) ? 300 : 120;
+        if (elapsed >= backstopSecs) {
+            if (missionProcessor.isFlyingPod()) {
+                handlePodDeath(clientId, true);
+                return;
+            }
+            log(clientId, "COMBAT[" + combatLabel + "] no completion signal after " + backstopSecs + "s — assuming mission complete.");
             stateManager.setState(clientId, ClientState.State.RETURNING);
             return;
         }
@@ -1683,9 +1740,9 @@ public class ClientManager {
 
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-                // Capsule check after 80s
-                if (elapsed >= 80 && missionProcessor.isCapsuleVisible()) {
-                    handlePodDeath(clientId, true);//TODO bad template, we need instead a check if ship template modules are missing
+                // Pod check after 80s (right-click ship → no "Eject" menu = podded)
+                if (elapsed >= 80 && missionProcessor.isFlyingPod()) {
+                    handlePodDeath(clientId, true);
                     return;
                 }
 
@@ -1723,7 +1780,7 @@ public class ClientManager {
      *   2  → press 's' (activate web)
      *   3  → WAIT 15s
      *   4  → press 's' (cycle web)
-     *   5  → Ctrl+Space (stop ship) + Ctrl+click target_hive/hive1/hive2/hive3 (lock) + press 'a' + switch client
+     *   5  → Ctrl+click target_hive/hive1/hive2/hive3 (lock) + press 'a' + (3s) Ctrl+Space (stop ship) + switch client
      *   6  → SAFE WAIT 45s
      *   7  → click set_destination + attempt stargate jump
      *   8  → poll warp_active / jamed / capsule
@@ -1776,8 +1833,7 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                log(clientId, "COMBAT[Infested] Step 5: Ctrl+Space (stop ship), Ctrl+click hive (lock), press 'a'.");
-                missionProcessor.ctrlKeyPress("space");
+                log(clientId, "COMBAT[Infested] Step 5: Ctrl+click hive (lock), press 'a', then Ctrl+Space (stop ship) after 3s.");
                 String hive5 = missionProcessor.findAnyTemplate("target_hive", "target_hive1", "target_hive2", "target_hive3");
                 if (hive5 != null) {
                     missionProcessor.ctrlClickTemplate(hive5);
@@ -1787,6 +1843,9 @@ public class ClientManager {
                     log(clientId, "COMBAT[Infested] Step 5: no hive target found — skipping lock.");
                     missionProcessor.keyPress("a");
                 }
+                // Ctrl+Space (stop ship) moved to the end, after a 3s delay.
+                try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                missionProcessor.ctrlKeyPress("space");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(6);
                 ClientWindowInfo other = findOtherClient(clientId);
@@ -1832,7 +1891,7 @@ public class ClientManager {
 
                 long elapsed8 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-                if (elapsed8 >= 120 && missionProcessor.isCapsuleVisible()) {
+                if (elapsed8 >= 120 && missionProcessor.isFlyingPod()) {
                     handlePodDeath(clientId, true);
                     return;
                 }
@@ -2010,8 +2069,8 @@ public class ClientManager {
 
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-                // Capsule check after 90s
-                if (elapsed >= 90 && missionProcessor.isCapsuleVisible()) {
+                // Pod check after 90s (right-click ship → no "Eject" menu = podded)
+                if (elapsed >= 90 && missionProcessor.isFlyingPod()) {
                     handlePodDeath(clientId, true);
                     return;
                 }
@@ -2049,7 +2108,7 @@ public class ClientManager {
      *   0 → Shift+asx (overload modules)
      *   1 → double-click target_worm (approach + lock)
      *   2 → press 's' (activate web)
-     *   3 → WAIT 7s
+     *   3 → WAIT 9s
      *   4 → locked_worm present? skip lock : Ctrl+click target_worm (lock target)
      *   5 → press 'dxac' (modules, except 's')
      *   6 → press 's' (separate step, after everything else)
@@ -2082,13 +2141,13 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 7 seconds
+                // WAIT 9 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 7) {
-                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 7s.");
+                if (elapsed < 9) {
+                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 9s.");
                     return;
                 }
-                log(clientId, "COMBAT[Worm] 7s wait complete.");
+                log(clientId, "COMBAT[Worm] 9s wait complete.");
                 cs.setCombatStep(4);
                 break;
             }
@@ -2301,7 +2360,7 @@ public class ClientManager {
                         return;
                     }
                     // Check for pod death while in bubble
-                    if (missionProcessor.isCapsuleVisible()) {
+                    if (missionProcessor.isFlyingPod()) {
                         log(clientId, "WARPING[BUBBLE]: capsule detected — pod death.");
                         handlePodDeath(clientId, true);
                         return;
@@ -2371,6 +2430,11 @@ public class ClientManager {
             return;
         }
 
+        // Periodic in-space pod check (every 5m, throttled by lastPodCheck).
+        if (runPeriodicPodCheck(clientId, cs)) {
+            return;
+        }
+
         // Poll every 2s for warp_active.
         long sinceLastCheck = Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds();
         if (sinceLastCheck < 2) {
@@ -2388,24 +2452,30 @@ public class ClientManager {
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
             cs.setJustExitedWarp(true);
-            // Let the destination UI settle before this client picks a navigation
-            // action — otherwise it can grab a stargate before warp_to_location has
-            // rendered and jump a random gate. Prefer switching focus to the other
-            // client (the time spent there IS the settle delay); justExitedWarp stays
-            // set, so when focus returns the justLanded path runs and gives
-            // warp_to_location / activate_gate priority over stargates. With a single
-            // client there is nowhere to switch, so wait ~5s in place instead.
-            ClientWindowInfo other = findOtherClient(clientId);
-            if (other != null) {
-                log(clientId, "WARPING: warp landed — switching focus to " + other.getClientId()
-                        + " to let the UI settle before navigating.");
-                bringToForeground(other);
+            // Past 35s the warp has clearly already completed (and likely jumped) —
+            // skip the focus switch / settle wait and let this client navigate now.
+            if (elapsed > 35) {
+                log(clientId, "WARPING: warp landed after " + elapsed + "s (>35s) — assuming already jumped, not switching focus.");
             } else {
-                try { Thread.sleep(5000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                handleIdle(clientId, window);
+                // Let the destination UI settle before this client picks a navigation
+                // action — otherwise it can grab a stargate before warp_to_location has
+                // rendered and jump a random gate. Prefer switching focus to the other
+                // client (the time spent there IS the settle delay); justExitedWarp stays
+                // set, so when focus returns the justLanded path runs and gives
+                // warp_to_location / activate_gate priority over stargates. With a single
+                // client there is nowhere to switch, so wait ~5s in place instead.
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "WARPING: warp landed — switching focus to " + other.getClientId()
+                            + " to let the UI settle before navigating.");
+                    bringToForeground(other);
+                } else {
+                    try { Thread.sleep(5000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    handleIdle(clientId, window);
+                }
             }
         } else {
-            if (elapsed % 10 < 2) {
+            if (elapsed % 15 < 2) {
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "WARPING: " + elapsed + "s elapsed — switching focus to: " + other.getClientId());

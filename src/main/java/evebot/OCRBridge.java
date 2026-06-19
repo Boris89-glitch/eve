@@ -481,6 +481,17 @@ public class OCRBridge {
     }
 
     /**
+     * Pod check (two-stage). The daemon first does a cheap passive match on the
+     * "no_ship" module sliver (visible only in a ship); if it's missing it confirms
+     * by right-clicking our ship and looking for the "Eject" menu item, dismissing
+     * the menu with a left-click in space. Returns true if podded, false otherwise.
+     */
+    public boolean isFlyingPod() {
+        System.out.printf("[%s] [OCRBridge] podCheck (right-click centre → look for eject)%n", ts());
+        return sendBool(cmd("pod_check"));
+    }
+
+    /**
      * Repair + activate the correct ship for the given mission title.
      *
      * Calls: eve_automation.py --repair-ship "<missionTitle>"

@@ -121,6 +121,9 @@ public class ClientState {
     /** Last time the POD_COOLDOWN handler swapped clients — prevents rapid-fire switching. */
     private LocalDateTime lastCooldownSwap = LocalDateTime.MIN;
 
+    /** Last time the WARPING test pod check ran — throttles the eject-menu probe. */
+    private LocalDateTime lastPodCheck = LocalDateTime.MIN;
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -245,6 +248,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public LocalDateTime getLastCooldownSwap()                { return lastCooldownSwap; }
     public void          setLastCooldownSwap(LocalDateTime t) { this.lastCooldownSwap = t; }
+
+    public LocalDateTime getLastPodCheck()                { return lastPodCheck; }
+    public void          setLastPodCheck(LocalDateTime t) { this.lastPodCheck = t; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

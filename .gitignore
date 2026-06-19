@@ -37,6 +37,10 @@ build/
 ### Mac OS ###
 .DS_Store
 
+### Python ###
+__pycache__/
+*.pyc
+
 ### Bot state ###
 config/bot_state.json
 /.claude/worktrees/exciting-dirac/

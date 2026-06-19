@@ -117,6 +117,8 @@ TEMPLATE_FILES = {
     # Capsule / self-destruct (ship destroyed recovery)
     "capsule": "capsule",
     "destruct": "destruct",
+    "eject": "eject",  # "Eject" right-click menu item — only offered in a ship, absent in a pod
+    "no_ship": "no_ship",  # tiny module sliver — visible in a ship, missing in a pod (cheap pod pre-check)
     # Agent interaction
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
     "agent_standings": "agent_standings",  # standings info button in agent dialog
@@ -1716,6 +1718,32 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
     if cmd == "ctrl_r":
         _send_ctrl_r()
         return {"ok": True, "value": True}
+
+    if cmd == "pod_check":
+        # Two-stage pod detection. Returns True if podded, False if still in a ship.
+        #
+        # Stage 1 (cheap, passive): the "no_ship" template is a tiny module sliver
+        # that's only on screen while in a ship. If it's still visible we're
+        # definitely in a ship — return immediately, no right-click needed.
+        #
+        # Stage 2 (only if the sliver is MISSING, which may be a false miss):
+        # confirm by right-clicking our ship and looking for the "Eject" menu item
+        # (offered only in a ship). The menu is dismissed with a left-click in space
+        # (EVE never uses Escape).
+        if matcher.find("no_ship") is not None:
+            log.info("pod_check: no_ship sliver visible -> in a ship (skip eject probe)")
+            return {"ok": True, "value": False}  # module sliver visible → in a ship
+        log.info("pod_check: no_ship sliver MISSING -> confirming via eject menu")
+        cx = int(msg.get("x", 960))
+        cy = int(msg.get("y", 540))
+        matcher._do_click(cx, cy, button="right", delay=0.3)
+        time.sleep(0.3)
+        eject_found = matcher.find("eject") is not None
+        matcher._do_click(cx, cy, button="left", delay=DAEMON_CLICK_DELAY)
+        log.info("pod_check: eject %s -> verdict %s",
+                 "found (in ship)" if eject_found else "MISSING (podded)",
+                 "IN SHIP" if eject_found else "PODDED")
+        return {"ok": True, "value": (not eject_found)}
 
     if cmd == "find_any":
         screen = matcher.screenshot_cv()

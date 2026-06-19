@@ -434,14 +434,17 @@ public class MissionProcessor {
             log("Clicking SET DESTINATION (template) at (" + pos[0] + "," + pos[1] + ")");
             ocrBridge.clickPos(pos[0], pos[1]);
         } else {
-            log("set_destination template not found — alt+J → right-click agent → hover lara_mesi → click set destination.");
-            ocrBridge.altKeyPress("j");          // open opportunities screen
-            sleep(800);
-            ocrBridge.rightClickTemplate("agent_portrait");
-            sleep(800);
-            ocrBridge.hoverTemplate("agent_lara_mesi");
-            sleep(800);
-            ocrBridge.clickTemplate("agent_set_destination");
+            log("set_destination template not found — using hardcoded pos (280,568).");
+            ocrBridge.clickPos(280, 568);
+            // alt+J fallback (right-click agent → hover lara_mesi → click set destination)
+            // disabled in favour of the hardcoded coordinates above:
+            // ocrBridge.altKeyPress("j");          // open opportunities screen
+            // sleep(800);
+            // ocrBridge.rightClickTemplate("agent_portrait");
+            // sleep(800);
+            // ocrBridge.hoverTemplate("agent_lara_mesi");
+            // sleep(800);
+            // ocrBridge.clickTemplate("agent_set_destination");
         }
         sleep(POST_CLICK_DELAY_MS);
     }
@@ -498,6 +501,8 @@ public class MissionProcessor {
         sleep(800);
         ocrBridge.clickTemplate("dock_safe");  // click Dock from submenu
         sleep(POST_CLICK_DELAY_MS);
+        // Delay before autopilot so it doesn't override the bubble warning text.
+        sleep(2000);
         ctrlKeyPress("s");                    // autopilot to insta-dock bookmark
     }
 
@@ -676,13 +681,28 @@ public class MissionProcessor {
     }
 
     /**
+     * Pod detection (two-stage, in the daemon). Stage 1: cheap passive match on the
+     * "no_ship" module sliver — if visible we're in a ship, return immediately.
+     * Stage 2 (only if the sliver is missing): right-click our ship and look for the
+     * "Eject" menu item (offered only in a ship) to confirm. Returns true if podded,
+     * false if still in a ship.
+     */
+    public boolean isFlyingPod() {
+        return ocrBridge.isFlyingPod();
+    }
+
+    /**
      * Self-destructs the capsule: right-click capsule → click destruct → click yes.
      */
     public void clickDestruct() {
         log("Self-destruct: right-click capsule → destruct → yes");
         rightClickAndSelect("capsule", "destruct");
         sleep(POST_CLICK_DELAY_MS);
-        ocrBridge.clickTemplate("yes");
+        // The self-destruct confirmation dialog takes a moment to render — wait for
+        // the 'yes' button instead of an immediate (and usually-too-early) click.
+        if (!ocrBridge.waitAndClickTemplate("yes", 3)) {
+            log("Self-destruct: 'yes' confirm button not found within 3s.");
+        }
         sleep(POST_CLICK_DELAY_MS);
     }
 
