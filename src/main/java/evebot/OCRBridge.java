@@ -249,6 +249,15 @@ public class OCRBridge {
     }
 
     /**
+     * Left-click at fixed screen coordinates (not template-based).
+     */
+    public void clickPos(int x, int y) {
+        System.out.printf("[%s] [OCRBridge] clickPos: (%d,%d)%n", ts(), x, y);
+        runPython("python", automationScriptPath, "--click-pos",
+                String.valueOf(x), String.valueOf(y));
+    }
+
+    /**
      * Hover: find the named template and move mouse to its centre without clicking.
      * Used for opening submenus on hover (e.g. Locations in right-click context menu).
      */

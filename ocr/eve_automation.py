@@ -120,6 +120,9 @@ TEMPLATE_FILES = {
     # Agent interaction
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
     "agent_standings": "agent_standings",  # standings info button in agent dialog
+    "agent_portrait": "agent_portrait",          # opportunities screen agent portrait — right-click target
+    "agent_lara_mesi": "agent_lara_mesi",        # "Agent: Lara Mesi" submenu entry — hover target
+    "agent_set_destination": "agent_set_destination",  # "Set Destination" context menu item — click target
     "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
     "enemy2": "enemy2",        # alternate enemy icon in local chat
     "warp_bubble1": "warp_bubble1",  # warp bubble on undock — bubble camp indicator
@@ -1652,6 +1655,10 @@ Examples:
         help="Right-click at fixed screen coordinates then exit"
     )
     parser.add_argument(
+        "--click-pos", nargs=2, type=int, metavar=("X", "Y"),
+        help="Left-click at fixed screen coordinates then exit"
+    )
+    parser.add_argument(
         "--hover", metavar="KEY", help="Find template and move mouse to its centre (no click), then exit"
     )
     parser.add_argument(
@@ -1749,6 +1756,17 @@ Examples:
         else:
             log.info("Right-clicking at (%d,%d)", x, y)
             matcher._do_click(x, y, button="right", delay=0.3)
+        sys.exit(0)
+        return
+
+    if getattr(args, "click_pos", None):
+        x, y = args.click_pos
+        matcher = TemplateMatcher(TEMPLATES_DIR, threshold=args.threshold)
+        if args.dry_run:
+            log.info("[DRY RUN] Would left-click at (%d,%d)", x, y)
+        else:
+            log.info("Left-clicking at (%d,%d)", x, y)
+            matcher._do_click(x, y, button="left", delay=0.3)
         sys.exit(0)
         return
 

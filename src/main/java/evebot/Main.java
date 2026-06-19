@@ -54,6 +54,7 @@ public class Main {
         // Keep the JVM alive
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\n[Main] Shutting down.");
+            SessionStats.logSummary();
             stateManager.saveStates();
             scheduler.shutdownNow();
         }));

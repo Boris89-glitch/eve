@@ -355,9 +355,11 @@ public class ClientManager {
                 }
 
                 // Dock not visible — check for hostiles before proceeding to stargate.
-                if (missionProcessor.isEnemyInLocal()) {
+                // Skip if we already evaded to a safe spot this system; jump out instead of re-evading.
+                if (!cs.isWarpedToSafeSpot() && missionProcessor.isEnemyInLocal()) {
                     log(clientId, "IDLE[RETURNING_HOME]: enemy in local after jump — warping to safe spot. (jumpCount=" + cs.getJumpCount() + ")");
                     if (missionProcessor.warpToGenericSafeSpot()) {
+                        cs.setWarpedToSafeSpot(true);
                         cs.setWarpStartTime(LocalDateTime.now());
                         stateManager.setState(clientId, ClientState.State.WARPING);
                         return;
@@ -388,6 +390,7 @@ public class ClientManager {
                     break;
                 case "stargate":
                     cs.incrementJumpCount();
+                    cs.setWarpedToSafeSpot(false);
                     log(clientId, "stargate — right-click → jump. (jump #" + cs.getJumpCount() + ")");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
@@ -576,10 +579,11 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleAccepted(String clientId, ClientWindowInfo window) {
-        if (!stateManager.isTrackAttempted()) {
+        ClientState accState = stateManager.getState(clientId);
+        if (!accState.isTrackAttempted()) {
             log(clientId, "First accept — clicking Track.");
             missionProcessor.clickTrack();
-            stateManager.setTrackAttempted(true);
+            accState.setTrackAttempted(true);
         } else {
             log(clientId, "Track already attempted — skipping.");
         }
@@ -629,17 +633,6 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
-        // First thing after undock: check for bubble camp — redock immediately if detected.
-        if (missionProcessor.isBubbleCampOnUndock()) {
-            log(clientId, "TRAVEL: bubble camp detected on undock — emergency redock!");
-            missionProcessor.emergencyRedock();
-            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
-            stateManager.setPodCooldownEnd(cooldownEnd);
-            log(clientId, "BUBBLE_CAMP: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown for both clients.");
-            stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
-            return;
-        }
-
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
         missionProcessor.closeAllDialogs();
@@ -806,9 +799,17 @@ public class ClientManager {
 
         long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-        // After 80s without set_destination, start checking for capsule (ship destroyed).
-        if (elapsed >= 80 && missionProcessor.isCapsuleVisible()) {
-            handlePodDeath(clientId, true);
+        // After 60s without the set_destination/dock prompt being detected, decide what happened:
+        //   - a capsule visible means the ship was destroyed (pod death)
+        //   - otherwise assume the mission finished but the prompt wasn't detected, and go to
+        //     RETURNING, which sets the destination via template or hardcoded fallback coords.
+        if (elapsed >= 60) {
+            if (missionProcessor.isCapsuleVisible()) {
+                handlePodDeath(clientId, true);
+                return;
+            }
+            log(clientId, "COMBAT[" + combatLabel + "] set_destination not detected after 60s — assuming mission complete.");
+            stateManager.setState(clientId, ClientState.State.RETURNING);
             return;
         }
 
@@ -2123,27 +2124,37 @@ public class ClientManager {
         missionProcessor.doubleClickAgentIcon(); // refocus agent dialog (standings covers complete_mission)
         missionProcessor.clickCompleteMission();
 
-        // Fleet reward decision based on agent standings
-        // Below 0: take all rewards (fleet_no) to recover standings
-        // Healthy: share with fleet (fleet_yes)
+        // Fleet reward decision based on agent standings.
+        // Below 0: take all rewards (fleet_no) to recover standings; healthy: share (fleet_yes).
+        // Exact standings are not logged — OCR misreads the value; only a low-standings warning is kept.
         if (Double.isNaN(standings)) {
             log(clientId, "COMPLETING: standings OCR failed — defaulting to fleet YES.");
             missionProcessor.clickFleetYes();
         } else if (standings < -1.0) {
-            log(clientId, String.format("COMPLETING: standings %.2f (critical) — fleet NO.", standings));
+            log(clientId, "COMPLETING: standings critical — fleet NO.");
             if (standings < -1.5) {
-                EventLog.log("STANDINGS_LOW", clientId + String.format(" — standings: %.2f", standings));
+                EventLog.log("STANDINGS_LOW", clientId + " — low standings warning");
             }
             missionProcessor.clickFleetNo();
         } else if (standings < 0.0) {
-            log(clientId, String.format("COMPLETING: standings %.2f (low) — fleet NO.", standings));
+            log(clientId, "COMPLETING: standings low — fleet NO.");
             missionProcessor.clickFleetNo();
         } else {
-            log(clientId, String.format("COMPLETING: standings %.2f (healthy) — fleet YES.", standings));
+            log(clientId, "COMPLETING: standings healthy — fleet YES.");
             missionProcessor.clickFleetYes();
         }
         missionProcessor.waitAndClickOk(); // dismiss fleet reward confirmation dialog
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
+
+        // Mission turned in — record reward for the end-of-session summary.
+        Mission done = stateManager.getState(clientId).getCurrentMission();
+        String missionTitle = (done != null && done.getTitle() != null) ? done.getTitle() : "mission";
+        int sessionTotal = SessionStats.recordMission();
+        EventLog.log("MISSION_COMPLETE", String.format(
+                "%s — %s — +%,d ISK, +%,d LP (~%,d ISK value) [session: %d, ~%,d ISK value]",
+                clientId, missionTitle,
+                SessionStats.ISK_PER_MISSION, SessionStats.LP_PER_MISSION, SessionStats.ISK_VALUE_PER_MISSION,
+                sessionTotal, (long) sessionTotal * SessionStats.ISK_VALUE_PER_MISSION));
 
         // Request next mission immediately and go to CHECKING_MISSIONS
         // instead of IDLE — avoids stale complete_mission being misdetected.
@@ -2171,16 +2182,6 @@ public class ClientManager {
         ).getSeconds();
         if (elapsed < UNDOCK_WAIT_SECS) {
             return; // still waiting for undock animation
-        }
-        // Check for bubble camp immediately after undock completes.
-        if (missionProcessor.isBubbleCampOnUndock()) {
-            log(clientId, "UNDOCKING: bubble camp detected — emergency redock!");
-            missionProcessor.emergencyRedock();
-            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
-            stateManager.setPodCooldownEnd(cooldownEnd);
-            log(clientId, "UNDOCKING: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown for both clients.");
-            stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
-            return;
         }
         stateManager.setState(clientId, ClientState.State.TRAVEL);
     }
@@ -2271,6 +2272,16 @@ public class ClientManager {
             cs.setLastWarpCheck(LocalDateTime.now());
             // Check for warp disruption bubble before assuming warp will start.
             if (missionProcessor.findTemplate("bubble_text") != null) {
+                // First warp out of the home station (no gate jumps yet) → redock instead of escaping.
+                if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION && cs.getJumpCount() == 0) {
+                    log(clientId, "WARPING: bubble detected on first warp out of station — emergency redock!");
+                    missionProcessor.emergencyRedock();
+                    LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
+                    stateManager.setPodCooldownEnd(cooldownEnd);
+                    log(clientId, "BUBBLE_CAMP: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown for both clients.");
+                    stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
+                    return;
+                }
                 log(clientId, "WARPING: bubble detected — starting escape sequence.");
                 cs.setBubbleEscapeStep(1);
                 return;

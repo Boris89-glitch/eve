@@ -28,12 +28,6 @@ public class StateManager {
     private final Map<String, ClientState> states = new ConcurrentHashMap<>();
     private volatile boolean botRunning = false;
 
-    /**
-     * Track button only appears on the very first mission accept per agent session.
-     * Once we've attempted it once, skip it on all future accepts.
-     */
-    private volatile boolean trackAttempted = false;
-
     /** Global pod-death cooldown — all clients must wait until this time before resuming. */
     private volatile LocalDateTime podCooldownEnd = LocalDateTime.MIN;
     private static final Path STATE_FILE = Paths.get("config", "bot_state.json");
@@ -68,8 +62,6 @@ public class StateManager {
         if (botRunning) printStatesSummary();
     }
 
-    public boolean isTrackAttempted()        { return trackAttempted; }
-    public void    setTrackAttempted(boolean v) { this.trackAttempted = v; }
 
     public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
     public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }

@@ -419,8 +419,20 @@ public class MissionProcessor {
     }
 
     public void clickSetDestination() {
-        log("Clicking SET DESTINATION (template)");
-        ocrBridge.clickTemplate("set_destination");
+        int[] pos = ocrBridge.findTemplatePos("set_destination");
+        if (pos != null) {
+            log("Clicking SET DESTINATION (template) at (" + pos[0] + "," + pos[1] + ")");
+            ocrBridge.clickPos(pos[0], pos[1]);
+        } else {
+            log("set_destination template not found — alt+J → right-click agent → hover lara_mesi → click set destination.");
+            ocrBridge.altKeyPress("j");          // open opportunities screen
+            sleep(800);
+            ocrBridge.rightClickTemplate("agent_portrait");
+            sleep(800);
+            ocrBridge.hoverTemplate("agent_lara_mesi");
+            sleep(800);
+            ocrBridge.clickTemplate("agent_set_destination");
+        }
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -441,11 +453,6 @@ public class MissionProcessor {
     /** Returns "dock_safe" if the safe dock button is visible, null otherwise. */
     public String detectDockSafe() {
         return ocrBridge.findAnyTemplate("dock_safe");
-    }
-
-    /** Check if warp bubble or enemy2 is visible on undock (bubble camp). */
-    public boolean isBubbleCampOnUndock() {
-        return ocrBridge.findAnyTemplate("enemy2", "warp_bubble1", "warp_bubble2") != null;
     }
 
     /**
@@ -573,9 +580,8 @@ public class MissionProcessor {
 
     /** OCR-read agent standings from the standings info window. */
     public double readAgentStandings() {
-        double val = ocrBridge.readStandings(300, 490, 100, 55);
-        log("Agent standings OCR: " + val);
-        return val;
+        // Exact value intentionally not logged — OCR misreads it; only low-standings warnings are kept.
+        return ocrBridge.readStandings(300, 490, 100, 55);
     }
 
     /**

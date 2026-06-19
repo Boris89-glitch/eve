@@ -55,6 +55,9 @@ public class ClientState {
     /** True once the accepted mission has been registered in the journal / tracking. */
     private boolean missionTracked = false;
 
+    /** True once the Track button has been clicked for this client (per-client, once per session). */
+    private boolean trackAttempted = false;
+
     /** True once set_destination has been clicked for the current travel/returning leg. */
     private boolean destinationSet = false;
 
@@ -112,6 +115,9 @@ public class ClientState {
     /** True once KLY system check has been performed after first jump — skip further checks. */
     private boolean klyChecked = false;
 
+    /** True after evading to a safe spot — next landing jumps out instead of re-evading. Cleared on stargate jump. */
+    private boolean warpedToSafeSpot = false;
+
     /** Last time the POD_COOLDOWN handler swapped clients — prevents rapid-fire switching. */
     private LocalDateTime lastCooldownSwap = LocalDateTime.MIN;
 
@@ -150,6 +156,7 @@ public class ClientState {
             this.lastTravelAction = LocalDateTime.MIN;
             this.jumpCount        = 0;
             this.klyChecked       = false;
+            this.warpedToSafeSpot = false;
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
@@ -172,6 +179,9 @@ public class ClientState {
 
     public boolean isMissionTracked()           { return missionTracked; }
     public void    setMissionTracked(boolean t) { this.missionTracked = t; }
+
+    public boolean isTrackAttempted()           { return trackAttempted; }
+    public void    setTrackAttempted(boolean v) { this.trackAttempted = v; }
 
     public boolean isDestinationSet()           { return destinationSet; }
     public void    setDestinationSet(boolean v) { this.destinationSet = v; }
@@ -229,6 +239,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isKlyChecked()           { return klyChecked; }
     public void    setKlyChecked(boolean v) { this.klyChecked = v; }
+
+    public boolean isWarpedToSafeSpot()           { return warpedToSafeSpot; }
+    public void    setWarpedToSafeSpot(boolean v) { this.warpedToSafeSpot = v; }
 
     public LocalDateTime getLastCooldownSwap()                { return lastCooldownSwap; }
     public void          setLastCooldownSwap(LocalDateTime t) { this.lastCooldownSwap = t; }
