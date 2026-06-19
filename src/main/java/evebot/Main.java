@@ -56,6 +56,7 @@ public class Main {
             System.out.println("\n[Main] Shutting down.");
             SessionStats.logSummary();
             stateManager.saveStates();
+            clientManager.shutdown();
             scheduler.shutdownNow();
         }));
     }

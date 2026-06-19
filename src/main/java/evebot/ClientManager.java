@@ -44,6 +44,11 @@ public class ClientManager {
         loadCalibratedCoordinates();
     }
 
+    /** Stop the resident Python daemon on shutdown. */
+    public void shutdown() {
+        missionProcessor.getOcrBridge().shutdown();
+    }
+
     // -----------------------------------------------------------------------
     // Coordinate loading
     // -----------------------------------------------------------------------
@@ -468,10 +473,10 @@ public class ClientManager {
             }
             default: { // OFFER
                 agentRetries.put(clientId, 0);
-                log(clientId, "Mission offer dialog confirmed — reading via OCR.");
-                Rectangle missionArea = getMissionAreaForClient(clientId);
-                Mission mission = missionProcessor.readMission(missionArea);
-                stateManager.getState(clientId).setCurrentMission(mission);
+                log(clientId, "Mission offer dialog confirmed — handing to CHECKING_MISSIONS (template-first).");
+                // Leave currentMission null so CHECKING_MISSIONS classifies by
+                // template first; OCR runs only if a wanted type is matched.
+                stateManager.getState(clientId).setCurrentMission(null);
                 stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
                 break;
             }
@@ -500,29 +505,56 @@ public class ClientManager {
             }
         }
 
-        Mission mission = cs.getCurrentMission();
+        agentRetries.put(clientId, 0);
 
-        if (mission == null) {
-            Rectangle missionArea = getMissionAreaForClient(clientId);
-            mission = missionProcessor.readMission(missionArea);
-            stateManager.getState(clientId).setCurrentMission(mission);
-        }
-
-        if (mission == null) {
-            // OCR failed — if dialog is still visible keep retrying OCR (stay in
-            // CHECKING_MISSIONS). Only fall back to IDLE if dialog is gone.
-            if (missionProcessor.isMissionDialogVisible()) {
-                log(clientId, "OCR returned null but dialog still visible — retrying OCR next tick.");
-                return;
-            }
-            log(clientId, "No mission data and dialog gone — returning to IDLE.");
-            stateManager.setState(clientId, ClientState.State.IDLE);
+        // If a mission was already OCR'd by another entry path, evaluate it
+        // directly with the full rule set (rare — most offers take the fast path).
+        Mission existing = cs.getCurrentMission();
+        if (existing != null) {
+            applyDecision(clientId, existing, missionConfig.evaluate(existing));
             return;
         }
 
-        agentRetries.put(clientId, 0);
-        MissionConfig.Decision decision = missionConfig.evaluate(mission);
+        // --- Template-first fast path -------------------------------------
+        // Identify the offer by its dialog template (one screenshot, no OCR).
+        // Scan is restricted to the dialog region for speed (~9x vs full screen).
+        String missionTemplate = missionProcessor.classifyMissionOffer(getMissionAreaForClient(clientId));
 
+        if (missionTemplate == null) {
+            // No known wanted-mission template visible. Decline immediately if an
+            // offer is actually on screen; otherwise the dialog isn't up yet.
+            if (missionProcessor.detectDialog() == MissionProcessor.DialogState.OFFER) {
+                System.out.println(">>> [" + clientId + "] DECLINE — no known mission template (unwanted)");
+                missionProcessor.clickDeclineButton();
+                stateManager.setState(clientId, ClientState.State.DECLINING);
+            } else {
+                log(clientId, "No mission template and no offer dialog — returning to IDLE.");
+                stateManager.setState(clientId, ClientState.State.IDLE);
+            }
+            return;
+        }
+
+        // Wanted type matched — OCR now (only here) to check distance / nuances.
+        log(clientId, "Mission template matched: " + missionTemplate + " — OCR for distance check.");
+        Rectangle missionArea = getMissionAreaForClient(clientId);
+        Mission mission = missionProcessor.readMission(missionArea);
+        if (mission == null) {
+            // Template still on screen but OCR failed — retry next tick (25s cycle
+            // timeout is the backstop that frees the client).
+            log(clientId, "OCR returned null on a template-matched offer — retrying next tick.");
+            return;
+        }
+        cs.setCurrentMission(mission);
+
+        // The template match only told us this is a *candidate* wanted type — it
+        // can be a false positive (e.g. mission_enyo matching "Smash the Supplier").
+        // Run the FULL rule set: an accept rule must match, and any decline rule
+        // (too-far / base / blood / Recon2of3) still wins. Default is decline.
+        applyDecision(clientId, mission, missionConfig.evaluate(mission));
+    }
+
+    /** Click accept/decline for a decided mission and transition state. */
+    private void applyDecision(String clientId, Mission mission, MissionConfig.Decision decision) {
         if (decision == MissionConfig.Decision.ACCEPT) {
             System.out.println(">>> [" + clientId + "] ACCEPT — " + mission.getTitle());
             missionProcessor.clickAcceptButton();
@@ -564,13 +596,10 @@ public class ClientManager {
             return;
         }
 
+        // Leave currentMission null so CHECKING_MISSIONS classifies the new offer
+        // via template matching first (OCR only runs if a wanted type matches).
         stateManager.getState(clientId).setCurrentMission(null);
-        Rectangle missionArea = getMissionAreaForClient(clientId);
-        Mission newMission = missionProcessor.readMission(missionArea);
-        String title = (newMission != null && newMission.getTitle() != null)
-                ? newMission.getTitle() : "Unknown";
-        log(clientId, "New offer: '" + title + "' — evaluating.");
-        stateManager.getState(clientId).setCurrentMission(newMission);
+        log(clientId, "New offer visible — handing to CHECKING_MISSIONS (template-first).");
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
@@ -781,6 +810,22 @@ public class ClientManager {
 
     private void pollSetDestinationOrCapsule(String clientId, ClientState cs,
                                               String combatLabel, boolean allowClientSwitch) {
+        pollSetDestinationOrCapsule(clientId, cs, combatLabel, allowClientSwitch, null);
+    }
+
+    /**
+     * Shared final-step completion poll.
+     *
+     * When {@code lockedTargetKey} is supplied (e.g. "locked_worm"), the locked
+     * target bracket disappearing is treated as the primary "target destroyed →
+     * mission complete" signal — faster and more reliable than waiting for the
+     * set_destination prompt. The capsule (pod-death) check runs first, because
+     * being podded also clears our locked target and would otherwise look like a
+     * kill. A 60s timeout remains as a backstop.
+     */
+    private void pollSetDestinationOrCapsule(String clientId, ClientState cs,
+                                              String combatLabel, boolean allowClientSwitch,
+                                              String lockedTargetKey) {
         String completed = missionProcessor.detectCombatComplete();
         if (completed != null) {
             if ("dock".equals(completed)) {
@@ -799,16 +844,27 @@ public class ClientManager {
 
         long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-        // After 60s without the set_destination/dock prompt being detected, decide what happened:
-        //   - a capsule visible means the ship was destroyed (pod death)
-        //   - otherwise assume the mission finished but the prompt wasn't detected, and go to
-        //     RETURNING, which sets the destination via template or hardcoded fallback coords.
+        // Pod death first — a capsule clears our locked target too, so this must be
+        // ruled out before treating a missing lock as a kill.
+        if (missionProcessor.isCapsuleVisible()) {
+            handlePodDeath(clientId, true);
+            return;
+        }
+
+        // Primary completion signal: the locked target bracket is gone → destroyed.
+        // Guarded by a few seconds so a transient miss right after entering this step
+        // (or before combat has applied) can't fire it prematurely.
+        if (lockedTargetKey != null && elapsed >= 5
+                && missionProcessor.findTemplate(lockedTargetKey) == null) {
+            log(clientId, "COMBAT[" + combatLabel + "] " + lockedTargetKey
+                    + " gone — target destroyed, mission complete!");
+            stateManager.setState(clientId, ClientState.State.RETURNING);
+            return;
+        }
+
+        // Backstop: assume complete after 60s even if no signal was detected.
         if (elapsed >= 60) {
-            if (missionProcessor.isCapsuleVisible()) {
-                handlePodDeath(clientId, true);
-                return;
-            }
-            log(clientId, "COMBAT[" + combatLabel + "] set_destination not detected after 60s — assuming mission complete.");
+            log(clientId, "COMBAT[" + combatLabel + "] no completion signal after 60s — assuming mission complete.");
             stateManager.setState(clientId, ClientState.State.RETURNING);
             return;
         }
@@ -935,7 +991,7 @@ public class ClientManager {
                 break;
             }
             case 9: {
-                pollSetDestinationOrCapsule(clientId, cs, "Jaguar", true);
+                pollSetDestinationOrCapsule(clientId, cs, "Jaguar", true, "locked_jaguar");
                 break;
             }
             default:
@@ -1993,13 +2049,14 @@ public class ClientManager {
      *   0 → Shift+asx (overload modules)
      *   1 → double-click target_worm (approach + lock)
      *   2 → press 's' (activate web)
-     *   3 → WAIT 10s
-     *   4 → Ctrl+click target_worm (lock target)
-     *   5 → press 'sdxac'
-     *   6 → Click target_worm + click range (keep at range)
-     *   7 → check keep_at_range — if not found, repeat (loop back to 6)
-     *   8 → Alt+F1 x2 (deactivate module) + switch client
-     *   9 → SAFE WAIT for set_destination (mission complete → RETURNING)
+     *   3 → WAIT 7s
+     *   4 → locked_worm present? skip lock : Ctrl+click target_worm (lock target)
+     *   5 → press 'dxac' (modules, except 's')
+     *   6 → press 's' (separate step, after everything else)
+     *   7 → WAIT 4s → right-click target_worm + click range (keep at range)
+     *   8 → check keep_at_range — if not found, repeat (loop back to 7)
+     *   9 → WAIT 7s → Alt+F1 (deactivate module) + switch client
+     *  10 → poll completion: locked_worm gone / set_destination → RETURNING
      */
     private void handleCombatWorm(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -2025,58 +2082,75 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 12 seconds
+                // WAIT 7 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 10) {
-                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 10s.");
+                if (elapsed < 7) {
+                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 7s.");
                     return;
                 }
-                log(clientId, "COMBAT[Worm] 10s wait complete.");
+                log(clientId, "COMBAT[Worm] 7s wait complete.");
                 cs.setCombatStep(4);
                 break;
             }
             case 4: {
-                // TODO: verify lock_target before activating
-                log(clientId, "COMBAT[Worm] Step 4: Ctrl+click target_worm (lock target).");
-                missionProcessor.ctrlClickTemplate("target_worm");
+                if (missionProcessor.findTemplate("locked_worm") != null) {
+                    log(clientId, "COMBAT[Worm] Step 4: locked_worm already present (auto-locked) — skipping ctrl+click.");
+                } else {
+                    log(clientId, "COMBAT[Worm] Step 4: Ctrl+click target_worm (lock target).");
+                    missionProcessor.ctrlClickTemplate("target_worm");
+                }
                 cs.setCombatStep(5);
                 break;
             }
             case 5: {
-                log(clientId, "COMBAT[Worm] Step 5: press 'sdxac' + click target_worm.");
-                missionProcessor.keyPress("sdxac");
-                missionProcessor.clickTemplate("target_worm");
+                log(clientId, "COMBAT[Worm] Step 5: press 'dxac' (modules, except 's').");
+                missionProcessor.keyPress("dxac");
                 cs.setCombatStep(6);
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Worm] Step 6: right-click target_worm → range.");
-                missionProcessor.rightClickTemplate("target_worm");
-                missionProcessor.clickTemplate("range");
+                // Press 's' on its own, after every other module — separate step so it
+                // isn't bundled with 'dxac' (avoids the modules getting confused).
+                log(clientId, "COMBAT[Worm] Step 6: press 's' (separate).");
+                missionProcessor.keyPress("s");
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
             }
             case 7: {
-                // Check keep_at_range — if not found, retry
-                String found = missionProcessor.findTemplate("keep_at_range");
-                if (found != null) {
-                    log(clientId, "COMBAT[Worm] keep_at_range confirmed — waiting 5s before deactivate.");
-                    cs.setCombatWaitStart(LocalDateTime.now());
-                    cs.setCombatStep(8);
-                } else {
-                    log(clientId, "COMBAT[Worm] keep_at_range NOT found — retrying.");
-                    cs.setCombatStep(6);
+                // WAIT 4s before keeping at range
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 4) {
+                    log(clientId, "COMBAT[Worm] wait before range: " + elapsed + "s / 4s.");
+                    return;
                 }
+                log(clientId, "COMBAT[Worm] Step 7: right-click target_worm → range.");
+                missionProcessor.rightClickTemplate("target_worm");
+                missionProcessor.clickTemplate("range");
+                cs.setCombatStep(8);
                 break;
             }
             case 8: {
-                // WAIT 8s before deactivating module
+                // Check keep_at_range — if not found, retry the range click (step 7).
+                String found = missionProcessor.findTemplate("keep_at_range");
+                if (found != null) {
+                    log(clientId, "COMBAT[Worm] keep_at_range confirmed — waiting 7s before deactivate.");
+                    cs.setCombatWaitStart(LocalDateTime.now());
+                    cs.setCombatStep(9);
+                } else {
+                    log(clientId, "COMBAT[Worm] keep_at_range NOT found — retrying.");
+                    cs.setCombatStep(7);
+                }
+                break;
+            }
+            case 9: {
+                // WAIT 7s before deactivating module
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 8) return;
-                log(clientId, "COMBAT[Worm] Step 8: Alt+F1 (deactivate module).");
+                if (elapsed < 7) return;
+                log(clientId, "COMBAT[Worm] Step 9: Alt+F1 (deactivate module).");
                 missionProcessor.altKeyPress("f1");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(9);
+                cs.setCombatStep(10);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "COMBAT[Worm] safe wait — switching to: " + other.getClientId());
@@ -2084,8 +2158,8 @@ public class ClientManager {
                 }
                 break;
             }
-            case 9: {
-                pollSetDestinationOrCapsule(clientId, cs, "Worm", true);
+            case 10: {
+                pollSetDestinationOrCapsule(clientId, cs, "Worm", true, "locked_worm");
                 break;
             }
             default:
@@ -2314,12 +2388,22 @@ public class ClientManager {
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");
             stateManager.setState(clientId, ClientState.State.IDLE);
             cs.setJustExitedWarp(true);
-            // Brief pause to let the game UI finish rendering after warp landing
-            // before taking a navigation screenshot — avoids false template matches.
-            try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-            // Process IDLE immediately so this client handles the next action
-            // (gate jump, warp-to, etc.) before any switch occurs.
-            handleIdle(clientId, window);
+            // Let the destination UI settle before this client picks a navigation
+            // action — otherwise it can grab a stargate before warp_to_location has
+            // rendered and jump a random gate. Prefer switching focus to the other
+            // client (the time spent there IS the settle delay); justExitedWarp stays
+            // set, so when focus returns the justLanded path runs and gives
+            // warp_to_location / activate_gate priority over stargates. With a single
+            // client there is nowhere to switch, so wait ~5s in place instead.
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) {
+                log(clientId, "WARPING: warp landed — switching focus to " + other.getClientId()
+                        + " to let the UI settle before navigating.");
+                bringToForeground(other);
+            } else {
+                try { Thread.sleep(5000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                handleIdle(clientId, window);
+            }
         } else {
             if (elapsed % 10 < 2) {
                 ClientWindowInfo other = findOtherClient(clientId);

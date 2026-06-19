@@ -1,14 +1,13 @@
 package evebot;
 
 import com.google.gson.Gson;
+import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonSyntaxException;
 import evebot.models.Mission;
 
 import java.io.*;
 import java.nio.file.*;
-import java.util.ArrayList;
-import java.util.List;
 
 /**
  * OCRBridge — Java ↔ Python bridge.
@@ -31,6 +30,7 @@ public class OCRBridge {
     private final String missionReaderPath;
     private final String automationScriptPath;
     private final Gson gson;
+    private final PyDaemon daemon;
 
     // -----------------------------------------------------------------------
 
@@ -38,6 +38,7 @@ public class OCRBridge {
         this.missionReaderPath    = resolveScript("mission_reader.py");
         this.automationScriptPath = resolveScript("eve_automation.py");
         this.gson = new Gson();
+        this.daemon = new PyDaemon();
     }
 
     private String resolveScript(String filename) {
@@ -106,43 +107,139 @@ public class OCRBridge {
         }
     }
 
-    /** Run Python and return exit code. -1 on exception. */
-    private int runPythonExitCode(String... args) {
-        try {
-            ProcessBuilder pb = new ProcessBuilder(args);
+    // -----------------------------------------------------------------------
+    // Persistent Python daemon — one resident process for all hot-path actions.
+    //
+    // Each call is a single JSON request/response round-trip (~50-150ms) instead
+    // of spawning a new `python` process (~1s of imports) per action. The daemon
+    // auto-restarts if it dies; repair_ship and standings OCR still use the
+    // spawn path (runPython) — they are infrequent and not latency-sensitive.
+    // -----------------------------------------------------------------------
+
+    private final class PyDaemon {
+        private Process proc;
+        private BufferedWriter in;
+        private BufferedReader out;
+
+        synchronized JsonObject send(JsonObject cmd) {
+            JsonObject r = trySend(cmd);
+            if (r != null) return r;
+            // One restart + retry — covers a daemon that died between calls.
+            System.err.printf("[%s] [OCRBridge] daemon call failed — restarting daemon.%n", ts());
+            stop();
+            return trySend(cmd);
+        }
+
+        private JsonObject trySend(JsonObject cmd) {
+            try {
+                ensureStarted();
+                in.write(gson.toJson(cmd));
+                in.write("\n");
+                in.flush();
+                String line = out.readLine();
+                if (line == null) throw new IOException("daemon closed stdout");
+                return gson.fromJson(line, JsonObject.class);
+            } catch (Exception e) {
+                System.err.printf("[%s] [OCRBridge] daemon send error: %s%n", ts(), e.getMessage());
+                stop();
+                return null;
+            }
+        }
+
+        private void ensureStarted() throws IOException {
+            if (proc != null && proc.isAlive()) return;
+            ProcessBuilder pb = new ProcessBuilder("python", automationScriptPath, "--daemon");
             pb.environment().put("PYTHONIOENCODING", "utf-8");
             pb.environment().put("PYTHONUNBUFFERED", "1");
             pb.redirectErrorStream(false);
-            Process process = pb.start();
+            proc = pb.start();
+            in  = new BufferedWriter(new OutputStreamWriter(proc.getOutputStream(), "UTF-8"));
+            out = new BufferedReader(new InputStreamReader(proc.getInputStream(), "UTF-8"));
+
             Thread stderrThread = new Thread(() -> {
                 try (BufferedReader err = new BufferedReader(
-                        new InputStreamReader(process.getErrorStream(), "UTF-8"))) {
-                    String line;
-                    while ((line = err.readLine()) != null) {
-                        System.err.println("[OCR stderr] " + line);
+                        new InputStreamReader(proc.getErrorStream(), "UTF-8"))) {
+                    String l;
+                    while ((l = err.readLine()) != null) {
+                        System.err.println("[OCR daemon] " + l);
                     }
                 } catch (IOException ignored) {}
-            }, "ocr-stderr");
+            }, "ocr-daemon-stderr");
             stderrThread.setDaemon(true);
             stderrThread.start();
-            process.getInputStream().transferTo(java.io.OutputStream.nullOutputStream());
-            return process.waitFor();
-        } catch (Exception e) {
-            System.err.println("[OCRBridge] Error running Python: " + e.getMessage());
-            return -1;
+
+            String ready = out.readLine();  // daemon prints {"ok":true,"value":"ready"}
+            System.out.printf("[%s] [OCRBridge] daemon started: %s%n", ts(), ready);
+        }
+
+        synchronized void stop() {
+            try { if (proc != null) proc.destroyForcibly(); } catch (Exception ignored) {}
+            proc = null; in = null; out = null;
         }
     }
 
+    /** Build a command object with just a cmd name. */
+    private JsonObject cmd(String name) {
+        JsonObject o = new JsonObject();
+        o.addProperty("cmd", name);
+        return o;
+    }
+
+    /** Send a command; return the "value" as boolean (false if missing/null/failed). */
+    private boolean sendBool(JsonObject c) {
+        JsonObject r = daemon.send(c);
+        return r != null && r.has("value")
+                && !r.get("value").isJsonNull() && r.get("value").getAsBoolean();
+    }
+
+    /** Send a command; return the "value" as String, or null. */
+    private String sendString(JsonObject c) {
+        JsonObject r = daemon.send(c);
+        if (r == null || !r.has("value") || r.get("value").isJsonNull()) return null;
+        return r.get("value").getAsString();
+    }
+
+    /** Send a fire-and-forget action command (return value ignored). */
+    private void sendAction(JsonObject c) {
+        daemon.send(c);
+    }
+
+    /** Stop the resident daemon (called on shutdown). */
+    public void shutdown() {
+        daemon.stop();
+    }
+
     // -----------------------------------------------------------------------
-    // OCR — mission_reader.py
+    // OCR — mission_reader.py (via daemon read_mission; spawn fallback unused)
     // -----------------------------------------------------------------------
 
     public Mission readMission(int x, int y, int width, int height) {
-        String json = runPython("python", missionReaderPath,
-                String.valueOf(x), String.valueOf(y),
-                String.valueOf(width), String.valueOf(height));
-        if (json == null || json.isEmpty()) return null;
-        return parseMissionJson(json);
+        JsonObject c = cmd("read_mission");
+        c.addProperty("x", x);
+        c.addProperty("y", y);
+        c.addProperty("w", width);
+        c.addProperty("h", height);
+        JsonObject r = daemon.send(c);
+        if (r == null || !r.has("value") || r.get("value").isJsonNull()) return null;
+        return parseMissionJson(gson.toJson(r.get("value")));
+    }
+
+    /**
+     * Template-first mission classification (no OCR). Returns the matched mission
+     * dialog key (e.g. "mission_hawk") or null if no known mission template is
+     * visible. One screenshot inside the daemon.
+     */
+    public String classifyMissionOffer(int x, int y, int width, int height) {
+        System.out.printf("[%s] [OCRBridge] classifyMissionOffer (template-first, region %d,%d %dx%d)%n",
+                ts(), x, y, width, height);
+        JsonObject c = cmd("classify_offer");
+        JsonObject region = new JsonObject();
+        region.addProperty("x", x);
+        region.addProperty("y", y);
+        region.addProperty("w", width);
+        region.addProperty("h", height);
+        c.add("region", region);
+        return sendString(c);
     }
 
     private Mission parseMissionJson(String jsonString) {
@@ -211,7 +308,9 @@ public class OCRBridge {
      */
     public void clickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] clickTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--click", key);
+        JsonObject c = cmd("click");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -219,7 +318,10 @@ public class OCRBridge {
      */
     public void clickTemplateBelow(String key, int offsetY) {
         System.out.printf("[%s] [OCRBridge] clickTemplateBelow: %s +%dpx%n", ts(), key, offsetY);
-        runPython("python", automationScriptPath, "--click", key, "--offset-y", String.valueOf(offsetY));
+        JsonObject c = cmd("click");
+        c.addProperty("key", key);
+        c.addProperty("offset_y", offsetY);
+        sendAction(c);
     }
 
     /**
@@ -228,7 +330,9 @@ public class OCRBridge {
      */
     public void doubleClickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] doubleClickTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--double-click", key);
+        JsonObject c = cmd("double_click");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -236,7 +340,9 @@ public class OCRBridge {
      */
     public void rightClickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] rightClickTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--right-click", key);
+        JsonObject c = cmd("right_click");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -244,8 +350,10 @@ public class OCRBridge {
      */
     public void rightClickPos(int x, int y) {
         System.out.printf("[%s] [OCRBridge] rightClickPos: (%d,%d)%n", ts(), x, y);
-        runPython("python", automationScriptPath, "--right-click-pos",
-                String.valueOf(x), String.valueOf(y));
+        JsonObject c = cmd("right_click_pos");
+        c.addProperty("x", x);
+        c.addProperty("y", y);
+        sendAction(c);
     }
 
     /**
@@ -253,8 +361,10 @@ public class OCRBridge {
      */
     public void clickPos(int x, int y) {
         System.out.printf("[%s] [OCRBridge] clickPos: (%d,%d)%n", ts(), x, y);
-        runPython("python", automationScriptPath, "--click-pos",
-                String.valueOf(x), String.valueOf(y));
+        JsonObject c = cmd("click_pos");
+        c.addProperty("x", x);
+        c.addProperty("y", y);
+        sendAction(c);
     }
 
     /**
@@ -263,7 +373,9 @@ public class OCRBridge {
      */
     public void hoverTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] hoverTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--hover", key);
+        JsonObject c = cmd("hover");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -272,7 +384,9 @@ public class OCRBridge {
      */
     public void eClickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] eClickTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--e-click", key);
+        JsonObject c = cmd("e_click");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -281,7 +395,9 @@ public class OCRBridge {
      */
     public void wClickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] wClickTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--w-click", key);
+        JsonObject c = cmd("w_click");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -290,7 +406,9 @@ public class OCRBridge {
      */
     public void qClickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] qClickTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--q-click", key);
+        JsonObject c = cmd("q_click");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -299,7 +417,9 @@ public class OCRBridge {
      */
     public void ctrlClickTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] ctrlClickTemplate: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--ctrl-click", key);
+        JsonObject c = cmd("ctrl_click");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -308,19 +428,16 @@ public class OCRBridge {
      */
     public int ctrlClickAllTemplate(String key) {
         System.out.printf("[%s] [OCRBridge] ctrlClickAllTemplate: %s%n", ts(), key);
-        String output = runPython("python", automationScriptPath, "--ctrl-click-all", key);
-        if (output == null || output.isEmpty()) {
-            System.err.printf("[%s] [OCRBridge] ctrlClickAllTemplate: no output.%n", ts());
+        JsonObject c = cmd("ctrl_click_all");
+        c.addProperty("key", key);
+        JsonObject r = daemon.send(c);
+        if (r == null || !r.has("value") || r.get("value").isJsonNull()) {
+            System.err.printf("[%s] [OCRBridge] ctrlClickAllTemplate: no result.%n", ts());
             return 0;
         }
-        try {
-            int count = Integer.parseInt(output.trim());
-            System.out.printf("[%s] [OCRBridge] ctrlClickAllTemplate: locked %d targets.%n", ts(), count);
-            return count;
-        } catch (NumberFormatException e) {
-            System.err.printf("[%s] [OCRBridge] ctrlClickAllTemplate: bad output '%s'.%n", ts(), output);
-            return 0;
-        }
+        int count = r.get("value").getAsInt();
+        System.out.printf("[%s] [OCRBridge] ctrlClickAllTemplate: locked %d targets.%n", ts(), count);
+        return count;
     }
 
     /**
@@ -329,22 +446,30 @@ public class OCRBridge {
      */
     public void keyPress(String keys) {
         System.out.printf("[%s] [OCRBridge] keyPress: %s%n", ts(), keys);
-        runPython("python", automationScriptPath, "--key-press", keys);
+        JsonObject c = cmd("key_press");
+        c.addProperty("keys", keys);
+        sendAction(c);
     }
 
     public void shiftKeyPress(String keys) {
         System.out.printf("[%s] [OCRBridge] shiftKeyPress: %s%n", ts(), keys);
-        runPython("python", automationScriptPath, "--shift-key-press", keys);
+        JsonObject c = cmd("shift_key_press");
+        c.addProperty("keys", keys);
+        sendAction(c);
     }
 
     public void ctrlKeyPress(String keys) {
         System.out.printf("[%s] [OCRBridge] ctrlKeyPress: %s%n", ts(), keys);
-        runPython("python", automationScriptPath, "--ctrl-key-press", keys);
+        JsonObject c = cmd("ctrl_key_press");
+        c.addProperty("keys", keys);
+        sendAction(c);
     }
 
     public void altKeyPress(String key) {
         System.out.printf("[%s] [OCRBridge] altKeyPress: %s%n", ts(), key);
-        runPython("python", automationScriptPath, "--alt-key-press", key);
+        JsonObject c = cmd("alt_key_press");
+        c.addProperty("key", key);
+        sendAction(c);
     }
 
     /**
@@ -352,7 +477,7 @@ public class OCRBridge {
      */
     public void ctrlR() {
         System.out.printf("[%s] [OCRBridge] ctrlR (reload modules)%n", ts());
-        runPython("python", automationScriptPath, "--ctrl-r");
+        sendAction(cmd("ctrl_r"));
     }
 
     /**
@@ -406,13 +531,11 @@ public class OCRBridge {
      */
     public String findAnyTemplate(String... keys) {
         System.out.printf("[%s] [OCRBridge] findAnyTemplate: %s%n", ts(), java.util.Arrays.toString(keys));
-        List<String> cmd = new ArrayList<>();
-        cmd.add("python");
-        cmd.add(automationScriptPath);
-        cmd.add("--find-any");
-        for (String key : keys) cmd.add(key);
-        String result = runPython(cmd.toArray(new String[0]));
-        return (result != null && !result.isBlank()) ? result.trim() : null;
+        JsonObject c = cmd("find_any");
+        JsonArray arr = new JsonArray();
+        for (String key : keys) arr.add(key);
+        c.add("keys", arr);
+        return sendString(c);
     }
 
     /**
@@ -420,7 +543,9 @@ public class OCRBridge {
      */
     public int[] findTemplatePos(String key) {
         System.out.printf("[%s] [OCRBridge] findTemplatePos: %s%n", ts(), key);
-        String result = runPython("python", automationScriptPath, "--find-pos", key);
+        JsonObject c = cmd("find_pos");
+        c.addProperty("key", key);
+        String result = sendString(c);
         if (result != null && result.contains(",")) {
             String[] parts = result.trim().split(",");
             try {
@@ -437,46 +562,45 @@ public class OCRBridge {
      */
     public boolean waitForTemplate(String key, int timeoutSeconds) {
         System.out.printf("[%s] [OCRBridge] waitForTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
-        int code = runPythonExitCode("python", automationScriptPath,
-                "--wait", key, "--timeout", String.valueOf(timeoutSeconds));
-        return code == 0;
+        JsonObject c = cmd("wait");
+        c.addProperty("key", key);
+        c.addProperty("timeout", timeoutSeconds);
+        return sendBool(c);
     }
 
     public boolean waitForTemplateGone(String key, int timeoutSeconds) {
         System.out.printf("[%s] [OCRBridge] waitForTemplateGone: %s (%ds)%n", ts(), key, timeoutSeconds);
-        int code = runPythonExitCode("python", automationScriptPath,
-                "--wait-gone", key, "--timeout", String.valueOf(timeoutSeconds));
-        return code == 0;
+        JsonObject c = cmd("wait_gone");
+        c.addProperty("key", key);
+        c.addProperty("timeout", timeoutSeconds);
+        return sendBool(c);
     }
 
     /**
-     * Poll for any of the given templates in one subprocess; returns the first
-     * matched key name, or null on timeout. Single Python process — one screenshot
-     * per poll cycle checks all keys.
+     * Poll for any of the given templates; returns the first matched key name,
+     * or null on timeout. One screenshot per poll cycle checks all keys.
      */
     public String waitForAnyTemplate(int timeoutSeconds, String... keys) {
         System.out.printf("[%s] [OCRBridge] waitForAnyTemplate: %s (%ds)%n",
                 ts(), java.util.Arrays.toString(keys), timeoutSeconds);
-        List<String> cmd = new ArrayList<>();
-        cmd.add("python");
-        cmd.add(automationScriptPath);
-        cmd.add("--wait-any");
-        for (String key : keys) cmd.add(key);
-        cmd.add("--timeout");
-        cmd.add(String.valueOf(timeoutSeconds));
-        String result = runPython(cmd.toArray(new String[0]));
-        return (result != null && !result.isBlank()) ? result.trim() : null;
+        JsonObject c = cmd("wait_any");
+        JsonArray arr = new JsonArray();
+        for (String key : keys) arr.add(key);
+        c.add("keys", arr);
+        c.addProperty("timeout", timeoutSeconds);
+        return sendString(c);
     }
 
     /**
-     * Wait for a template to appear then click it, all in one subprocess.
+     * Wait for a template to appear then click it.
      * Returns true on success, false on timeout.
      */
     public boolean waitAndClickTemplate(String key, int timeoutSeconds) {
         System.out.printf("[%s] [OCRBridge] waitAndClickTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
-        int code = runPythonExitCode("python", automationScriptPath,
-                "--wait-click", key, "--timeout", String.valueOf(timeoutSeconds));
-        return code == 0;
+        JsonObject c = cmd("wait_click");
+        c.addProperty("key", key);
+        c.addProperty("timeout", timeoutSeconds);
+        return sendBool(c);
     }
 
     // -----------------------------------------------------------------------

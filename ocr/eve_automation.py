@@ -174,6 +174,7 @@ TEMPLATE_FILES = {
     "locked_navitas": "locked_navitas",
     "locked_hawk": "locked_hawk",
     "locked_bantam": "locked_bantam",
+    "locked_worm": "locked_worm",
     "target_enyo": "target_enyo",
     "target_navitas": "target_navitas",
     "em_damage": "em_damage",
@@ -1613,6 +1614,222 @@ def cmd_alt_key_press(key: str, dry_run: bool):
 
 
 # -----------------------------------------------------------------------------
+# Persistent daemon mode
+#
+# Java starts ONE long-lived `python eve_automation.py --daemon` process and
+# sends one JSON command per line on stdin; the daemon replies with one JSON
+# line on stdout ({"ok": bool, "value": ...}). All log output goes to stderr,
+# so stdout carries responses only. The matcher (and all templates) are loaded
+# ONCE at startup, eliminating the ~1s-per-call interpreter/import cost that
+# made every spawn-per-action slow.
+# -----------------------------------------------------------------------------
+
+# Snappy post-click pause for plain clicks issued from the daemon (the slow
+# part used to be process spawn, not this; kept small but non-zero so EVE
+# registers the click).
+DAEMON_CLICK_DELAY = 0.15
+
+
+def _send_ctrl_r():
+    VK_CONTROL = 0x11
+    VK_R = 0x52
+    try:
+        import win32api, win32con
+        win32api.keybd_event(VK_CONTROL, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(VK_R, 0, 0, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(VK_R, 0, win32con.KEYEVENTF_KEYUP, 0)
+        time.sleep(0.05)
+        win32api.keybd_event(VK_CONTROL, 0, win32con.KEYEVENTF_KEYUP, 0)
+    except ImportError:
+        pyautogui.hotkey("ctrl", "r")
+
+
+def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> dict:
+    """Execute one daemon command and return {"ok": ..., "value": ...}."""
+    cmd = msg.get("cmd")
+    key = msg.get("key")
+    timeout = float(msg.get("timeout", 2.0))
+
+    if cmd == "ping":
+        return {"ok": True, "value": "pong"}
+
+    if cmd == "click":
+        match = matcher.wait_for(key, timeout=timeout)
+        if not match:
+            return {"ok": True, "value": False}
+        cx, cy = matcher.center(match)
+        cy += int(msg.get("offset_y", 0))
+        matcher._do_click(cx, cy, button="left", delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+
+    if cmd == "click_pos":
+        matcher._do_click(int(msg["x"]), int(msg["y"]), button="left", delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+
+    if cmd == "right_click_pos":
+        matcher._do_click(int(msg["x"]), int(msg["y"]), button="right", delay=0.3)
+        return {"ok": True, "value": True}
+
+    if cmd == "double_click":
+        return {"ok": True, "value": matcher.wait_and_double_click(key, timeout=timeout, delay=0.2)}
+    if cmd == "right_click":
+        return {"ok": True, "value": matcher.wait_and_right_click(key, timeout=timeout, delay=0.2)}
+    if cmd == "ctrl_click":
+        return {"ok": True, "value": matcher.wait_and_ctrl_click(key, timeout=timeout)}
+    if cmd == "e_click":
+        return {"ok": True, "value": matcher.wait_and_e_click(key, timeout=timeout)}
+    if cmd == "w_click":
+        return {"ok": True, "value": matcher.wait_and_w_click(key, timeout=timeout)}
+    if cmd == "q_click":
+        return {"ok": True, "value": matcher.wait_and_q_click(key, timeout=timeout)}
+    if cmd == "ctrl_click_all":
+        return {"ok": True, "value": matcher.ctrl_click_all(key)}
+
+    if cmd == "hover":
+        match = matcher.wait_for(key, timeout=timeout)
+        if not match:
+            return {"ok": True, "value": False}
+        cx, cy = matcher.center(match)
+        try:
+            import win32api
+            win32api.SetCursorPos((cx, cy))
+        except ImportError:
+            pyautogui.moveTo(cx, cy, duration=0.1)
+        time.sleep(0.3)
+        return {"ok": True, "value": True}
+
+    if cmd == "key_press":
+        matcher._do_key_press(msg["keys"], delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+    if cmd == "shift_key_press":
+        matcher._do_shift_key_press(msg["keys"], delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+    if cmd == "ctrl_key_press":
+        matcher._do_ctrl_key_press(msg["keys"], delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+    if cmd == "alt_key_press":
+        matcher._do_alt_key_press(msg["key"], delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+
+    if cmd == "ctrl_r":
+        _send_ctrl_r()
+        return {"ok": True, "value": True}
+
+    if cmd == "find_any":
+        screen = matcher.screenshot_cv()
+        for k in msg.get("keys", []):
+            if matcher.find(k, screen=screen):
+                return {"ok": True, "value": k}
+        return {"ok": True, "value": None}
+
+    if cmd == "find_pos":
+        match = matcher.find(key)
+        if match:
+            cx, cy = matcher.center(match)
+            return {"ok": True, "value": "%d,%d" % (cx, cy)}
+        return {"ok": True, "value": None}
+
+    if cmd == "wait":
+        return {"ok": True, "value": matcher.wait_for(key, timeout=timeout) is not None}
+
+    if cmd == "wait_gone":
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if matcher.find(key) is None:
+                return {"ok": True, "value": True}
+            time.sleep(0.2)
+        return {"ok": True, "value": False}
+
+    if cmd == "wait_any":
+        k, _ = matcher.wait_for_any(msg.get("keys", []), timeout=timeout)
+        return {"ok": True, "value": k}
+
+    if cmd == "wait_click":
+        match = matcher.wait_for(key, timeout=timeout)
+        if match:
+            cx, cy = matcher.center(match)
+            matcher._do_click(cx, cy, button="left", delay=DAEMON_CLICK_DELAY)
+            return {"ok": True, "value": True}
+        return {"ok": True, "value": False}
+
+    if cmd == "classify_offer":
+        # Template-first mission classification: one screenshot, check the known
+        # mission dialog templates. Returns the matched dialog key (e.g.
+        # "mission_hawk") or null. ocr_keywords gating is intentionally skipped —
+        # the Java caller OCRs the matched offer afterwards for the distance check.
+        #
+        # The scan is restricted to the offer-dialog region when one is supplied
+        # (matchTemplate cost scales with search area — full screen is ~9x slower
+        # than the dialog crop). Each find is guarded so a crop too small for a
+        # given template silently falls back to the full screen for that key.
+        screen = matcher.screenshot_cv()
+        search = screen
+        region = msg.get("region")
+        if region:
+            sh, sw = screen.shape[:2]
+            x0 = max(0, min(int(region["x"]), sw))
+            y0 = max(0, min(int(region["y"]), sh))
+            x1 = max(x0, min(int(region["x"]) + int(region["w"]), sw))
+            y1 = max(y0, min(int(region["y"]) + int(region["h"]), sh))
+            if x1 > x0 and y1 > y0:
+                search = screen[y0:y1, x0:x1]
+        for dialog_key, _ship_key, _kw in MISSION_TEMPLATE_TO_SHIP:
+            if dialog_key not in matcher.templates:
+                continue
+            try:
+                hit = matcher.find(dialog_key, screen=search)
+            except Exception:
+                hit = matcher.find(dialog_key, screen=screen)  # crop smaller than template
+            if hit:
+                return {"ok": True, "value": dialog_key}
+        return {"ok": True, "value": None}
+
+    if cmd == "read_mission":
+        if "reader" not in reader_box:
+            reader_box["reader"] = EVEMissionReader()
+        mission = reader_box["reader"].read_mission(
+            int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
+        )
+        return {"ok": True, "value": mission}
+
+    if cmd == "shutdown":
+        return {"ok": True, "value": "bye"}
+
+    return {"ok": False, "error": "unknown cmd: %s" % cmd}
+
+
+def run_daemon(threshold: float = 0.80):
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    reader_box: dict = {}  # lazily holds an EVEMissionReader for OCR commands
+    log.info("Daemon ready — %d templates loaded.", len(matcher.templates))
+    # Announce readiness on stdout so Java knows the daemon is up.
+    sys.stdout.write(json.dumps({"ok": True, "value": "ready"}) + "\n")
+    sys.stdout.flush()
+
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception as e:
+            sys.stdout.write(json.dumps({"ok": False, "error": "bad json: %s" % e}) + "\n")
+            sys.stdout.flush()
+            continue
+        try:
+            resp = daemon_dispatch(matcher, reader_box, msg)
+        except Exception as e:
+            log.exception("daemon command failed: %s", msg)
+            resp = {"ok": False, "error": str(e)}
+        sys.stdout.write(json.dumps(resp, default=str) + "\n")
+        sys.stdout.flush()
+        if msg.get("cmd") == "shutdown":
+            break
+
+
+# -----------------------------------------------------------------------------
 # CLI entry point
 # -----------------------------------------------------------------------------
 
@@ -1634,6 +1851,9 @@ Examples:
 """,
     )
     parser.add_argument("--check", action="store_true")
+    parser.add_argument("--daemon", action="store_true",
+                        help="Run as a persistent daemon: read JSON commands from stdin, "
+                             "reply with JSON on stdout. Templates load once.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--run-once", action="store_true")
@@ -1727,6 +1947,10 @@ Examples:
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--threshold", type=float, default=0.80)
     args = parser.parse_args()
+
+    if args.daemon:
+        run_daemon(threshold=args.threshold)
+        return
 
     if args.check:
         cmd_check(args.threshold)

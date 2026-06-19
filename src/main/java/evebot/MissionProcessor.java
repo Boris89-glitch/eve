@@ -32,7 +32,7 @@ public class MissionProcessor {
 
     private final OCRBridge ocrBridge;
 
-    private static final int POST_CLICK_DELAY_MS = 100;
+    private static final int POST_CLICK_DELAY_MS = 40;
 
     public MissionProcessor() {
         this.ocrBridge = new OCRBridge();
@@ -118,6 +118,16 @@ public class MissionProcessor {
     /** Convenience wrapper used in CHECKING_MISSIONS retry logic. */
     public boolean isMissionDialogVisible() {
         return detectDialog() != DialogState.NONE;
+    }
+
+    /**
+     * Template-first mission classification (no OCR). Returns the matched mission
+     * dialog template key (e.g. "mission_hawk") if a known wanted-mission template
+     * is visible, or null otherwise.
+     */
+    public String classifyMissionOffer(Rectangle dialogArea) {
+        return ocrBridge.classifyMissionOffer(
+                dialogArea.x, dialogArea.y, dialogArea.width, dialogArea.height);
     }
 
     public boolean waitForDialogClosed() {
