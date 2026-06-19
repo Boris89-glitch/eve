@@ -2321,7 +2321,7 @@ public class ClientManager {
             // (gate jump, warp-to, etc.) before any switch occurs.
             handleIdle(clientId, window);
         } else {
-            if (elapsed % 10 < 2) {
+            if (elapsed % 15 < 2) {
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "WARPING: " + elapsed + "s elapsed — switching focus to: " + other.getClientId());
