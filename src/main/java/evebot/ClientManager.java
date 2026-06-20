@@ -27,11 +27,13 @@ public class ClientManager {
     private final Map<String, Rectangle>        clientMissionAreas = new ConcurrentHashMap<>();
     private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
     private final Map<String, Integer>          agentRetries       = new ConcurrentHashMap<>();
+    private final Map<String, Integer>          gateWarpRetries    = new ConcurrentHashMap<>();
 
     /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
     private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
 
     private static final int  MAX_AGENT_RETRIES        = 2;
+    private static final int  MAX_GATE_WARP_RETRIES    = 2;
     private static final long UNDOCK_WAIT_SECS          = 13;
     /** Pixels below the EVE-O Preview thumbnail template centre to click (skips the title bar). */
     private static final int  THUMBNAIL_CLICK_OFFSET_Y = 75;
@@ -178,10 +180,10 @@ public class ClientManager {
     private static final int POD_CHECK_INTERVAL_MINUTES = 5;
 
     /**
-     * Periodic pod check for in-space states (WARPING, and IDLE while travelling).
-     * Throttled to every {@link #POD_CHECK_INTERVAL_MINUTES} minutes so the
-     * eject-menu probe doesn't run constantly. Returns true if a pod was detected
-     * and handled (the caller should then return).
+     * Periodic in-space upkeep (WARPING, and IDLE while travelling), throttled to
+     * every {@link #POD_CHECK_INTERVAL_MINUTES} minutes: clicks the 'general'
+     * overview tab to reset the preset, then runs the eject-menu pod check. Returns
+     * true if a pod was detected and handled (the caller should then return).
      */
     private boolean runPeriodicPodCheck(String clientId, ClientState cs) {
         long sinceLast = Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes();
@@ -189,7 +191,8 @@ public class ClientManager {
             return false;
         }
         cs.setLastPodCheck(LocalDateTime.now());
-        log(clientId, "Periodic pod check (every " + POD_CHECK_INTERVAL_MINUTES + "m).");
+        log(clientId, "Periodic check (every " + POD_CHECK_INTERVAL_MINUTES + "m): click 'general' overview + pod check.");
+        missionProcessor.clickTemplate("general"); // reset overview to the General preset (no-op if not visible)
         if (missionProcessor.isFlyingPod()) {
             log(clientId, "Periodic pod check: pod detected — self-destructing.");
             handlePodDeath(clientId, true);
@@ -198,14 +201,24 @@ public class ClientManager {
         return false;
     }
 
+    private void handlePodDeath(String clientId, boolean inSpace) {
+        handlePodDeath(clientId, inSpace, false);
+    }
+
     /**
-     * Shared pod-death handler. Self-destructs capsule (if in space), sets global
-     * cooldown, and transitions the client to POD_COOLDOWN.
+     * Shared pod-death handler. Self-destructs the capsule (if in space) and either
+     * starts the global bubble-camp cooldown or resumes immediately.
+     *
+     * The 12-minute cooldown is only applied for a bubble-caused pod death within
+     * the first jump (the case where re-undocking would warp straight back into the
+     * camp). Every other pod death (combat, periodic 5m check, deeper in the route)
+     * skips the cooldown and resumes.
      *
      * @param clientId       the client that was podded
      * @param inSpace        true if capsule is in space (needs self-destruct); false if already at station
+     * @param bubbleRelated  true if the pod death was caused by a warp-bubble camp
      */
-    private void handlePodDeath(String clientId, boolean inSpace) {
+    private void handlePodDeath(String clientId, boolean inSpace, boolean bubbleRelated) {
         ClientState cs = stateManager.getState(clientId);
         int jumps = cs.getJumpCount();
         String phase = cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION ? "to mission"
@@ -213,22 +226,44 @@ public class ClientManager {
                      : "unknown";
         if (inSpace) {
             log(clientId, "*** CAPSULE DETECTED — ship destroyed! Self-destructing...");
+            if (!missionProcessor.clickDestruct()) {
+                // No capsule actually on screen — the pod check was a false positive
+                // (e.g. docked at station). Abort: no self-destruct, no 120s wait,
+                // no cooldown, no state change. Just continue.
+                log(clientId, "Pod check false positive — no capsule found, aborting self-destruct.");
+                return;
+            }
             EventLog.log("POD_DEATH", clientId + " — ship destroyed in space, self-destructing (" + phase + ", jumps: " + jumps + ")");
-            missionProcessor.clickDestruct();
-            log(clientId, "Waiting 120s for self-destruct respawn...");
-            try { Thread.sleep(120_000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            // Self-destruct respawn takes ~120s. Instead of blocking idle on the dead
+            // ship, hand that time to the other client by driving it each ~2s.
+            log(clientId, "Self-destruct respawn ~120s — switching to other client during the wait.");
+            ClientWindowInfo other = findOtherClient(clientId);
+            LocalDateTime respawnEnd = LocalDateTime.now().plusSeconds(120);
+            while (LocalDateTime.now().isBefore(respawnEnd)) {
+                if (other != null) {
+                    bringToForeground(other);
+                    processClient(other.getClientId(), other);
+                }
+                try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); break; }
+            }
+            // Bring the podded client back to the foreground so it resumes (repair/idle).
+            ClientWindowInfo self = clientWindows.get(clientId);
+            if (self != null) {
+                bringToForeground(self);
+            }
         } else {
             log(clientId, "*** PODDED — respawned at station (agent_icon visible).");
             EventLog.log("POD_DEATH", clientId + " — respawned at station (" + phase + ", jumps: " + jumps + ")");
         }
 
-        if (jumps <= 1) {
+        if (bubbleRelated && jumps <= 1) {
             LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
             stateManager.setPodCooldownEnd(cooldownEnd);
-            log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (jumps=" + jumps + ").");
+            log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (bubble, jumps=" + jumps + ").");
             stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         } else {
-            log(clientId, "POD_DEATH: jumps=" + jumps + " (>1) — skipping cooldown, resuming immediately.");
+            log(clientId, "POD_DEATH: " + (bubbleRelated ? "jumps=" + jumps + " (>1)" : "non-bubble")
+                    + " — skipping cooldown, resuming immediately.");
             // Clear the travel phase — we respawned at the station, so the next IDLE
             // tick must not keep reading the station agent_icon as another pod death
             // (TO_MISSION + agent_icon loops back into handlePodDeath forever).
@@ -281,9 +316,10 @@ public class ClientManager {
         // 2. Phase-based navigation — handles transit after each warp lands.
         ClientState cs = stateManager.getState(clientId);
 
-        // Periodic pod check while in space (travelling). Skipped at station
-        // (travelPhase NONE), where a missing module sliver would falsely read podded.
-        if (cs.getTravelPhase() != ClientState.TravelPhase.NONE
+        // Periodic pod check only while outbound in space (TO_MISSION). Skipped at
+        // station (NONE) and while RETURNING — both can be docked, where a missing
+        // module sliver would falsely read as podded.
+        if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION
                 && runPeriodicPodCheck(clientId, cs)) {
             return;
         }
@@ -293,6 +329,18 @@ public class ClientManager {
             if (justLanded) {
                 cs.setJustExitedWarp(false);
                 long warpSecs = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
+
+                // One-time check after the first jump: if set_destination is still on
+                // screen, the earlier click missed and we jumped a random gate — click
+                // it now to get back on the route.
+                if (cs.isVerifySetDest()) {
+                    cs.setVerifySetDest(false);
+                    if (missionProcessor.isSetDestinationVisible()) {
+                        log(clientId, "IDLE[TO_MISSION]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
+                        missionProcessor.clickTemplate("set_destination");
+                        return;
+                    }
+                }
 
                 // Just exited warp — check mission-specific elements first (no stargate,
                 // it's always visible in-system and would false-match during a gate tunnel).
@@ -305,7 +353,10 @@ public class ClientManager {
                             cs.setWarpStartTime(LocalDateTime.now());
                             cs.setLastWarpCheck(LocalDateTime.MIN);
                             stateManager.setState(clientId, ClientState.State.IN_COMBAT);
-                            new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
+                            new Thread(() -> {
+                                missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
+                                missionProcessor.clickPos(960, 540); // click away in space to clear the menu
+                            }).start();
                             break;
                         case "warp_to_location":
                             log(clientId, "IDLE[TO_MISSION]: warp_to_location — warping into mission space.");
@@ -350,7 +401,10 @@ public class ClientManager {
                     cs.setWarpStartTime(LocalDateTime.now());
                     cs.setLastWarpCheck(LocalDateTime.MIN);
                     stateManager.setState(clientId, ClientState.State.IN_COMBAT);
-                    new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
+                    new Thread(() -> {
+                        missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
+                        missionProcessor.clickPos(960, 540); // click away in space to clear the menu
+                    }).start();
                     break;
                 case "warp_to_location":
                     log(clientId, "IDLE[TO_MISSION]: warp_to_location — warping into mission space.");
@@ -377,12 +431,31 @@ public class ClientManager {
                 cs.setJustExitedWarp(false);
                 long warpSecs = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
+                // One-time check after the first jump: if set_destination is still on
+                // screen, the earlier click missed and we jumped a random gate — click
+                // it now to get back on the route.
+                if (cs.isVerifySetDest()) {
+                    cs.setVerifySetDest(false);
+                    if (missionProcessor.isSetDestinationVisible()) {
+                        log(clientId, "IDLE[RETURNING_HOME]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
+                        missionProcessor.clickTemplate("set_destination");
+                        return;
+                    }
+                }
+
                 // Just exited warp — check dock first (no stargate yet, same false-match risk).
                 String dockCheck = missionProcessor.detectDockOnly();
                 if (dockCheck != null) {
                     if (missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
-                        missionProcessor.instaDock();
+                        if (missionProcessor.instaDock()) {
+                            // Bubble in the way — escape it in WARPING first (no autopilot);
+                            // we'll re-dock from IDLE once the bubble is cleared.
+                            log(clientId, "IDLE[RETURNING_HOME]: bubble on insta-dock — escaping before docking.");
+                            cs.setWarpStartTime(LocalDateTime.now());
+                            stateManager.setState(clientId, ClientState.State.WARPING);
+                            return;
+                        }
                     } else {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking.");
                         missionProcessor.clickDock();
@@ -711,7 +784,8 @@ public class ClientManager {
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
         missionProcessor.closeAllDialogs();
-        missionProcessor.clickSetDestination();
+        missionProcessor.clickSetDestination(281, 515); // undock position
+        cs.setVerifySetDest(true); // re-check after first jump that it actually took
 
         // After setting destination, check for hostiles — warp to safe spot if needed.
         if (missionProcessor.findTemplate("enemy") != null) {
@@ -747,8 +821,10 @@ public class ClientManager {
         if (!cs.isCombatWarpLanded()) {
             long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
-            // 0–7s: grace period — right-click+click takes ~3s, then warp needs time to begin.
-            if (elapsed < 7) {
+            // 0–3s: short grace — the right-click+mission_start click lands by ~3s, so
+            // check for warp right after instead of idling 7s (a grayed-out gate that
+            // never warped would otherwise go unnoticed that whole time).
+            if (elapsed < 3) {
                 if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
                     log(clientId, "IN_COMBAT: waiting for gate warp to begin.");
                     cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker
@@ -756,7 +832,7 @@ public class ClientManager {
                 return;
             }
 
-            // 7s+: poll warp_active every 5s — when it disappears, warp has landed.
+            // 3s+: poll warp_active every 5s — when it disappears, warp has landed.
             boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
             long sinceLastCheck = Duration.between(cs.getLastWarpCheck(), LocalDateTime.now()).getSeconds();
             if (!firstCheck && sinceLastCheck < 5) {
@@ -768,15 +844,34 @@ public class ClientManager {
                 if (firstCheck) {
                     log(clientId, "IN_COMBAT: gate warp confirmed — waiting for landing.");
                 }
+                gateWarpRetries.put(clientId, 0); // warp started — clear re-click counter
                 return;
             }
 
-            // Warp not active (or was never seen) — proceed to combat.
-            if (firstCheck) {
-                log(clientId, "IN_COMBAT: no warp detected after " + elapsed + "s — starting combat.");
-            } else {
+            // Warp not active. If we'd already confirmed it (not the first check), the
+            // warp has landed → start combat.
+            if (!firstCheck) {
                 log(clientId, "IN_COMBAT: gate warp landed after " + elapsed + "s — starting combat.");
+                gateWarpRetries.put(clientId, 0);
+                cs.setCombatWarpLanded(true);
+                return;
             }
+
+            // First check and no warp — the gate likely didn't activate (grayed out on
+            // session change). Re-click it and retry a couple of times before giving up.
+            int retries = gateWarpRetries.merge(clientId, 1, Integer::sum);
+            if (retries <= MAX_GATE_WARP_RETRIES) {
+                log(clientId, "IN_COMBAT: no warp after " + elapsed + "s — gate grayed, re-clicking (attempt "
+                        + retries + "/" + MAX_GATE_WARP_RETRIES + ").");
+                new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
+                cs.setWarpStartTime(LocalDateTime.now());       // restart the 3s grace
+                cs.setLastWarpCheck(LocalDateTime.MIN);          // next poll is a fresh first check
+                return;
+            }
+
+            log(clientId, "IN_COMBAT: still no warp after " + MAX_GATE_WARP_RETRIES
+                    + " gate re-clicks — starting combat.");
+            gateWarpRetries.put(clientId, 0);
             cs.setCombatWarpLanded(true);
             return;
         }
@@ -915,7 +1010,9 @@ public class ClientManager {
         // (right-clicks our ship), so it only runs here — not every tick. Being
         // podded clears the locked target, so a long silence can mean we were
         // destroyed; check for a pod before assuming the mission completed.
-        int backstopSecs = "Jaguar".equals(combatLabel) ? 300 : 120;
+        int backstopSecs = "Jaguar".equals(combatLabel) ? 300
+                         : "Worm".equals(combatLabel) ? 60
+                         : 120;
         if (elapsed >= backstopSecs) {
             if (missionProcessor.isFlyingPod()) {
                 handlePodDeath(clientId, true);
@@ -1065,10 +1162,10 @@ public class ClientManager {
      *   1  → Check 'orbiting' — if not found, repeat (loop back to 0)
      *   2  → Keypress 's' (activate module)
      *   3  → SAFE WAIT 25s
-     *   4  → Ctrl+click-all 'target_inquisitor' + Ctrl+click 'target_vengeance' (lock all)
-     *   5  → WAIT 3s (lock animation) → click 'locked_inquisitor' (select)
+     *   4  → Ctrl+click 'target_inquisitor' (one) + Ctrl+click 'target_vengeance' (lock)
+     *   5  → WAIT 3s (lock animation) → confirm 'locked_inquisitor' — if not found (out of range), relock (loop back to 4); if found, select
      *   6  → Press 'adc' (activate modules), click 'target_inquisitor' (verify)
-     *   7  → SAFE WAIT 130s
+     *   7  → SAFE WAIT 60s, then poll every 5s for 'locked_inquisitor' gone (dead) → re-target; 130s backup cap
      *   8  → Ctrl+click 'target_inquisitor' (re-lock)
      *   9  → WAIT 2s → click 'locked_inquisitor' (select) + press 'ad'
      *   10 → SAFE WAIT 60s
@@ -1076,9 +1173,8 @@ public class ClientManager {
      *   12 → Click 'inf_damage' (load infernal/thermal ammo)
      *   13 → SAFE WAIT 10s
      *   14 → Ctrl+click 'target_vengeance' (lock)
-     *   15 → WAIT 3s → check 'locked_vengeance' — if not found, retry (loop back to 14); if found, click + press 'ad'
-     *   16 → SAFE WAIT 30s
-     *   17 → SAFE WAIT for set_destination (mission complete → RETURNING)
+     *   15 → WAIT 3s → check 'locked_vengeance' — if not found, retry (loop back to 14); if found, click + overload (shift+a, a, d)
+     *   16 → SAFE WAIT for set_destination (mission complete → RETURNING)
      */
     private void handleCombatVengeance(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -1127,8 +1223,8 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                log(clientId, "COMBAT[Vengeance] Step 4: Ctrl+click-all target_inquisitor + target_vengeance (lock all).");
-                missionProcessor.ctrlClickAllTemplate("target_inquisitor");
+                log(clientId, "COMBAT[Vengeance] Step 4: Ctrl+click 1 target_inquisitor + target_vengeance (lock one inquisitor).");
+                missionProcessor.ctrlClickTemplate("target_inquisitor");
                 missionProcessor.ctrlClickTemplate("target_vengeance");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
@@ -1154,27 +1250,41 @@ public class ClientManager {
                 missionProcessor.keyPress("adc");
                 missionProcessor.clickTemplate("locked_inquisitor");
                 cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatPollStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Vengeance] 130s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Vengeance] 90s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 7: {
-                // SAFE WAIT: 120 seconds
+                // First safe wait 90s (modules firing on the locked inquisitors), then poll
+                // every 5s: when locked_inquisitor is gone the target is dead → re-target.
+                // 130s backup cap so we never hang if the bracket can't be matched.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 130) {
-                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 130s.");
+                if (elapsed < 90) {
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 90s.");
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Vengeance] 130s wait complete — re-targeting inquisitor.");
-                cs.setCombatStep(8);
+                long sincePoll = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
+                if (sincePoll < 5) return;
+                cs.setCombatPollStart(LocalDateTime.now());
+                String lockedI7 = missionProcessor.findTemplate("locked_inquisitor");
+                if (lockedI7 == null) {
+                    log(clientId, "COMBAT[Vengeance] Step 7: inquisitor dead/gone — re-targeting.");
+                    cs.setCombatStep(8);
+                } else if (elapsed >= 130) {
+                    log(clientId, "COMBAT[Vengeance] Step 7: 130s backup cap reached — re-targeting.");
+                    cs.setCombatStep(8);
+                } else {
+                    log(clientId, "COMBAT[Vengeance] Step 7: inquisitor still alive (" + elapsed + "s) — keep shooting.");
+                }
                 break;
             }
             case 8: {
@@ -1255,14 +1365,15 @@ public class ClientManager {
             case 15: {
                 String lockedV = missionProcessor.findTemplate("locked_vengeance");
                 if (lockedV != null) {
-                    log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance confirmed — click + press 'ad'.");
+                    log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance confirmed — click + overload (shift+a, a, d).");
                     missionProcessor.clickTemplate("locked_vengeance");
-                    missionProcessor.keyPress("ad");
-                    cs.setCombatWaitStart(LocalDateTime.now());
+                    missionProcessor.shiftKeyPress("a");
+                    missionProcessor.keyPress("a");
+                    missionProcessor.keyPress("d"); // activate 'd' after overloading 'a'
                     cs.setCombatStep(16);
                     ClientWindowInfo other = findOtherClient(clientId);
                     if (other != null) {
-                        log(clientId, "COMBAT[Vengeance] 30s safe wait — switching to: " + other.getClientId());
+                        log(clientId, "COMBAT[Vengeance] shooting vengeance — switching to: " + other.getClientId());
                         bringToForeground(other);
                     }
                 } else {
@@ -1272,18 +1383,6 @@ public class ClientManager {
                 break;
             }
             case 16: {
-                // SAFE WAIT: 30 seconds
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 30) {
-                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 30s.");
-                    return;
-                }
-                log(clientId, "COMBAT[Vengeance] 30s wait complete — waiting for mission complete.");
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(17);
-                break;
-            }
-            case 17: {
                 pollSetDestinationOrCapsule(clientId, cs, "Vengeance", true);
                 break;
             }
@@ -1303,13 +1402,13 @@ public class ClientManager {
      *   3  → Check 'orbiting' — if not found, repeat (loop back to 2)
      *   4  → Keypress 's' (activate module)
      *   5  → SAFE WAIT 25s
-     *   6  → Ctrl+click-all 'target_navitas' + 'target_enyo' (lock all)
-     *   7  → WAIT 3s → click 'locked_navitas' (select)
+     *   6  → Ctrl+click ONE 'target_navitas' (lock one)
+     *   7  → WAIT 3s → confirm 'locked_navitas' — if not found (out of range), relock (loop back to 6); if found, select
      *   8  → Press 'adc', click 'locked_navitas' (verify)
-     *   9  → SAFE WAIT 120s
+     *   9  → SAFE WAIT 90s, then poll every 5s for 'locked_navitas' gone (dead) → select enyo; 120s backup cap
      *   10 → Ctrl+click 'target_enyo' (lock)
-     *   11 → WAIT 3s → check 'locked_enyo' — if not found, retry (loop back to 10); if found, click + press 'ad'
-     *   12 → SAFE WAIT 60s
+     *   11 → WAIT 3s → check 'locked_enyo' — if not found, retry (loop back to 10); if found, click + overload (shift+a, a, d)
+     *   12 → SAFE WAIT for set_destination (mission complete → RETURNING)
      *   13 → SAFE WAIT for set_destination (mission complete → RETURNING)
      */
     private void handleCombatEnyo(String clientId, ClientState cs) {
@@ -1371,15 +1470,15 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click-all target_navitas + target_enyo (lock all).");
-                missionProcessor.ctrlClickAllTemplate("target_navitas");
-                missionProcessor.ctrlClickTemplate("target_enyo");
+                log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click ONE target_navitas (lock one).");
+                missionProcessor.ctrlClickTemplate("target_navitas");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
             }
             case 7: {
-                // WAIT 3s for lock animations, then check locked_navitas
+                // WAIT 3s for lock animation, then confirm locked_navitas.
+                // If absent the target is out of range / not yet locked — relock and retry.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 3) return;
                 String lockedN = missionProcessor.findTemplate("locked_navitas");
@@ -1388,7 +1487,7 @@ public class ClientManager {
                     missionProcessor.clickTemplate("locked_navitas");
                     cs.setCombatStep(8);
                 } else {
-                    log(clientId, "COMBAT[Enyo] Step 7: locked_navitas NOT found — retrying lock.");
+                    log(clientId, "COMBAT[Enyo] Step 7: locked_navitas NOT found (out of range) — relocking one.");
                     cs.setCombatStep(6);
                 }
                 break;
@@ -1398,27 +1497,41 @@ public class ClientManager {
                 missionProcessor.keyPress("adc");
                 missionProcessor.clickTemplate("locked_navitas");
                 cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatPollStart(LocalDateTime.now());
                 cs.setCombatStep(9);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Enyo] 100s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Enyo] 90s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 9: {
-                // SAFE WAIT: 120 seconds
+                // First safe wait 90s (modules firing on the locked navitas), then poll
+                // every 5s: when locked_navitas is gone the target is dead → select enyo.
+                // 120s backup cap so we never hang if the bracket can't be matched.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 120) {
-                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 120s.");
+                if (elapsed < 90) {
+                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 90s.");
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Enyo] 120s wait complete — selecting enyo.");
-                cs.setCombatStep(10);
+                long sincePoll = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
+                if (sincePoll < 5) return;
+                cs.setCombatPollStart(LocalDateTime.now());
+                String lockedN = missionProcessor.findTemplate("locked_navitas");
+                if (lockedN == null) {
+                    log(clientId, "COMBAT[Enyo] Step 9: navitas dead/gone — selecting enyo.");
+                    cs.setCombatStep(10);
+                } else if (elapsed >= 120) {
+                    log(clientId, "COMBAT[Enyo] Step 9: 120s backup cap reached — selecting enyo.");
+                    cs.setCombatStep(10);
+                } else {
+                    log(clientId, "COMBAT[Enyo] Step 9: navitas still alive (" + elapsed + "s) — keep shooting.");
+                }
                 break;
             }
             case 10: {
@@ -1431,14 +1544,15 @@ public class ClientManager {
             case 11: {
                 String lockedE = missionProcessor.findTemplate("locked_enyo");
                 if (lockedE != null) {
-                    log(clientId, "COMBAT[Enyo] Step 11: locked_enyo confirmed — click + press 'ad'.");
+                    log(clientId, "COMBAT[Enyo] Step 11: locked_enyo confirmed — click + overload (shift+a, a, d).");
                     missionProcessor.clickTemplate("locked_enyo");
-                    missionProcessor.keyPress("ad");
-                    cs.setCombatWaitStart(LocalDateTime.now());
+                    missionProcessor.shiftKeyPress("a");
+                    missionProcessor.keyPress("a");
+                    missionProcessor.keyPress("d"); // activate 'd' after overloading 'a'
                     cs.setCombatStep(12);
                     ClientWindowInfo other = findOtherClient(clientId);
                     if (other != null) {
-                        log(clientId, "COMBAT[Enyo] 60s safe wait — switching to: " + other.getClientId());
+                        log(clientId, "COMBAT[Enyo] shooting enyo — switching to: " + other.getClientId());
                         bringToForeground(other);
                     }
                 } else {
@@ -1448,22 +1562,6 @@ public class ClientManager {
                 break;
             }
             case 12: {
-                // SAFE WAIT: 60 seconds
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 60) {
-                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 60s.");
-                    if (elapsed > 0 && elapsed % 10 == 0) {
-                        ClientWindowInfo other = findOtherClient(clientId);
-                        if (other != null) bringToForeground(other);
-                    }
-                    return;
-                }
-                log(clientId, "COMBAT[Enyo] 60s wait complete — waiting for mission complete.");
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(13);
-                break;
-            }
-            case 13: {
                 pollSetDestinationOrCapsule(clientId, cs, "Enyo", true);
                 break;
             }
@@ -1482,12 +1580,12 @@ public class ClientManager {
      *   2  → Click 'target_hawk' + click 'orbit' (orbit)
      *   3  → Check 'orbiting' — if not found, repeat (loop back to 2)
      *   4  → SAFE WAIT 25s
-     *   5  → Ctrl+click-all 'target_hawk' + 'target_bantam' (lock all)
-     *   6  → WAIT 3s → click 'locked_bantam' (select)
+     *   5  → Ctrl+click ONE 'target_bantam' (lock one)
+     *   6  → WAIT 3s → confirm 'locked_bantam' — if not found (out of range), relock (loop back to 5); if found, select
      *   7  → Press 'adc', click 'locked_bantam' (verify)
-     *   8  → SAFE WAIT 90s
+     *   8  → SAFE WAIT 60s, then poll every 5s for 'locked_bantam' gone (dead) → switch to hawk; 90s backup cap
      *   9  → Ctrl+click 'target_hawk' (lock)
-     *   10 → WAIT 3s → check 'locked_hawk' — if not found, retry (loop back to 9); if found, click + press 'ad'
+     *   10 → WAIT 3s → check 'locked_hawk' — if not found, retry (loop back to 9); if found, click + overload (shift+a, a, d)
      *   11 → SAFE WAIT for set_destination (mission complete → RETURNING)
      */
     private void handleCombatHawk(String clientId, ClientState cs) {
@@ -1544,15 +1642,15 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                log(clientId, "COMBAT[Hawk] Step 5: Ctrl+click-all target_hawk + target_bantam (lock all).");
-                missionProcessor.ctrlClickAllTemplate("target_hawk");
-                missionProcessor.ctrlClickAllTemplate("target_bantam");
+                log(clientId, "COMBAT[Hawk] Step 5: Ctrl+click ONE target_bantam (lock one).");
+                missionProcessor.ctrlClickTemplate("target_bantam");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(6);
                 break;
             }
             case 6: {
-                // WAIT 3s for lock animations, then check locked_bantam
+                // WAIT 3s for lock animation, then confirm locked_bantam.
+                // If absent the target is out of range / not yet locked — relock and retry.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 3) return;
                 String lockedB = missionProcessor.findTemplate("locked_bantam");
@@ -1561,7 +1659,7 @@ public class ClientManager {
                     missionProcessor.clickTemplate("locked_bantam");
                     cs.setCombatStep(7);
                 } else {
-                    log(clientId, "COMBAT[Hawk] Step 6: locked_bantam NOT found — retrying lock.");
+                    log(clientId, "COMBAT[Hawk] Step 6: locked_bantam NOT found (out of range) — relocking one.");
                     cs.setCombatStep(5);
                 }
                 break;
@@ -1571,27 +1669,41 @@ public class ClientManager {
                 missionProcessor.keyPress("adc");
                 missionProcessor.clickTemplate("locked_bantam");
                 cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatPollStart(LocalDateTime.now());
                 cs.setCombatStep(8);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Hawk] 120s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Hawk] 60s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 8: {
-                // SAFE WAIT: 90 seconds
+                // First safe wait 60s (modules firing on the locked bantam), then poll
+                // every 5s: when locked_bantam is gone the target is dead → switch to hawk.
+                // 90s backup cap so we never hang if the bracket can't be matched.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 90) {
-                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 90s.");
+                if (elapsed < 60) {
+                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 60s.");
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Hawk] 90s wait complete — selecting hawk.");
-                cs.setCombatStep(9);
+                long sincePoll = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
+                if (sincePoll < 5) return;
+                cs.setCombatPollStart(LocalDateTime.now());
+                String lockedB = missionProcessor.findTemplate("locked_bantam");
+                if (lockedB == null) {
+                    log(clientId, "COMBAT[Hawk] Step 8: bantam dead/gone — switching to hawk.");
+                    cs.setCombatStep(9);
+                } else if (elapsed >= 90) {
+                    log(clientId, "COMBAT[Hawk] Step 8: 90s backup cap reached — switching to hawk.");
+                    cs.setCombatStep(9);
+                } else {
+                    log(clientId, "COMBAT[Hawk] Step 8: bantam still alive (" + elapsed + "s) — keep shooting.");
+                }
                 break;
             }
             case 9: {
@@ -1604,9 +1716,11 @@ public class ClientManager {
             case 10: {
                 String lockedH = missionProcessor.findTemplate("locked_hawk");
                 if (lockedH != null) {
-                    log(clientId, "COMBAT[Hawk] Step 10: locked_hawk confirmed — click + press 'ad'.");
+                    log(clientId, "COMBAT[Hawk] Step 10: locked_hawk confirmed — click + overload (shift+a, a, d).");
                     missionProcessor.clickTemplate("locked_hawk");
-                    missionProcessor.keyPress("ad");
+                    missionProcessor.shiftKeyPress("a");
+                    missionProcessor.keyPress("a");
+                    missionProcessor.keyPress("d"); // activate 'd' after overloading 'a'
                     cs.setCombatWaitStart(LocalDateTime.now());
                     cs.setCombatStep(11);
                     ClientWindowInfo other = findOtherClient(clientId);
@@ -1637,15 +1751,15 @@ public class ClientManager {
      *   0  → Shift+asdx (overload modules)
      *   1  → Ctrl+click 'target_sansha' (lock) + double-click (select) + press 's'
      *   2  → press 'adxc' (activate modules)
-     *   3  → right-click target_sansha → click range (keep at range)
+     *   3  → WAIT 4s → right-click target_sansha → click range (keep at range)
      *   4  → Check 'keep_at_range' — if not found, repeat (loop back to 3)
      *   5  → WAIT 15s
      *   6  → Shift+dsc (stop overloading afterburner + web + nos)
      *   7  → Alt+F1 (burst cap recharge)
      *   8  → WAIT 1s
      *   9  → Alt+F1 (deactivate cap module)
-     *  10  → WAIT for set_destination/dock (capsule check after 30s)
-     *  11  → press 'xc' (deactivate modules) + handle dock/returning
+     *  10  → WAIT for set_destination/dock; 60s hardcap (pod check) → step 11
+     *  11  → press 'xc' (deactivate modules) + handle dock/returning (RETURNING clicks set_destination coords)
      */
     private void handleCombatSansha(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -1668,10 +1782,17 @@ public class ClientManager {
                 missionProcessor.doubleClickTemplate("target_sansha");
                 missionProcessor.ctrlClickTemplate("target_sansha");
                 missionProcessor.keyPress("adxc");
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
             case 3: {
+                // WAIT 4s before keeping at range (like Worm) so modules apply first.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 4) {
+                    log(clientId, "COMBAT[Sansha] wait before range: " + elapsed + "s / 4s.");
+                    return;
+                }
                 log(clientId, "COMBAT[Sansha] Step 3: right-click target_sansha → click range.");
                 missionProcessor.rightClickTemplate("target_sansha");
                 missionProcessor.clickTemplate("range");
@@ -1740,10 +1861,17 @@ public class ClientManager {
 
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-                // Pod check after 80s (right-click ship → no "Eject" menu = podded)
-                if (elapsed >= 80 && missionProcessor.isFlyingPod()) {
-                    handlePodDeath(clientId, true);
-                    return;
+                // 60s hardcap: no set_destination/dock seen — pod check, then force
+                // deactivate + return (step 11 → RETURNING clicks the set_destination
+                // coords fallback).
+                if (elapsed >= 60) {
+                    if (missionProcessor.isFlyingPod()) {
+                        handlePodDeath(clientId, true);
+                        return;
+                    }
+                    log(clientId, "COMBAT[Sansha] 60s hardcap — no completion, forcing deactivate + return.");
+                    cs.setCombatStep(11);
+                    break;
                 }
 
                 log(clientId, "COMBAT[Sansha] waiting for mission complete (" + elapsed + "s)...");
@@ -1781,11 +1909,9 @@ public class ClientManager {
      *   3  → WAIT 15s
      *   4  → press 's' (cycle web)
      *   5  → Ctrl+click target_hive/hive1/hive2/hive3 (lock) + press 'a' + (3s) Ctrl+Space (stop ship) + switch client
-     *   6  → SAFE WAIT 45s
-     *   7  → click set_destination + attempt stargate jump
-     *   8  → poll warp_active / jamed / capsule
-     *   9  → (jamed) double-click stargate + press 's', WAIT 10s
-     *   10 → (jamed) try jump stargate → loop back to 8
+     *   6  → SAFE WAIT 55s
+     *   7  → await set_destination/dock (→ RETURNING/WARPING); 120s backstop → RETURNING; pod check; if jamed → step 8
+     *   8  → (jamed) burn away (double-click stargate + 's'), WAIT 5s → back to 7
      */
     private void handleCombatInfested(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -1856,75 +1982,86 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                // SAFE WAIT: 45 seconds
+                // SAFE WAIT: 55 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 45) {
-                    log(clientId, "COMBAT[Infested] safe wait: " + elapsed + "s / 45s.");
+                if (elapsed < 55) {
+                    log(clientId, "COMBAT[Infested] safe wait: " + elapsed + "s / 55s.");
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Infested] 45s wait complete — clicking set_destination and jumping.");
+                log(clientId, "COMBAT[Infested] 55s wait complete — awaiting set_destination.");
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
             }
             case 7: {
-                // Click set_destination + attempt first stargate jump
-                log(clientId, "COMBAT[Infested] Step 7: click set_destination + jump stargate.");
-                missionProcessor.clickSetDestination();
-                new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(8);
-                break;
-            }
-            case 8: {
-                // Poll warp_active / jamed / capsule
-                if (missionProcessor.isWarpActive()) {
-                    log(clientId, "COMBAT[Infested] warp_active detected — escaped!");
+                // Await completion like other combats: set_destination/dock → leave.
+                // Infested also jams your warp, so if 'jamed' shows, burn away (step 8).
+                String completed = missionProcessor.detectCombatComplete();
+                if ("dock".equals(completed)) {
+                    log(clientId, "COMBAT[Infested] dock detected — same system, docking.");
+                    missionProcessor.clickTemplate("dock");
+                    cs.setDockingToStation(true);
+                    cs.setJamCheckOnWarp(true); // escape warp may be jammed
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
                     cs.setWarpStartTime(LocalDateTime.now());
-                    cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     return;
                 }
-
-                long elapsed8 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-
-                if (elapsed8 >= 120 && missionProcessor.isFlyingPod()) {
-                    handlePodDeath(clientId, true);
+                if (completed != null) { // set_destination
+                    log(clientId, "COMBAT[Infested] set_destination detected — mission complete, returning.");
+                    cs.setJamCheckOnWarp(true); // escape warp may be jammed
+                    cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
+                    stateManager.setState(clientId, ClientState.State.RETURNING);
                     return;
                 }
 
-                // Check for warp jam — need to burn away and retry
+                long elapsed7 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+
+                // Backstop: after 120s with no set_destination prompt it may never
+                // appear (or we drifted out without it). Check for a pod first,
+                // otherwise go to RETURNING — which clicks set_destination (template,
+                // or the hardcoded coords as fallback) so the route home is always set.
+                if (elapsed7 >= 120) {
+                    if (missionProcessor.isFlyingPod()) {
+                        handlePodDeath(clientId, true);
+                        return;
+                    }
+                    log(clientId, "COMBAT[Infested] no set_destination after 120s — returning (set_destination will be clicked).");
+                    cs.setJamCheckOnWarp(true); // escape warp may be jammed
+                    cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
+                    stateManager.setState(clientId, ClientState.State.RETURNING);
+                    return;
+                }
+
+                // Warp jam — burn toward the stargate to break it, then wait (step 8).
                 if (missionProcessor.findTemplate("jamed") != null) {
-                    log(clientId, "COMBAT[Infested] JAMED — double-click stargate + press 's' to escape.");
+                    log(clientId, "COMBAT[Infested] JAMED — double-click stargate + press 's' to burn away.");
                     missionProcessor.doubleClickTemplate("stargate");
                     missionProcessor.keyPress("s");
                     cs.setCombatWaitStart(LocalDateTime.now());
-                    cs.setCombatStep(9);
+                    cs.setCombatStep(8);
                     break;
                 }
 
-                log(clientId, "COMBAT[Infested] waiting for warp (" + elapsed8 + "s)...");
+                log(clientId, "COMBAT[Infested] awaiting set_destination (" + elapsed7 + "s)...");
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) bringToForeground(other);
                 break;
             }
-            case 9: {
-                // WAIT 5s after being jamed — let prop mod burn away
-                long elapsed9 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed9 < 5) {
-                    log(clientId, "COMBAT[Infested] jamed escape wait: " + elapsed9 + "s / 5s.");
+            case 8: {
+                // After burning away from a jam, wait 5s then resume awaiting completion.
+                long elapsed8 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed8 < 5) {
+                    log(clientId, "COMBAT[Infested] jam burn wait: " + elapsed8 + "s / 5s.");
                     return;
                 }
-                log(clientId, "COMBAT[Infested] 5s escape wait complete — attempting stargate jump.");
-                cs.setCombatStep(10);
-                break;
-            }
-            case 10: {
-                // Retry jump, then go back to polling
-                new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
+                log(clientId, "COMBAT[Infested] jam burn complete — resuming await.");
                 cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(8);
+                cs.setCombatStep(7);
                 break;
             }
             default:
@@ -2002,8 +2139,8 @@ public class ClientManager {
      *   3 → press 'asd', click target_angel
      *   4 → Right-click target_angel + click range (keep at range)
      *   5 → check keep_at_range — if not found, repeat (loop back to 4)
-     *   6 → WAIT for set_destination (mission complete)
-     *   7 → press 'xc' (deactivate modules) → RETURNING
+     *   6 → WAIT for set_destination; 60s hardcap (pod check) → step 7
+     *   7 → press 'xc' (deactivate modules) → RETURNING (clicks set_destination coords)
      */
     private void handleCombatAngel(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -2069,10 +2206,17 @@ public class ClientManager {
 
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
 
-                // Pod check after 90s (right-click ship → no "Eject" menu = podded)
-                if (elapsed >= 90 && missionProcessor.isFlyingPod()) {
-                    handlePodDeath(clientId, true);
-                    return;
+                // 60s hardcap: no set_destination/dock seen — pod check, then force
+                // deactivate + return (step 7 → RETURNING clicks the set_destination
+                // coords fallback).
+                if (elapsed >= 60) {
+                    if (missionProcessor.isFlyingPod()) {
+                        handlePodDeath(clientId, true);
+                        return;
+                    }
+                    log(clientId, "COMBAT[Angel] 60s hardcap — no completion, forcing deactivate + return.");
+                    cs.setCombatStep(7);
+                    break;
                 }
 
                 log(clientId, "COMBAT[Angel] waiting for mission complete (" + elapsed + "s)...");
@@ -2233,7 +2377,8 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleReturning(String clientId, ClientWindowInfo window) {
-        missionProcessor.clickSetDestination();
+        missionProcessor.clickSetDestination(280, 568); // returning/combat position
+        stateManager.getState(clientId).setVerifySetDest(true); // re-check after first jump
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
@@ -2244,6 +2389,18 @@ public class ClientManager {
 
     private void handleCompleting(String clientId) {
         if (missionProcessor.detectCompletingUI() == null) {
+            // Stuck waiting for the agent icon = we may never have docked. After 60s,
+            // if the dock button is visible, click it (twice, like warp-to-location) to
+            // dock. Throttled to once per 60s so it doesn't spam while warping to dock.
+            ClientState cs = stateManager.getState(clientId);
+            long waiting   = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
+            long sinceDock = Duration.between(cs.getLastCompletingDock(), LocalDateTime.now()).getSeconds();
+            if (waiting >= 60 && sinceDock >= 60 && missionProcessor.isDockVisible()) {
+                log(clientId, "COMPLETING: 60s without agent icon — dock visible, clicking dock (twice) in case we never docked.");
+                missionProcessor.clickDockTwice();
+                cs.setLastCompletingDock(LocalDateTime.now());
+                return;
+            }
             log(clientId, "COMPLETING: agent icon not visible yet — waiting.");
             try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             return;
@@ -2333,6 +2490,27 @@ public class ClientManager {
 
         boolean firstCheck = cs.getLastWarpCheck().isBefore(LocalDateTime.MIN.plusSeconds(1));
 
+        // --- Infested escape jam check ---
+        // For the Infested return warp, the rats can jam you as you initiate the warp.
+        // Watch for 'jamed' over the first 3s instead of the normal bubble/switch; if
+        // jammed, burn away (double-click stargate + 's') and retry the jump.
+        if (cs.isJamCheckOnWarp()) {
+            if (missionProcessor.findTemplate("jamed") != null) {
+                log(clientId, "WARPING[INFESTED]: JAMED — burn away (double-click stargate + 's') + retry jump.");
+                missionProcessor.doubleClickTemplate("stargate");
+                missionProcessor.keyPress("s");
+                try { Thread.sleep(5000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
+                cs.setWarpStartTime(LocalDateTime.now()); // restart warp + jam window
+                return;
+            }
+            if (elapsed < 3) {
+                return; // keep watching for a jam during the 3s window
+            }
+            cs.setJamCheckOnWarp(false);
+            log(clientId, "WARPING[INFESTED]: no jam after 3s — resuming normal warp.");
+        }
+
         // Wait 4s for the warp/jump action to complete before checking for bubble.
         if (elapsed < 4) {
             return;
@@ -2343,34 +2521,32 @@ public class ClientManager {
         if (bubbleStep > 0) {
             switch (bubbleStep) {
                 case 1: {
-                    // Step 1: shift+s (stop), double-click stargate, press s (approach)
+                    // Step 1: shift+s (stop), double-click stargate, press s (approach).
                     log(clientId, "WARPING[BUBBLE] step 1: shift+s, double-click stargate, press s.");
                     missionProcessor.shiftKeyPress("s");
                     missionProcessor.doubleClickTemplate("stargate");
+                    try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                     missionProcessor.keyPress("s");
                     cs.setBubbleEscapeStart(LocalDateTime.now());
                     cs.setBubbleEscapeStep(2);
                     return;
                 }
                 case 2: {
-                    // Step 2: wait 5s
+                    // Step 2: wait 6s
                     long bubbleElapsed = Duration.between(cs.getBubbleEscapeStart(), LocalDateTime.now()).getSeconds();
-                    if (bubbleElapsed < 5) {
-                        log(clientId, "WARPING[BUBBLE] step 2: waiting (" + bubbleElapsed + "s / 5s).");
+                    if (bubbleElapsed < 6) {
+                        log(clientId, "WARPING[BUBBLE] step 2: waiting (" + bubbleElapsed + "s / 6s).");
                         return;
                     }
-                    // Check for pod death while in bubble
+                    // Check for pod death while in bubble. No agent_icon (respawned-
+                    // at-station) check here — if podded we sit through the pod
+                    // animation anyway, so it can't have respawned mid-warp.
                     if (missionProcessor.isFlyingPod()) {
                         log(clientId, "WARPING[BUBBLE]: capsule detected — pod death.");
-                        handlePodDeath(clientId, true);
+                        handlePodDeath(clientId, true, true); // bubble-related → eligible for cooldown
                         return;
                     }
-                    if (missionProcessor.detectCompletingUI() != null) {
-                        log(clientId, "WARPING[BUBBLE]: agent_icon visible — respawned at station.");
-                        handlePodDeath(clientId, false);
-                        return;
-                    }
-                    log(clientId, "WARPING[BUBBLE] step 2: 5s wait complete — attempting jump.");
+                    log(clientId, "WARPING[BUBBLE] step 2: 6s wait complete — attempting jump.");
                     cs.setBubbleEscapeStep(3);
                     break;
                 }

@@ -131,6 +131,7 @@ TEMPLATE_FILES = {
     "warp_bubble2": "warp_bubble2",  # warp bubble variant — bubble camp indicator
     "bubble_text": "bubble_text",    # warp disruption bubble text — checked on warp/jump initiation
     "locations": "locations",  # locations submenu in right-click context menu (hover target)
+    "general": "general",      # 'General' overview tab — clicked periodically in space to reset the preset
     # Safe-spot & system-detection templates for enemy evasion
     "jcv_spot": "jcv_spot",      # JCV safe spot bookmark in Locations submenu
     "kly_spot": "kly_spot",      # KLY safe spot bookmark in Locations submenu

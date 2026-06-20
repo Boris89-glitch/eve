@@ -97,11 +97,20 @@ public class ClientState {
     /** Timestamp when the current combat safe-wait began — used to measure elapsed wait time. */
     private LocalDateTime combatWaitStart = LocalDateTime.MIN;
 
+    /** Timestamp of the last dead/gone poll — throttles the every-5s "is the small target gone" check. */
+    private LocalDateTime combatPollStart = LocalDateTime.MIN;
+
     /** True once the gate warp has been verified and landed — combat can begin after a short wait. */
     private boolean combatWarpLanded = false;
 
 /** True when docking to home station after combat — WARPING should transition to COMPLETING. */
     private boolean dockingToStation = false;
+
+    /** True for the Infested escape warp — WARPING watches for a jam (3s) instead of the bubble switch. */
+    private boolean jamCheckOnWarp = false;
+
+    /** True after set_destination was clicked — verify it's gone after the first jump (else re-click). */
+    private boolean verifySetDest = false;
 
     /** When the pod-death cooldown expires for this client. */
     private LocalDateTime podCooldownEnd = LocalDateTime.MIN;
@@ -123,6 +132,9 @@ public class ClientState {
 
     /** Last time the WARPING test pod check ran — throttles the eject-menu probe. */
     private LocalDateTime lastPodCheck = LocalDateTime.MIN;
+
+    /** Last time COMPLETING clicked the dock fallback — throttles re-clicks while waiting to dock. */
+    private LocalDateTime lastCompletingDock = LocalDateTime.MIN;
 
     // -----------------------------------------------------------------------
 
@@ -169,6 +181,7 @@ public class ClientState {
         if (state == State.IN_COMBAT) {
             this.combatStep = 0;
             this.combatWaitStart = LocalDateTime.MIN;
+            this.combatPollStart = LocalDateTime.MIN;
             this.combatWarpLanded = false;
         }
     }
@@ -219,6 +232,9 @@ public class ClientState {
     public LocalDateTime getCombatWaitStart()                { return combatWaitStart; }
     public void          setCombatWaitStart(LocalDateTime t) { this.combatWaitStart = t; }
 
+    public LocalDateTime getCombatPollStart()                { return combatPollStart; }
+    public void          setCombatPollStart(LocalDateTime t) { this.combatPollStart = t; }
+
     public boolean isCombatWarpLanded()              { return combatWarpLanded; }
     public void    setCombatWarpLanded(boolean v)    { this.combatWarpLanded = v; }
 
@@ -251,6 +267,15 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public LocalDateTime getLastPodCheck()                { return lastPodCheck; }
     public void          setLastPodCheck(LocalDateTime t) { this.lastPodCheck = t; }
+
+    public LocalDateTime getLastCompletingDock()                { return lastCompletingDock; }
+    public void          setLastCompletingDock(LocalDateTime t) { this.lastCompletingDock = t; }
+
+    public boolean isJamCheckOnWarp()           { return jamCheckOnWarp; }
+    public void    setJamCheckOnWarp(boolean v) { this.jamCheckOnWarp = v; }
+
+    public boolean isVerifySetDest()           { return verifySetDest; }
+    public void    setVerifySetDest(boolean v) { this.verifySetDest = v; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

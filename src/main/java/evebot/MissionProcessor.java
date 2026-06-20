@@ -398,6 +398,12 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    public void clickPos(int x, int y) {
+        log("Left-clicking at (" + x + "," + y + ")");
+        ocrBridge.clickPos(x, y);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void keyPress(String keys) {
         log("Pressing keys: " + keys);
         ocrBridge.keyPress(keys);
@@ -428,23 +434,19 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
-    public void clickSetDestination() {
+    /**
+     * Click Set Destination. Prefers the template match; if not found, falls back to
+     * the supplied coordinates — which differ by context (the button sits lower when
+     * undocking vs. returning/combat), so the caller passes the right ones.
+     */
+    public void clickSetDestination(int fallbackX, int fallbackY) {
         int[] pos = ocrBridge.findTemplatePos("set_destination");
         if (pos != null) {
             log("Clicking SET DESTINATION (template) at (" + pos[0] + "," + pos[1] + ")");
             ocrBridge.clickPos(pos[0], pos[1]);
         } else {
-            log("set_destination template not found — using hardcoded pos (280,568).");
-            ocrBridge.clickPos(280, 568);
-            // alt+J fallback (right-click agent → hover lara_mesi → click set destination)
-            // disabled in favour of the hardcoded coordinates above:
-            // ocrBridge.altKeyPress("j");          // open opportunities screen
-            // sleep(800);
-            // ocrBridge.rightClickTemplate("agent_portrait");
-            // sleep(800);
-            // ocrBridge.hoverTemplate("agent_lara_mesi");
-            // sleep(800);
-            // ocrBridge.clickTemplate("agent_set_destination");
+            log("set_destination template not found — using hardcoded pos (" + fallbackX + "," + fallbackY + ").");
+            ocrBridge.clickPos(fallbackX, fallbackY);
         }
         sleep(POST_CLICK_DELAY_MS);
     }
@@ -461,6 +463,20 @@ public class MissionProcessor {
         log("Clicking DOCK (template)");
         ocrBridge.clickTemplate("dock");
         sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** Click DOCK twice (1s apart) — same double-click pattern as warp-to-location. */
+    public void clickDockTwice() {
+        log("Clicking DOCK (template, twice)");
+        ocrBridge.clickTemplate("dock");
+        sleep(1000);
+        ocrBridge.clickTemplate("dock");
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** Returns true if the dock button/template is currently visible. */
+    public boolean isDockVisible() {
+        return ocrBridge.findAnyTemplate("dock") != null;
     }
 
     /** Returns "dock_safe" if the safe dock button is visible, null otherwise. */
@@ -493,7 +509,7 @@ public class MissionProcessor {
      * Insta-dock sequence for when enemies are in local:
      * right-click empty space → hover Locations → click Dock → Ctrl+S (autopilot).
      */
-    public void instaDock() {
+    public boolean instaDock() {
         log("INSTA-DOCK: enemy in local — using safe dock sequence");
         ocrBridge.rightClickPos(960, 540);   // right-click centre of space view
         sleep(800);
@@ -501,9 +517,16 @@ public class MissionProcessor {
         sleep(800);
         ocrBridge.clickTemplate("dock_safe");  // click Dock from submenu
         sleep(POST_CLICK_DELAY_MS);
-        // Delay before autopilot so it doesn't override the bubble warning text.
+        // Let the bubble warning render, then check BEFORE autopilot: autopilot can't
+        // warp through a bubble, so if we're bubbled, skip Ctrl+S and report it so the
+        // bubble gets escaped first instead of engaging autopilot for nothing.
         sleep(2000);
+        if (ocrBridge.findAnyTemplate("bubble_text") != null) {
+            log("INSTA-DOCK: bubble detected — skipping Ctrl+S autopilot (escape bubble first).");
+            return true;
+        }
         ctrlKeyPress("s");                    // autopilot to insta-dock bookmark
+        return false;
     }
 
     /**
@@ -693,8 +716,14 @@ public class MissionProcessor {
 
     /**
      * Self-destructs the capsule: right-click capsule → click destruct → click yes.
+     * Returns false (without clicking anything) if no capsule is actually on screen,
+     * so a false pod detection can't blindly fire the destruct sequence.
      */
-    public void clickDestruct() {
+    public boolean clickDestruct() {
+        if (ocrBridge.findAnyTemplate("capsule") == null) {
+            log("Self-destruct aborted — no capsule on screen (not actually podded).");
+            return false;
+        }
         log("Self-destruct: right-click capsule → destruct → yes");
         rightClickAndSelect("capsule", "destruct");
         sleep(POST_CLICK_DELAY_MS);
@@ -704,6 +733,7 @@ public class MissionProcessor {
             log("Self-destruct: 'yes' confirm button not found within 3s.");
         }
         sleep(POST_CLICK_DELAY_MS);
+        return true;
     }
 
     /** Generic left-click on any registered template. */

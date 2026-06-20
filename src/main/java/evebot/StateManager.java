@@ -62,19 +62,35 @@ public class StateManager {
         if (botRunning) printStatesSummary();
     }
 
+    /**
+     * Reset all client states — the in-place equivalent of clearing
+     * {@code config/bot_state.json} and restarting, but without pausing. Drops
+     * every client's saved state (each re-initialises at IDLE on the next tick),
+     * clears the global pod cooldown, and wipes the persisted state file. The bot
+     * keeps running, so clients immediately resume fresh from IDLE.
+     */
+    public void resetStates() {
+        states.clear();
+        podCooldownEnd = LocalDateTime.MIN;
+        saveStates();       // persist the now-empty map (clears the state file)
+        log("==============================================");
+        log("  STATES RESET ⟲ — all clients cleared (IDLE), bot " + (botRunning ? "RUNNING ▶" : "PAUSED ■"));
+        log("==============================================");
+    }
+
 
     public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
     public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }
 
     private void registerHotkey() {
         if (tryRegisterJnaHotkey()) {
-            log("[Hotkey] Ctrl+Shift+O registered (JNA).");
+            log("[Hotkey] Ctrl+Shift+O (start/pause) and Ctrl+Shift+R (reset states) registered (JNA).");
         } else {
-            log("[Hotkey] JNA unavailable — use 'toggle' command to start/pause.");
+            log("[Hotkey] JNA unavailable — use 'toggle' / 'reset' commands instead.");
         }
         // Always start the stdin command listener (override commands work regardless of JNA)
         Thread cmdThread = new Thread(() -> {
-            log("[Cmd] Commands: toggle | status | state <STATE> | phase <PHASE> | mission <TITLE> | target <TARGET> | ship <SHIP> | step <N>");
+            log("[Cmd] Commands: toggle | reset | status | state <STATE> | phase <PHASE> | mission <TITLE> | target <TARGET> | ship <SHIP> | step <N>");
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
@@ -94,19 +110,22 @@ public class StateManager {
             Object user32 = user32Class.getField("INSTANCE").get(null);
             java.lang.reflect.Method getAsyncKeyState =
                     user32Class.getMethod("GetAsyncKeyState", int.class);
-            final int VK_CONTROL = 0x11, VK_SHIFT = 0x10, VK_O = 0x4F;
+            final int VK_CONTROL = 0x11, VK_SHIFT = 0x10, VK_O = 0x4F, VK_R = 0x52;
             Thread hotkeyThread = new Thread(() -> {
-                boolean wasPressed = false;
+                boolean wasPressedO = false, wasPressedR = false;
                 while (true) {
                     try {
                         short ctrl  = (short) getAsyncKeyState.invoke(user32, VK_CONTROL);
                         short shift = (short) getAsyncKeyState.invoke(user32, VK_SHIFT);
                         short o     = (short) getAsyncKeyState.invoke(user32, VK_O);
-                        boolean pressed = (ctrl & 0x8000) != 0
-                                && (shift & 0x8000) != 0
-                                && (o    & 0x8000) != 0;
-                        if (pressed && !wasPressed) toggleBot();
-                        wasPressed = pressed;
+                        short r     = (short) getAsyncKeyState.invoke(user32, VK_R);
+                        boolean ctrlShift = (ctrl & 0x8000) != 0 && (shift & 0x8000) != 0;
+                        boolean pressedO = ctrlShift && (o & 0x8000) != 0;
+                        boolean pressedR = ctrlShift && (r & 0x8000) != 0;
+                        if (pressedO && !wasPressedO) toggleBot();
+                        if (pressedR && !wasPressedR) resetStates();
+                        wasPressedO = pressedO;
+                        wasPressedR = pressedR;
                         Thread.sleep(100);
                     } catch (Exception e) { break; }
                 }
@@ -257,6 +276,10 @@ public class StateManager {
                 toggleBot();
                 break;
 
+            case "reset":
+                resetStates();
+                break;
+
             case "status":
                 printStatesSummary();
                 break;
@@ -376,7 +399,7 @@ public class StateManager {
             }
 
             default:
-                log("[Cmd] Unknown command '" + cmd + "'. Commands: toggle | status | state | phase | mission | target | ship | step");
+                log("[Cmd] Unknown command '" + cmd + "'. Commands: toggle | reset | status | state | phase | mission | target | ship | step");
         }
     }
 
