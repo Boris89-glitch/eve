@@ -2447,13 +2447,13 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 9 seconds
+                // WAIT 11 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 9) {
-                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 9s.");
+                if (elapsed < 11) {
+                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 11s.");
                     return;
                 }
-                log(clientId, "COMBAT[Worm] 9s wait complete.");
+                log(clientId, "COMBAT[Worm] 11s wait complete.");
                 cs.setCombatStep(4);
                 break;
             }
