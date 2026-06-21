@@ -196,6 +196,7 @@ public class StateManager {
                     cs.setWarpedToLocation(dto.warpedToLocation);
                     cs.setMissionTracked(dto.missionTracked);
                     cs.setCombatStep(dto.combatStep);
+                    cs.setLastKnownStanding(dto.lastKnownStanding != null ? dto.lastKnownStanding : Double.NaN);
                     if (dto.missionTitle != null || dto.missionTarget != null || dto.missionShipTarget != null) {
                         Mission m = new Mission();
                         m.setTitle(dto.missionTitle);
@@ -222,7 +223,10 @@ public class StateManager {
             String json = gson.toJson(dtos);
             Files.write(STATE_FILE, json.getBytes(),
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
-        } catch (IOException e) {
+        } catch (Exception e) {
+            // Catch everything (not just IOException): saveStates() runs inside the
+            // scheduled monitor tick, and an uncaught throw here cancels the whole
+            // ScheduledExecutorService task — silently killing the bot.
             System.err.println("[StateManager] Failed to save state: " + e.getMessage());
         }
     }
@@ -419,6 +423,8 @@ public class StateManager {
         boolean                 warpedToLocation;
         boolean                 missionTracked;
         int                     combatStep;
+        // Boxed (nullable): NaN is not valid JSON, so "unknown standing" persists as null.
+        Double                  lastKnownStanding;
         // Mission fields (flattened — no rawText, no objective)
         String                  missionTitle;
         String                  missionTarget;
@@ -434,6 +440,8 @@ public class StateManager {
             this.warpedToLocation= cs.isWarpedToLocation();
             this.missionTracked  = cs.isMissionTracked();
             this.combatStep      = cs.getCombatStep();
+            double standing      = cs.getLastKnownStanding();
+            this.lastKnownStanding = Double.isNaN(standing) ? null : standing; // NaN → null (JSON-safe)
             Mission m = cs.getCurrentMission();
             if (m != null) {
                 this.missionTitle     = m.getTitle();

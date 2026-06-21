@@ -117,8 +117,10 @@ TEMPLATE_FILES = {
     # Capsule / self-destruct (ship destroyed recovery)
     "capsule": "capsule",
     "destruct": "destruct",
+    "yes_destruct": "yes_destruct",  # self-destruct confirmation "Yes" button
     "eject": "eject",  # "Eject" right-click menu item — only offered in a ship, absent in a pod
     "no_ship": "no_ship",  # tiny module sliver — visible in a ship, missing in a pod (cheap pod pre-check)
+    "no_ship2": "no_ship2",  # second module sliver variant — checked alongside no_ship
     # Agent interaction
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
     "agent_standings": "agent_standings",  # standings info button in agent dialog
@@ -1740,26 +1742,32 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         # No clicking in empty screen centre — that disrupts combat (the old eject
         # probe right-clicked (960,540) and false-positived on combat clutter).
         #
-        # Stage 1 (cheap, passive): the "no_ship" template is a tiny module sliver
-        # that's only on screen while in a ship. If it's still visible we're
-        # definitely in a ship — return immediately.
+        # Stage 1 (cheap, passive): the "no_ship"/"no_ship2" templates are tiny module
+        # slivers that are only on screen while in a ship. If either is still visible
+        # we're definitely in a ship — return immediately.
         #
         # Stage 2 (active): the sliver may false-miss mid-combat (e.g. an overheated
         # module changes its look). So if the sliver is MISSING, right-click the
         # ship/capsule HUD at fixed coordinates (770,860) and look for the "Eject"
         # menu item — offered only from a ship. (The "capsule" HUD template was
         # unreliable, so we probe the fixed location directly instead.) If Eject is
-        # present we're still in a ship; if it's missing, we've been podded. The menu
-        # is dismissed with a left-click (EVE never uses Escape).
-        if matcher.find("no_ship") is not None:
-            log.info("pod_check: no_ship sliver visible -> in a ship (skip eject probe)")
-            return {"ok": True, "value": False}  # module sliver visible → in a ship
+        # present we're still in a ship; if it's missing, we've been podded. After the
+        # eject check, the menu is dismissed with a left-click in empty space at screen
+        # centre — NOT on the menu itself, which could select an entry (EVE never uses
+        # Escape; menus are dismissed with a left-click in space).
+        sliver_screen = matcher.screenshot_cv()
+        for sliver in ("no_ship", "no_ship2"):
+            if matcher.find(sliver, screen=sliver_screen) is not None:
+                log.info("pod_check: '%s' sliver visible -> in a ship (skip eject probe)", sliver)
+                return {"ok": True, "value": False}  # module sliver visible → in a ship
         px, py = 770, 860
-        log.info("pod_check: no_ship sliver MISSING -> right-click (%d,%d), confirm via eject", px, py)
+        log.info("pod_check: no_ship/no_ship2 slivers MISSING -> right-click (%d,%d), confirm via eject", px, py)
         matcher._do_click(px, py, button="right", delay=0.3)
         time.sleep(0.3)
         eject_found = matcher.find("eject") is not None
-        matcher._do_click(px, py, button="left", delay=DAEMON_CLICK_DELAY)
+        # Dismiss the menu by clicking away in empty space (screen centre), with a small
+        # settle delay so the menu is gone before combat resumes.
+        matcher._do_click(960, 540, button="left", delay=0.3)
         log.info("pod_check: eject %s -> verdict %s",
                  "found (in ship)" if eject_found else "MISSING (podded)",
                  "IN SHIP" if eject_found else "PODDED")

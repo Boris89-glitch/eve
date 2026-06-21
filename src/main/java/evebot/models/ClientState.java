@@ -118,6 +118,11 @@ public class ClientState {
      *  Deliberately NOT reset by setState — it persists across all state transitions. */
     private boolean standingsLocked = false;
 
+    /** Last agent standing read at mission completion, used to gate standings-restricted
+     *  missions (recon 1, scarlet, pot-and-kettle — accepted only when standing &lt; 1).
+     *  NaN until the first completion populates it. NOT reset by setState. */
+    private double lastKnownStanding = Double.NaN;
+
 /** True when docking to home station after combat — WARPING should transition to COMPLETING. */
     private boolean dockingToStation = false;
 
@@ -318,6 +323,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public LocalDateTime getLastPodCheck()                { return lastPodCheck; }
     public void          setLastPodCheck(LocalDateTime t) { this.lastPodCheck = t; }
+
+    public double getLastKnownStanding()             { return lastKnownStanding; }
+    public void   setLastKnownStanding(double v)     { this.lastKnownStanding = v; }
 
     public LocalDateTime getLastCompletingDock()                { return lastCompletingDock; }
     public void          setLastCompletingDock(LocalDateTime t) { this.lastCompletingDock = t; }
