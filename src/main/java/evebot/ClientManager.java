@@ -144,6 +144,12 @@ public class ClientManager {
             }
 
             processClient(fg.getClientId(), fg);
+        } catch (Exception e) {
+            // Never let a tick throw out of here: monitorClients runs via
+            // scheduleAtFixedRate, which permanently cancels the task if it throws —
+            // one uncaught exception would silently kill the bot. Log and keep ticking.
+            System.err.println("[ClientManager] Tick error (continuing): " + e);
+            e.printStackTrace();
         } finally {
             monitorRunning.set(false);
         }
@@ -154,6 +160,11 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void processClient(String clientId, ClientWindowInfo window) {
+        // Respect pause on every entry, not just at the monitorClients tick gate. Some
+        // paths (the pod-respawn driver loop) call processClient repeatedly within a
+        // single tick, so a pause that lands mid-loop must take effect here too.
+        if (!stateManager.isBotRunning()) return;
+
         // Parked for the session (agent refused missions — standing too low): do no work,
         // just hand the foreground to the other client so it can keep running. Stays parked
         // until the bot is restarted.
@@ -300,6 +311,13 @@ public class ClientManager {
             ClientWindowInfo other = findOtherClient(clientId);
             LocalDateTime respawnEnd = LocalDateTime.now().plusSeconds(120);
             while (LocalDateTime.now().isBefore(respawnEnd)) {
+                // Honor a pause that lands mid-respawn: this loop runs inside one tick, so
+                // it's already past monitorClients' isBotRunning gate. Without this check it
+                // would keep driving the other client for the full ~120s, ignoring the pause.
+                if (!stateManager.isBotRunning()) {
+                    log(clientId, "Bot paused during self-destruct respawn — stopping respawn driver.");
+                    break;
+                }
                 if (other != null) {
                     bringToForeground(other);
                     processClient(other.getClientId(), other);
@@ -736,7 +754,7 @@ public class ClientManager {
         // directly with the full rule set (rare — most offers take the fast path).
         Mission existing = cs.getCurrentMission();
         if (existing != null) {
-            applyDecision(clientId, existing, missionConfig.evaluate(existing));
+            applyDecision(clientId, existing, missionConfig.evaluate(existing, cs.getLastKnownStanding()));
             return;
         }
 
@@ -746,12 +764,23 @@ public class ClientManager {
         String missionTemplate = missionProcessor.classifyMissionOffer(getMissionAreaForClient(clientId));
 
         if (missionTemplate == null) {
-            // No known wanted-mission template visible. Decline immediately if an
-            // offer is actually on screen; otherwise the dialog isn't up yet.
+            // No known wanted-mission template visible. Some wanted missions have no
+            // dialog template and are identified by title only (e.g. Scarlet, Pot and
+            // Kettle, accepted only when agent standing < 1). OCR the offer and run it
+            // through the no-template rule set: standings-gated title rules get a chance,
+            // everything else still declines (fast-path behavior preserved).
             if (missionProcessor.detectDialog() == MissionProcessor.DialogState.OFFER) {
-                System.out.println(">>> [" + clientId + "] DECLINE — no known mission template (unwanted)");
-                missionProcessor.clickDeclineButton();
-                stateManager.setState(clientId, ClientState.State.DECLINING);
+                Mission noTplMission = missionProcessor.readMission(getMissionAreaForClient(clientId));
+                if (noTplMission == null) {
+                    System.out.println(">>> [" + clientId + "] DECLINE — no mission template, OCR failed (unwanted)");
+                    missionProcessor.clickDeclineButton();
+                    stateManager.setState(clientId, ClientState.State.DECLINING);
+                    return;
+                }
+                cs.setCurrentMission(noTplMission);
+                MissionConfig.Decision decision = missionConfig.evaluateNoTemplate(
+                        noTplMission, cs.getLastKnownStanding());
+                applyDecision(clientId, noTplMission, decision);
             } else {
                 log(clientId, "No mission template and no offer dialog — returning to IDLE.");
                 stateManager.setState(clientId, ClientState.State.IDLE);
@@ -786,7 +815,9 @@ public class ClientManager {
         // can be a false positive (e.g. mission_enyo matching "Smash the Supplier").
         // Run the FULL rule set: an accept rule must match, and any decline rule
         // (too-far / base / blood / Recon2of3) still wins. Default is decline.
-        applyDecision(clientId, mission, missionConfig.evaluate(mission));
+        // Standings-gated rules (e.g. recon 1, accepted only when standing < 1) are
+        // resolved here against the tracked per-client standing.
+        applyDecision(clientId, mission, missionConfig.evaluate(mission, cs.getLastKnownStanding()));
     }
 
     /** Click accept/decline for a decided mission and transition state. */
@@ -944,10 +975,10 @@ public class ClientManager {
         if (!cs.isCombatWarpLanded()) {
             long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
-            // 0–3s: short grace — the right-click+mission_start click lands by ~3s, so
-            // check for warp right after instead of idling 7s (a grayed-out gate that
-            // never warped would otherwise go unnoticed that whole time).
-            if (elapsed < 3) {
+            // 0–10s: grace — give the right-click+mission_start click time to land and
+            // the gate warp to begin before polling warp_active (a grayed-out gate that
+            // never warped is caught afterward by the re-click logic).
+            if (elapsed < 10) {
                 if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
                     log(clientId, "IN_COMBAT: waiting for gate warp to begin.");
                     cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker
@@ -990,6 +1021,10 @@ public class ClientManager {
                 log(clientId, "IN_COMBAT: gate warp landed after " + elapsed + "s — starting combat.");
                 gateWarpRetries.put(clientId, 0);
                 cs.setCombatWarpLanded(true);
+                // Anchor the 2-minute no_ship timer to combat start. Without this the timer
+                // measures from a stale/MIN timestamp and the check fires at ~0s — right when
+                // the HUD is still settling after warp-in, producing a false PODDED verdict.
+                cs.setLastPodCheck(LocalDateTime.now());
                 return;
             }
 
@@ -1000,7 +1035,7 @@ public class ClientManager {
                 log(clientId, "IN_COMBAT: no warp after " + elapsed + "s — gate grayed, re-clicking (attempt "
                         + retries + "/" + MAX_GATE_WARP_RETRIES + ").");
                 new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
-                cs.setWarpStartTime(LocalDateTime.now());       // restart the 3s grace
+                cs.setWarpStartTime(LocalDateTime.now());       // restart the 10s grace
                 cs.setLastWarpCheck(LocalDateTime.MIN);          // next poll is a fresh first check
                 return;
             }
@@ -2447,13 +2482,13 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 15 seconds
+                // WAIT 13 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 15s.");
+                if (elapsed < 13) {
+                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 13s.");
                     return;
                 }
-                log(clientId, "COMBAT[Worm] 15s wait complete.");
+                log(clientId, "COMBAT[Worm] 13s wait complete.");
                 cs.setCombatStep(4);
                 break;
             }
@@ -2628,6 +2663,14 @@ public class ClientManager {
         // Read agent standings before completing — determines fleet reward choice
         missionProcessor.clickAgentStandings();
         double standings = missionProcessor.readAgentStandings();
+
+        // Track the standing for mission gating (recon 1 / scarlet / pot-and-kettle are
+        // accepted only when standing < 1). Only store a successful read — never clobber a
+        // known value with a NaN OCR miss, so the gate keeps using the last good reading.
+        if (!Double.isNaN(standings)) {
+            stateManager.getState(clientId).setLastKnownStanding(standings);
+            log(clientId, "COMPLETING: tracked agent standing updated for mission gating (gate: < 1).");
+        }
 
         missionProcessor.doubleClickAgentIcon(); // refocus agent dialog (standings covers complete_mission)
         missionProcessor.clickCompleteMission();

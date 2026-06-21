@@ -744,13 +744,13 @@ public class MissionProcessor {
             log("Self-destruct aborted — no capsule on screen (not actually podded).");
             return false;
         }
-        log("Self-destruct: right-click capsule → destruct → yes");
+        log("Self-destruct: right-click capsule → destruct → yes_destruct");
         rightClickAndSelect("capsule", "destruct");
         sleep(POST_CLICK_DELAY_MS);
         // The self-destruct confirmation dialog takes a moment to render — wait for
-        // the 'yes' button instead of an immediate (and usually-too-early) click.
-        if (!ocrBridge.waitAndClickTemplate("yes", 3)) {
-            log("Self-destruct: 'yes' confirm button not found within 3s.");
+        // the 'yes_destruct' button instead of an immediate (and usually-too-early) click.
+        if (!ocrBridge.waitAndClickTemplate("yes_destruct", 3)) {
+            log("Self-destruct: 'yes_destruct' confirm button not found within 3s.");
         }
         sleep(POST_CLICK_DELAY_MS);
         return true;
