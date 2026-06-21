@@ -100,8 +100,23 @@ public class ClientState {
     /** Timestamp of the last dead/gone poll — throttles the every-5s "is the small target gone" check. */
     private LocalDateTime combatPollStart = LocalDateTime.MIN;
 
+    /** Timestamp when the current combat sequence began (step 0) — used for whole-fight timing. */
+    private LocalDateTime combatStartTime = LocalDateTime.MIN;
+
+    /** True once the Sansha extra Alt+F1 cap pulse (fight > 35s) has fired this combat. */
+    private boolean extraCapPulseDone = false;
+
     /** True once the gate warp has been verified and landed — combat can begin after a short wait. */
     private boolean combatWarpLanded = false;
+
+    /** Consecutive IN_COMBAT polls that have seen warp_active gone — must reach WARP_END_MISS_CONFIRM
+     *  before landing is declared. Reset to 0 whenever warp_active is seen again. */
+    private int warpEndMisses = 0;
+
+    /** Parked for the rest of the session: the agent refused missions (standing too low).
+     *  This client yields to the other and does no work until the bot is restarted.
+     *  Deliberately NOT reset by setState — it persists across all state transitions. */
+    private boolean standingsLocked = false;
 
 /** True when docking to home station after combat — WARPING should transition to COMPLETING. */
     private boolean dockingToStation = false;
@@ -124,8 +139,16 @@ public class ClientState {
     /** True once KLY system check has been performed after first jump — skip further checks. */
     private boolean klyChecked = false;
 
+    /** True once lingering windows have been cleared after the first jump out of the home station —
+     *  one-shot so we only sweep close_active_window once per trip. */
+    private boolean windowsClosedAfterJump1 = false;
+
     /** True after evading to a safe spot — next landing jumps out instead of re-evading. Cleared on stargate jump. */
     private boolean warpedToSafeSpot = false;
+
+    /** Last time a view-nudge (camera drag) was issued to refresh the frame before a
+     *  detection retry — throttles the nudge so it doesn't fire every tick. */
+    private LocalDateTime lastViewNudge = LocalDateTime.MIN;
 
     /** Last time the POD_COOLDOWN handler swapped clients — prevents rapid-fire switching. */
     private LocalDateTime lastCooldownSwap = LocalDateTime.MIN;
@@ -135,6 +158,9 @@ public class ClientState {
 
     /** Last time COMPLETING clicked the dock fallback — throttles re-clicks while waiting to dock. */
     private LocalDateTime lastCompletingDock = LocalDateTime.MIN;
+
+    /** When the IDLE travel loop first found no navigation UI on screen (MIN = not waiting). Drives the 60s podded-at-station escalation. */
+    private LocalDateTime noTravelUiSince = LocalDateTime.MIN;
 
     // -----------------------------------------------------------------------
 
@@ -172,6 +198,7 @@ public class ClientState {
             this.jumpCount        = 0;
             this.klyChecked       = false;
             this.warpedToSafeSpot = false;
+            this.windowsClosedAfterJump1 = false;
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
@@ -183,6 +210,8 @@ public class ClientState {
             this.combatWaitStart = LocalDateTime.MIN;
             this.combatPollStart = LocalDateTime.MIN;
             this.combatWarpLanded = false;
+            this.warpEndMisses = 0;
+            this.lastViewNudge = LocalDateTime.MIN;
         }
     }
 
@@ -238,6 +267,18 @@ public class ClientState {
     public boolean isCombatWarpLanded()              { return combatWarpLanded; }
     public void    setCombatWarpLanded(boolean v)    { this.combatWarpLanded = v; }
 
+    public int  getWarpEndMisses()                   { return warpEndMisses; }
+    public void setWarpEndMisses(int v)              { this.warpEndMisses = v; }
+
+    public boolean isStandingsLocked()               { return standingsLocked; }
+    public void    setStandingsLocked(boolean v)     { this.standingsLocked = v; }
+
+    public LocalDateTime getCombatStartTime()        { return combatStartTime; }
+    public void setCombatStartTime(LocalDateTime t)  { this.combatStartTime = t; }
+
+    public boolean isExtraCapPulseDone()             { return extraCapPulseDone; }
+    public void    setExtraCapPulseDone(boolean v)   { this.extraCapPulseDone = v; }
+
     public int  getBubbleEscapeStep()             { return bubbleEscapeStep; }
     public void setBubbleEscapeStep(int step)     { this.bubbleEscapeStep = step; }
 
@@ -259,6 +300,12 @@ public boolean isDockingToStation()             { return dockingToStation; }
     public boolean isKlyChecked()           { return klyChecked; }
     public void    setKlyChecked(boolean v) { this.klyChecked = v; }
 
+    public boolean isWindowsClosedAfterJump1()           { return windowsClosedAfterJump1; }
+    public void    setWindowsClosedAfterJump1(boolean v) { this.windowsClosedAfterJump1 = v; }
+
+    public LocalDateTime getLastViewNudge()             { return lastViewNudge; }
+    public void          setLastViewNudge(LocalDateTime v) { this.lastViewNudge = v; }
+
     public boolean isWarpedToSafeSpot()           { return warpedToSafeSpot; }
     public void    setWarpedToSafeSpot(boolean v) { this.warpedToSafeSpot = v; }
 
@@ -270,6 +317,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public LocalDateTime getLastCompletingDock()                { return lastCompletingDock; }
     public void          setLastCompletingDock(LocalDateTime t) { this.lastCompletingDock = t; }
+
+    public LocalDateTime getNoTravelUiSince()                { return noTravelUiSince; }
+    public void          setNoTravelUiSince(LocalDateTime t) { this.noTravelUiSince = t; }
 
     public boolean isJamCheckOnWarp()           { return jamCheckOnWarp; }
     public void    setJamCheckOnWarp(boolean v) { this.jamCheckOnWarp = v; }

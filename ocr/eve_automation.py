@@ -122,6 +122,7 @@ TEMPLATE_FILES = {
     # Agent interaction
     "agent_icon": "agent_icon",  # agent portrait — double-click fallback
     "agent_standings": "agent_standings",  # standings info button in agent dialog
+    "standings_refused": "standings_refused",  # agent refusal message shown when standing < 2 (no mission given)
     "agent_portrait": "agent_portrait",          # opportunities screen agent portrait — right-click target
     "agent_lara_mesi": "agent_lara_mesi",        # "Agent: Lara Mesi" submenu entry — hover target
     "agent_set_destination": "agent_set_destination",  # "Set Destination" context menu item — click target
@@ -1675,6 +1676,20 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         matcher._do_click(int(msg["x"]), int(msg["y"]), button="right", delay=0.3)
         return {"ok": True, "value": True}
 
+    if cmd == "drag_pos":
+        # Press-hold-drag in empty space: rotates the EVE camera a little, forcing a
+        # fresh frame render so a stale/idle-dimmed screen re-paints (helps template
+        # detection of set_destination etc.). Does NOT move the ship (that needs a
+        # double-click). dx/dy default to a small sideways nudge.
+        x, y = int(msg["x"]), int(msg["y"])
+        dx, dy = int(msg.get("dx", 40)), int(msg.get("dy", 0))
+        pyautogui.moveTo(x, y, duration=0.05)
+        pyautogui.mouseDown(button="left")
+        pyautogui.moveTo(x + dx, y + dy, duration=0.15)
+        pyautogui.mouseUp(button="left")
+        log.info("pyautogui drag from (%d,%d) by (%d,%d)", x, y, dx, dy)
+        return {"ok": True, "value": True}
+
     if cmd == "double_click":
         return {"ok": True, "value": matcher.wait_and_double_click(key, timeout=timeout, delay=0.2)}
     if cmd == "right_click":
@@ -1721,22 +1736,31 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         return {"ok": True, "value": True}
 
     if cmd == "pod_check":
-        # Two-stage pod detection. Returns True if podded, False if still in a ship.
+        # Three-stage pod detection. Returns True if podded, False if still in a ship.
+        # No clicking in empty screen centre — that disrupts combat (the old eject
+        # probe right-clicked (960,540) and false-positived on combat clutter).
         #
         # Stage 1 (cheap, passive): the "no_ship" template is a tiny module sliver
         # that's only on screen while in a ship. If it's still visible we're
-        # definitely in a ship — return immediately, no right-click needed.
+        # definitely in a ship — return immediately.
         #
-        # Stage 2 (only if the sliver is MISSING, which may be a false miss):
-        # confirm by right-clicking our ship and looking for the "Eject" menu item
-        # (offered only in a ship). The menu is dismissed with a left-click in space
-        # (EVE never uses Escape).
+        # Stage 2 (passive): the sliver may false-miss mid-combat (e.g. an overheated
+        # module changes its look). So if the sliver is MISSING, look for the
+        # "capsule" HUD template. No capsule on screen => false miss => still in a ship.
+        #
+        # Stage 3 (active, only if a capsule IS found): right-click THE CAPSULE (not
+        # the screen centre) and look for the "Eject" menu item — offered only from a
+        # ship. If Eject is present the capsule match was a false positive => in a
+        # ship, abort. The menu is dismissed with a left-click (EVE never uses Escape).
         if matcher.find("no_ship") is not None:
-            log.info("pod_check: no_ship sliver visible -> in a ship (skip eject probe)")
+            log.info("pod_check: no_ship sliver visible -> in a ship (skip capsule probe)")
             return {"ok": True, "value": False}  # module sliver visible → in a ship
-        log.info("pod_check: no_ship sliver MISSING -> confirming via eject menu")
-        cx = int(msg.get("x", 960))
-        cy = int(msg.get("y", 540))
+        cap = matcher.find("capsule")
+        if cap is None:
+            log.info("pod_check: no_ship sliver MISSING but no capsule on screen -> false miss, in a ship")
+            return {"ok": True, "value": False}
+        cx, cy = matcher.center(cap)
+        log.info("pod_check: capsule found at (%d,%d) -> right-click capsule, confirm via eject", cx, cy)
         matcher._do_click(cx, cy, button="right", delay=0.3)
         time.sleep(0.3)
         eject_found = matcher.find("eject") is not None

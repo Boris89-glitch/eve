@@ -23,6 +23,7 @@
     { "objective_contains": "sansha",        "comment": "sansha burner (name fallback)" },
     { "objective_contains": "sansa",         "comment": "sansha burner (OCR misread)"   },
     { "title_contains": "recon 1 of",        "comment": "Recon part 1 (spaced format)"  },
+    { "title_contains": "recon1of3",        "comment": "Recon part 1 (spaced format)"  },
     { "title_contains": "recon (1 of",       "comment": "Recon part 1 (paren format)"   }],
   "decline": [
     { "title_contains": "anomic base",    "comment": "Burner base missions"   },

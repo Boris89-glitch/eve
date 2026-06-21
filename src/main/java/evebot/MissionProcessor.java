@@ -404,6 +404,17 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    /**
+     * Nudge the camera with a small left-drag in empty space (screen centre) to force
+     * a fresh frame render before re-running a template detection. Does not move the
+     * ship. Leaves the camera slightly rotated (drifts back on its own).
+     */
+    public void nudgeView() {
+        log("Nudging view (camera drag) to refresh frame");
+        ocrBridge.dragPos(960, 540, 40, 0);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void keyPress(String keys) {
         log("Pressing keys: " + keys);
         ocrBridge.keyPress(keys);
@@ -620,6 +631,15 @@ public class MissionProcessor {
     public double readAgentStandings() {
         // Exact value intentionally not logged — OCR misreads it; only low-standings warnings are kept.
         return ocrBridge.readStandings(300, 490, 100, 55);
+    }
+
+    /**
+     * Returns true if the agent's "standing too low" refusal message is on screen —
+     * the agent won't hand out missions (effective standing &lt; 2). Template-based
+     * (not the flaky standings OCR), so a match is a reliable refusal signal.
+     */
+    public boolean isStandingsRefused() {
+        return ocrBridge.findAnyTemplate("standings_refused") != null;
     }
 
     /**

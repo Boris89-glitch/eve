@@ -368,6 +368,21 @@ public class OCRBridge {
     }
 
     /**
+     * Press-hold-drag at fixed screen coordinates by (dx,dy). In empty space this
+     * rotates the EVE camera slightly, forcing a fresh frame render so a stale screen
+     * re-paints — used to help template detection. Does not move the ship.
+     */
+    public void dragPos(int x, int y, int dx, int dy) {
+        System.out.printf("[%s] [OCRBridge] dragPos: (%d,%d) by (%d,%d)%n", ts(), x, y, dx, dy);
+        JsonObject c = cmd("drag_pos");
+        c.addProperty("x", x);
+        c.addProperty("y", y);
+        c.addProperty("dx", dx);
+        c.addProperty("dy", dy);
+        sendAction(c);
+    }
+
+    /**
      * Hover: find the named template and move mouse to its centre without clicking.
      * Used for opening submenus on hover (e.g. Locations in right-click context menu).
      */
