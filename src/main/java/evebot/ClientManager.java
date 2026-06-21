@@ -2447,13 +2447,13 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                // WAIT 11 seconds
+                // WAIT 15 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 11) {
-                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 11s.");
+                if (elapsed < 15) {
+                    log(clientId, "COMBAT[Worm] wait: " + elapsed + "s / 15s.");
                     return;
                 }
-                log(clientId, "COMBAT[Worm] 11s wait complete.");
+                log(clientId, "COMBAT[Worm] 15s wait complete.");
                 cs.setCombatStep(4);
                 break;
             }
@@ -2505,7 +2505,9 @@ public class ClientManager {
                 break;
             }
             case 9: {
-                // WAIT 7s, then Alt+F1 once (cap module ON) and switch to the other client.
+                // WAIT 7s, then Alt+F1 once (cap module ON). Stay on this client — we
+                // watch the worm fight ourselves so we can re-pulse Alt+F1 and turn the
+                // cap module off at the right moment (no switching away).
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 7) return;
                 log(clientId, "COMBAT[Worm] Step 9: Alt+F1 (cap module ON).");
@@ -2514,11 +2516,6 @@ public class ClientManager {
                 cs.setExtraCapPulseDone(false);
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(10);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Worm] safe wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
                 break;
             }
             case 10: {
@@ -2562,12 +2559,10 @@ public class ClientManager {
                     break;
                 }
 
-                log(clientId, "COMBAT[Worm] waiting for mission complete (" + elapsed + "s)...");
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Worm] safe wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
+                // Stay on this client and keep watching — no switching away. We measure
+                // the fight (50s extra Alt+F1 pulse above) and turn the cap module off in
+                // step 11 once the worm is dead.
+                log(clientId, "COMBAT[Worm] watching for mission complete (" + elapsed + "s)...");
                 break;
             }
             case 11: {
