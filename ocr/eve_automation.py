@@ -1736,7 +1736,7 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         return {"ok": True, "value": True}
 
     if cmd == "pod_check":
-        # Three-stage pod detection. Returns True if podded, False if still in a ship.
+        # Two-stage pod detection. Returns True if podded, False if still in a ship.
         # No clicking in empty screen centre — that disrupts combat (the old eject
         # probe right-clicked (960,540) and false-positived on combat clutter).
         #
@@ -1744,27 +1744,22 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         # that's only on screen while in a ship. If it's still visible we're
         # definitely in a ship — return immediately.
         #
-        # Stage 2 (passive): the sliver may false-miss mid-combat (e.g. an overheated
-        # module changes its look). So if the sliver is MISSING, look for the
-        # "capsule" HUD template. No capsule on screen => false miss => still in a ship.
-        #
-        # Stage 3 (active, only if a capsule IS found): right-click THE CAPSULE (not
-        # the screen centre) and look for the "Eject" menu item — offered only from a
-        # ship. If Eject is present the capsule match was a false positive => in a
-        # ship, abort. The menu is dismissed with a left-click (EVE never uses Escape).
+        # Stage 2 (active): the sliver may false-miss mid-combat (e.g. an overheated
+        # module changes its look). So if the sliver is MISSING, right-click the
+        # ship/capsule HUD at fixed coordinates (770,860) and look for the "Eject"
+        # menu item — offered only from a ship. (The "capsule" HUD template was
+        # unreliable, so we probe the fixed location directly instead.) If Eject is
+        # present we're still in a ship; if it's missing, we've been podded. The menu
+        # is dismissed with a left-click (EVE never uses Escape).
         if matcher.find("no_ship") is not None:
-            log.info("pod_check: no_ship sliver visible -> in a ship (skip capsule probe)")
+            log.info("pod_check: no_ship sliver visible -> in a ship (skip eject probe)")
             return {"ok": True, "value": False}  # module sliver visible → in a ship
-        cap = matcher.find("capsule")
-        if cap is None:
-            log.info("pod_check: no_ship sliver MISSING but no capsule on screen -> false miss, in a ship")
-            return {"ok": True, "value": False}
-        cx, cy = matcher.center(cap)
-        log.info("pod_check: capsule found at (%d,%d) -> right-click capsule, confirm via eject", cx, cy)
-        matcher._do_click(cx, cy, button="right", delay=0.3)
+        px, py = 770, 860
+        log.info("pod_check: no_ship sliver MISSING -> right-click (%d,%d), confirm via eject", px, py)
+        matcher._do_click(px, py, button="right", delay=0.3)
         time.sleep(0.3)
         eject_found = matcher.find("eject") is not None
-        matcher._do_click(cx, cy, button="left", delay=DAEMON_CLICK_DELAY)
+        matcher._do_click(px, py, button="left", delay=DAEMON_CLICK_DELAY)
         log.info("pod_check: eject %s -> verdict %s",
                  "found (in ship)" if eject_found else "MISSING (podded)",
                  "IN SHIP" if eject_found else "PODDED")

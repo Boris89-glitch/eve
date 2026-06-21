@@ -937,6 +937,7 @@ public class ClientManager {
 
     private void handleInCombat(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
+        cs.setLastCombatOrReturn(LocalDateTime.now()); // ship is alive and fighting — gates the warp pod check
 
         // ── Warp verification phase (no client switching) ──
         // After clicking activate_gate → mission_start, verify warp started then wait for it to land.
@@ -1015,15 +1016,15 @@ public class ClientManager {
             return;
         }
 
-        // ── Mission timer: once per minute in combat, run the cheap no_ship check.
-        //    isFlyingPod() stage 1 is a passive sliver match (no clicking) when the
-        //    ship is alive, so this is safe to fire mid-fight. If we've been podded,
+        // ── Mission timer: once every two minutes in combat, run the cheap no_ship
+        //    check. isFlyingPod() stage 1 is a passive sliver match (no clicking) when
+        //    the ship is alive, so this is safe to fire mid-fight. If we've been podded,
         //    the combat step machine would otherwise keep trying to lock targets from
         //    a capsule until the per-handler hardcap; instead handlePodDeath self-
         //    destructs (guarded by the capsule template) and hands the ~120s respawn
         //    to the other client, so this client stops spinning and yields. ──
-        if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 1) {
-            log(clientId, "IN_COMBAT: 1-minute no_ship check.");
+        if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 2) {
+            log(clientId, "IN_COMBAT: 2-minute no_ship check.");
             if (missionProcessor.isFlyingPod()) {
                 log(clientId, "IN_COMBAT: no_ship — podded mid-combat, self-destructing.");
                 // Leave lastPodCheck at the previous clean check so handlePodDeath can
@@ -1032,11 +1033,11 @@ public class ClientManager {
                     return; // real pod death — handled (self-destruct/respawn)
                 }
                 // False positive (no capsule) — don't re-probe next tick. Reset the
-                // throttle and carry on with combat this minute.
-                log(clientId, "IN_COMBAT: pod check was a false positive — resuming combat, re-arming 1-min throttle.");
+                // throttle and carry on with combat.
+                log(clientId, "IN_COMBAT: pod check was a false positive — resuming combat, re-arming 2-min throttle.");
                 cs.setLastPodCheck(LocalDateTime.now());
             } else {
-                cs.setLastPodCheck(LocalDateTime.now()); // clean check passed — reset the 1-min throttle
+                cs.setLastPodCheck(LocalDateTime.now()); // clean check passed — reset the 2-min throttle
             }
         }
 
@@ -1183,9 +1184,7 @@ public class ClientManager {
         // (right-clicks our ship), so it only runs here — not every tick. Being
         // podded clears the locked target, so a long silence can mean we were
         // destroyed; check for a pod before assuming the mission completed.
-        int backstopSecs = "Jaguar".equals(combatLabel) ? 300
-                         : "Worm".equals(combatLabel) ? 60
-                         : 120;
+        int backstopSecs = "Jaguar".equals(combatLabel) ? 300 : 120;
         if (elapsed >= backstopSecs) {
             if (missionProcessor.isFlyingPod()) {
                 handlePodDeath(clientId, true);
@@ -1375,6 +1374,10 @@ public class ClientManager {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 25) {
                     log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 25s.");
+                    if (elapsed > 0 && elapsed % 10 == 0) {
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
+                    }
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 25s wait complete — locking inquisitors.");
@@ -1615,6 +1618,10 @@ public class ClientManager {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 25) {
                     log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 25s.");
+                    if (elapsed > 0 && elapsed % 10 == 0) {
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
+                    }
                     return;
                 }
                 log(clientId, "COMBAT[Enyo] 25s wait complete — locking navitas targets.");
@@ -1781,6 +1788,10 @@ public class ClientManager {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 25) {
                     log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 25s.");
+                    if (elapsed > 0 && elapsed % 10 == 0) {
+                        ClientWindowInfo other = findOtherClient(clientId);
+                        if (other != null) bringToForeground(other);
+                    }
                     return;
                 }
                 log(clientId, "COMBAT[Hawk] 25s wait complete — locking targets.");
@@ -2406,8 +2417,11 @@ public class ClientManager {
      *   6 → press 's' (separate step, after everything else) + Shift+d (stop overloading web)
      *   7 → WAIT 4s → right-click target_worm + click range (keep at range)
      *   8 → Proceed (keep_at_range template check removed) → wait 7s
-     *   9 → WAIT 7s → Alt+F1 (deactivate module) + switch client
-     *  10 → poll completion: locked_worm gone / set_destination → RETURNING
+     *   9 → WAIT 7s → Alt+F1 (cap module ON) + switch client
+     *  10 → poll completion (Sansha-style): locked_worm gone / set_destination/dock
+     *        → step 11. If fight drags > 50s → Alt+F1 again (extra pulse, once).
+     *        180s hardcap (pod check) → step 11. Never exit while locked_worm is up.
+     *  11 → Alt+F1 (cap module OFF) + handle dock/returning
      */
     private void handleCombatWorm(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -2491,11 +2505,13 @@ public class ClientManager {
                 break;
             }
             case 9: {
-                // WAIT 7s before deactivating module
+                // WAIT 7s, then Alt+F1 once (cap module ON) and switch to the other client.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 7) return;
-                log(clientId, "COMBAT[Worm] Step 9: Alt+F1 (deactivate module).");
+                log(clientId, "COMBAT[Worm] Step 9: Alt+F1 (cap module ON).");
                 missionProcessor.altKeyPress("f1");
+                cs.setCombatStartTime(LocalDateTime.now()); // fight start, for the 50s extra-pulse check
+                cs.setExtraCapPulseDone(false);
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(10);
                 ClientWindowInfo other = findOtherClient(clientId);
@@ -2506,7 +2522,69 @@ public class ClientManager {
                 break;
             }
             case 10: {
-                pollSetDestinationOrCapsule(clientId, cs, "Worm", true, "locked_worm");
+                // Sansha-style completion poll. Primary signal: the locked_worm bracket
+                // gone (target destroyed). Also accept set_destination/dock. Crucially,
+                // do NOT exit while locked_worm is still visible — the fight can run long.
+                String completed = missionProcessor.detectCombatComplete();
+                if (completed != null) {
+                    log(clientId, "COMBAT[Worm] " + completed + " detected — finishing up.");
+                    cs.setCombatStep(11);
+                    break;
+                }
+
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+
+                // Primary completion: locked_worm gone (guarded a few seconds so a
+                // transient miss right after entering the step can't fire prematurely).
+                if (elapsed >= 5 && missionProcessor.findTemplate("locked_worm") == null) {
+                    log(clientId, "COMBAT[Worm] locked_worm gone — target destroyed, finishing up.");
+                    cs.setCombatStep(11);
+                    break;
+                }
+
+                // Combat drags on: if the fight has run past 50s and we're still not
+                // done, give the cap module another Alt+F1 pulse (once).
+                if (!cs.isExtraCapPulseDone()
+                        && Duration.between(cs.getCombatStartTime(), LocalDateTime.now()).getSeconds() > 50) {
+                    log(clientId, "COMBAT[Worm] fight > 50s — Alt+F1 again (extra cap pulse).");
+                    missionProcessor.altKeyPress("f1");
+                    cs.setExtraCapPulseDone(true);
+                }
+
+                // 180s hardcap: no completion signal seen — pod check, then finish up.
+                if (elapsed >= 180) {
+                    if (missionProcessor.isFlyingPod()) {
+                        handlePodDeath(clientId, true);
+                        return;
+                    }
+                    log(clientId, "COMBAT[Worm] 180s hardcap — no completion, finishing up.");
+                    cs.setCombatStep(11);
+                    break;
+                }
+
+                log(clientId, "COMBAT[Worm] waiting for mission complete (" + elapsed + "s)...");
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Worm] safe wait — switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
+                break;
+            }
+            case 11: {
+                log(clientId, "COMBAT[Worm] Step 11: Alt+F1 (cap module OFF).");
+                missionProcessor.altKeyPress("f1");
+                // Re-detect: dock = same system, set_destination = different system.
+                String result = missionProcessor.detectCombatComplete();
+                if ("dock".equals(result)) {
+                    log(clientId, "COMBAT[Worm] dock detected — same system, docking.");
+                    missionProcessor.clickTemplate("dock");
+                    cs.setDockingToStation(true);
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                } else {
+                    stateManager.setState(clientId, ClientState.State.RETURNING);
+                }
                 break;
             }
             default:
@@ -2521,6 +2599,7 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleReturning(String clientId, ClientWindowInfo window) {
+        stateManager.getState(clientId).setLastCombatOrReturn(LocalDateTime.now()); // mission done — gates the warp pod check
         missionProcessor.clickSetDestination(280, 568); // returning/combat position
         stateManager.getState(clientId).setVerifySetDest(true); // re-check after first jump
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
@@ -2723,13 +2802,20 @@ public class ClientManager {
 
         if (firstCheck) {
             cs.setLastWarpCheck(LocalDateTime.now());
-            // Warp-entry no_ship check: quick passive sliver match that escalates to
-            // the eject-menu pod check only if the sliver is missing. Catches a pod
-            // death from the previous jump/combat as soon as the next warp begins.
-            if (missionProcessor.isFlyingPod()) {
-                log(clientId, "WARPING: no_ship on warp entry — podded, self-destructing.");
-                handlePodDeath(clientId, true);
-                return;
+            // Warp-entry pod check — no longer run on every warp. While missions are
+            // cycling normally the ship is obviously alive, so we only probe once 5min
+            // pass without entering combat or returning a mission (i.e. something is
+            // stuck — possibly podded and looping warps). The check itself is a quick
+            // passive sliver match that escalates to the eject-menu probe only if the
+            // sliver is missing.
+            long sinceActive = Duration.between(cs.getLastCombatOrReturn(), LocalDateTime.now()).toMinutes();
+            if (sinceActive >= 5) {
+                log(clientId, "WARPING: " + sinceActive + "m without combat/return — running warp-entry pod check.");
+                if (missionProcessor.isFlyingPod()) {
+                    log(clientId, "WARPING: no_ship on warp entry — podded, self-destructing.");
+                    handlePodDeath(clientId, true);
+                    return;
+                }
             }
             // Check for warp disruption bubble before assuming warp will start.
             if (missionProcessor.findTemplate("bubble_text") != null) {

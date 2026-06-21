@@ -162,6 +162,10 @@ public class ClientState {
     /** When the IDLE travel loop first found no navigation UI on screen (MIN = not waiting). Drives the 60s podded-at-station escalation. */
     private LocalDateTime noTravelUiSince = LocalDateTime.MIN;
 
+    /** Last time the ship was confirmed alive and active — entering combat or returning a mission.
+     *  Gates the warp-entry pod check: only probe once 5min pass without either event. */
+    private LocalDateTime lastCombatOrReturn = LocalDateTime.now();
+
     // -----------------------------------------------------------------------
 
     public ClientState(String clientId) {
@@ -320,6 +324,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public LocalDateTime getNoTravelUiSince()                { return noTravelUiSince; }
     public void          setNoTravelUiSince(LocalDateTime t) { this.noTravelUiSince = t; }
+
+    public LocalDateTime getLastCombatOrReturn()                { return lastCombatOrReturn; }
+    public void          setLastCombatOrReturn(LocalDateTime t) { this.lastCombatOrReturn = t; }
 
     public boolean isJamCheckOnWarp()           { return jamCheckOnWarp; }
     public void    setJamCheckOnWarp(boolean v) { this.jamCheckOnWarp = v; }
