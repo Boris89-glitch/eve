@@ -459,7 +459,7 @@ public class MissionProcessor {
             log("set_destination template not found — using hardcoded pos (" + fallbackX + "," + fallbackY + ").");
             ocrBridge.clickPos(fallbackX, fallbackY);
         }
-        sleep(POST_CLICK_DELAY_MS);
+        sleep(1000); // 1s settle after pressing Set Destination
     }
 
     public void clickWarpToLocation() {

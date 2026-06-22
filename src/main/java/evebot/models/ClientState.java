@@ -106,6 +106,12 @@ public class ClientState {
     /** True once the Sansha extra Alt+F1 cap pulse (fight > 35s) has fired this combat. */
     private boolean extraCapPulseDone = false;
 
+    /** True once the one-shot 20s support-frigate lock re-check has run this combat
+     *  (team missions excluding Jaguar). Targets can drift out of lock even after the
+     *  25s settle wait, so ~20s into the firing safe-wait we verify the frigate lock
+     *  once and re-lock+re-fire if it's gone. Reset on entering IN_COMBAT. */
+    private boolean frigateLockRechecked = false;
+
     /** True once the gate warp has been verified and landed — combat can begin after a short wait. */
     private boolean combatWarpLanded = false;
 
@@ -167,9 +173,11 @@ public class ClientState {
     /** When the IDLE travel loop first found no navigation UI on screen (MIN = not waiting). Drives the 60s podded-at-station escalation. */
     private LocalDateTime noTravelUiSince = LocalDateTime.MIN;
 
-    /** Last time the ship was confirmed alive and active — entering combat or returning a mission.
-     *  Gates the warp-entry pod check: only probe once 5min pass without either event. */
-    private LocalDateTime lastCombatOrReturn = LocalDateTime.now();
+    /** Last time the ship was confirmed alive and active — entering combat or checking missions.
+     *  (Returning is right after combat, so it's redundant as a liveness signal; mission checking
+     *  proves the ship made it home and docked.) Gates the warp-entry pod check: only probe once
+     *  5min pass without either event. */
+    private LocalDateTime lastCombatOrCheck = LocalDateTime.now();
 
     // -----------------------------------------------------------------------
 
@@ -221,6 +229,7 @@ public class ClientState {
             this.combatWarpLanded = false;
             this.warpEndMisses = 0;
             this.lastViewNudge = LocalDateTime.MIN;
+            this.frigateLockRechecked = false;
         }
     }
 
@@ -288,6 +297,9 @@ public class ClientState {
     public boolean isExtraCapPulseDone()             { return extraCapPulseDone; }
     public void    setExtraCapPulseDone(boolean v)   { this.extraCapPulseDone = v; }
 
+    public boolean isFrigateLockRechecked()           { return frigateLockRechecked; }
+    public void    setFrigateLockRechecked(boolean v) { this.frigateLockRechecked = v; }
+
     public int  getBubbleEscapeStep()             { return bubbleEscapeStep; }
     public void setBubbleEscapeStep(int step)     { this.bubbleEscapeStep = step; }
 
@@ -333,8 +345,8 @@ public boolean isDockingToStation()             { return dockingToStation; }
     public LocalDateTime getNoTravelUiSince()                { return noTravelUiSince; }
     public void          setNoTravelUiSince(LocalDateTime t) { this.noTravelUiSince = t; }
 
-    public LocalDateTime getLastCombatOrReturn()                { return lastCombatOrReturn; }
-    public void          setLastCombatOrReturn(LocalDateTime t) { this.lastCombatOrReturn = t; }
+    public LocalDateTime getLastCombatOrCheck()                { return lastCombatOrCheck; }
+    public void          setLastCombatOrCheck(LocalDateTime t) { this.lastCombatOrCheck = t; }
 
     public boolean isJamCheckOnWarp()           { return jamCheckOnWarp; }
     public void    setJamCheckOnWarp(boolean v) { this.jamCheckOnWarp = v; }
