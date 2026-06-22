@@ -262,10 +262,14 @@ def resolve_ship_via_dialog_templates(
     return None, None
 
 
-def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
+def resolve_ship_template(mission_target: str, ship_map: dict):
     """
     Fallback: resolve ship from OCR target/title string via ship_mission_map.json.
     Only called when dialog template matching found nothing.
+
+    Returns the ship template key, or None if no rule matched. We deliberately do
+    NOT fall back to a default ship — leaving station in a random ship for an
+    unrecognised mission is wrong; the caller must quit the mission instead.
     """
     target_lower = mission_target.lower() if mission_target else ""
     for entry in ship_map.get("ship_missions", []):
@@ -278,9 +282,12 @@ def resolve_ship_template(mission_target: str, ship_map: dict) -> str:
                     pattern,
                 )
                 return entry["ship_template"]
-    default = ship_map.get("default_ship_template", "ship_garmur")
-    log.info("No OCR rule matched '%s' — using default: %s", mission_target, default)
-    return default
+    log.warning(
+        "No dialog template and no OCR rule matched '%s' — cannot pick a ship, "
+        "mission must be quit (refusing to use a default ship).",
+        mission_target,
+    )
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -1017,6 +1024,22 @@ def load_mission_area() -> Tuple[int, int, int, int]:
 # -----------------------------------------------------------------------------
 
 
+def quit_mission_and_request_new(matcher) -> bool:
+    """
+    Abandon the current mission and ask the agent for a new one:
+      quit_mission -> Yes (repair_yes) -> request_mission.
+    Returns True if the quit button was found and clicked, False otherwise.
+    """
+    if matcher.wait_and_click("quit_mission", timeout=2.0, delay=1.0):
+        log.info("Clicked 'Quit Mission' — confirming with Yes...")
+        matcher.wait_and_click("repair_yes", timeout=2.0, delay=1.0)
+        log.info("Clicking 'Request Mission' to get a new offer...")
+        matcher.wait_and_click("request_mission", timeout=2.0, delay=1.0)
+        return True
+    log.error("'quit_mission' template not found — cannot abandon mission")
+    return False
+
+
 def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     """
     Full ship select + repair flow for the ship matching mission_title:
@@ -1040,6 +1063,17 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             mission_title,
         )
         ship_template = resolve_ship_template(mission_title, ship_map)
+
+    if ship_template is None:
+        # No dialog template and no OCR rule matched — we must NOT leave station in
+        # a default/random ship. Quit the mission and request a new one instead.
+        log.warning(
+            "No ship could be resolved for mission '%s' — quitting mission and requesting new one",
+            mission_title,
+        )
+        quit_mission_and_request_new(matcher)
+        print(json.dumps({"ship_not_found": True}), flush=True)
+        sys.exit(0)
 
     if ship_template not in matcher.templates:
         log.error(
@@ -1090,14 +1124,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     ship_match = matcher.wait_for(ship_template, timeout=2.0)
     if not ship_match:
         log.warning("Ship icon '%s' not found — quitting mission and requesting new one", ship_template)
-        # Click quit_mission -> yes (repair_yes) -> request_mission
-        if matcher.wait_and_click("quit_mission", timeout=2.0, delay=1.0):
-            log.info("Clicked 'Quit Mission' — confirming with Yes...")
-            matcher.wait_and_click("repair_yes", timeout=2.0, delay=1.0)
-            log.info("Clicking 'Request Mission' to get a new offer...")
-            matcher.wait_and_click("request_mission", timeout=2.0, delay=1.0)
-        else:
-            log.error("'quit_mission' template not found — cannot abandon mission")
+        quit_mission_and_request_new(matcher)
         print(json.dumps({"ship_not_found": True}), flush=True)
         sys.exit(0)
     ship_cx, ship_cy = matcher.center(ship_match)

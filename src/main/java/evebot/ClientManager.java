@@ -685,6 +685,16 @@ public class ClientManager {
             }
             case NOT_COMPLETE: {
                 agentRetries.put(clientId, 0);
+                // 'not_complete' is only trustworthy as "accepted, in progress" if we
+                // actually accepted a mission this session. With no mission on record the
+                // match is a false signal (e.g. a fresh OFFER whose accept/decline buttons
+                // weren't detected this tick) — don't assume it's accepted. Hand to
+                // CHECKING_MISSIONS, which re-scans/classifies the offer (or returns to IDLE).
+                if (stateManager.getState(clientId).getCurrentMission() == null) {
+                    log(clientId, "NOT_COMPLETE template visible but no accepted mission on record — treating as unaccepted, re-checking via CHECKING_MISSIONS.");
+                    stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                    break;
+                }
                 log(clientId, "Mission accepted but NOT complete — reading mission via OCR before ship selection.");
                 Rectangle missionArea = getMissionAreaForClient(clientId);
                 Mission mission = missionProcessor.readMission(missionArea);
