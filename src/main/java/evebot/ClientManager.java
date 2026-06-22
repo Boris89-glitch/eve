@@ -56,6 +56,10 @@ public class ClientManager {
     /** Minimum seconds between view-nudges (camera drag to refresh a stale frame) while
      *  waiting on a detection — keeps the nudge from firing every poll tick. */
     private static final long VIEW_NUDGE_THROTTLE_SECS  = 10;
+    /** How often to check the faction agent for an offer (the kernite/Evolution run). */
+    private static final long FACTION_CHECK_HOURS       = 2;
+    /** Faction missions may be declined at most once per this many hours (EVE decline cooldown). */
+    private static final long FACTION_DECLINE_HOURS     = 4;
 
     public ClientManager(StateManager stateManager) {
         this.stateManager     = stateManager;
@@ -195,6 +199,9 @@ public class ClientManager {
             case POD_COOLDOWN:
                 handlePodCooldown(clientId);
                 break;
+            case FACTION_CHECK:      handleFactionCheck(clientId, window);      break;
+            case FACTION_TRAVEL:     handleFactionTravel(clientId, window);     break;
+            case FACTION_COMPLETING: handleFactionCompleting(clientId, window); break;
             default:
                 System.out.println("[" + clientId + "] Unknown state: " + state);
         }
@@ -633,14 +640,37 @@ public class ClientManager {
             return;
         }
 
-        // 3. NONE phase — check for travel UI first (handles restart mid-travel or post-UNDOCKING).
-        // If stargate / warp_to_location / activate_gate is visible, the ship is in transit —
-        // switch to TO_MISSION phase so navigation resumes correctly next tick.
-        String travelUI = missionProcessor.detectTravelUI();
-        if (travelUI != null) {
-            log(clientId, "IDLE: travel UI '" + travelUI + "' detected — resuming TO_MISSION navigation.");
-            cs.setTravelPhase(ClientState.TravelPhase.TO_MISSION);
-            return;
+        // 3. NONE phase.
+        // After a faction run we land just outside home and dock; until the dock completes the
+        // space view (with stargates) is briefly visible, which would false-trigger the
+        // travel-resume below into a phantom TO_MISSION. So while a faction resume is pending,
+        // wait for the docked confirmation (agent_icon) and skip the travel-resume check.
+        boolean justResumedFaction = false;
+        if (cs.isFactionResumePending()) {
+            if (missionProcessor.detectCompletingUI() != null) {
+                log(clientId, "IDLE: docked home after faction run — resuming normal checking.");
+                cs.setFactionResumePending(false);
+                justResumedFaction = true;
+            } else if (Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds() >= 60) {
+                log(clientId, "IDLE: faction resume — no agent_icon after 60s, giving up the wait and proceeding normally.");
+                cs.setFactionResumePending(false);
+            } else {
+                log(clientId, "IDLE: faction run docked — waiting for agent_icon before resuming checking.");
+                return;
+            }
+        }
+
+        // Check for travel UI first (handles restart mid-travel or post-UNDOCKING). If
+        // stargate / warp_to_location / activate_gate is visible, the ship is in transit —
+        // switch to TO_MISSION phase so navigation resumes correctly next tick. Skipped on the
+        // tick we just confirmed a faction dock (transient stargate frames would mislead it).
+        if (!justResumedFaction) {
+            String travelUI = missionProcessor.detectTravelUI();
+            if (travelUI != null) {
+                log(clientId, "IDLE: travel UI '" + travelUI + "' detected — resuming TO_MISSION navigation.");
+                cs.setTravelPhase(ClientState.TravelPhase.TO_MISSION);
+                return;
+            }
         }
 
         // Check global pod-death cooldown before accepting new missions.
@@ -649,6 +679,19 @@ public class ClientManager {
             long remaining = Duration.between(LocalDateTime.now(), podEnd).getSeconds();
             log(clientId, "IDLE: global pod cooldown active (" + (remaining / 60) + "m " + (remaining % 60) + "s) — entering POD_COOLDOWN.");
             stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
+            return;
+        }
+
+        // Faction agent check — every 2h, while docked & idle at home (no regular mission in
+        // progress). Skipped for the rest of the session once the agent has offered "Evolution"
+        // (factionLocked — handled manually by the user).
+        if (!cs.isFactionLocked()
+                && cs.getCurrentMission() == null
+                && Duration.between(cs.getLastFactionCheck(), LocalDateTime.now()).toHours() >= FACTION_CHECK_HOURS) {
+            log(clientId, "IDLE: faction agent check due (>= " + FACTION_CHECK_HOURS + "h) — entering FACTION_CHECK.");
+            cs.setLastFactionCheck(LocalDateTime.now());
+            cs.setLastCombatOrCheck(LocalDateTime.now()); // docked at home, ship alive — gates the warp pod check
+            stateManager.setState(clientId, ClientState.State.FACTION_CHECK);
             return;
         }
 
@@ -1137,6 +1180,9 @@ public class ClientManager {
                 break;
             case "recon1":
                 handleCombatRecon(clientId, cs);
+                break;
+            case "scarlet":
+                handleCombatScarlet(clientId, cs);
                 break;
             case "angel":
                 handleCombatAngel(clientId, cs);
@@ -2383,6 +2429,141 @@ public class ClientManager {
     }
 
     /**
+     * Dread Pirate Scarlet (boss "Anire") — combat sequence. Entered after the first gate
+     * warp lands (like Recon). Standings-gated mission (accepted only when standing &lt; 1).
+     *
+     * Steps:
+     *   0 → EXTRA STEP up front: set destination home via the agent (alt+J → 'active' →
+     *       right-click portrait → set destination), so the route is ready before we engage.
+     *   1 → shift+'as', activate gate (right-click activate_gate → mission_start), press 's' twice
+     *       (turn off the warp module). Safe-wait switch to the other client.
+     *   2 → SAFE WAIT 30s (gate load).
+     *   3 → activate the next gate (right-click activate_gate → mission_start), press 's' twice. Switch.
+     *   4 → SAFE WAIT 30s.
+     *   5 → double-click 'anire' (select), press 's' twice.
+     *   6 → ctrl-click 'anire' (lock). NO client switching from here — dedicate this client until she dies.
+     *   7 → WAIT 5s → press 'adc' (activate modules).
+     *   8 → WAIT 20s (from lock), then poll 'locked_anire'; when it's gone (Anire destroyed) →
+     *       just jump the stargate (destination already set) → WARPING/RETURNING_HOME, which flies
+     *       home and turns the mission in at the agent. No client switching.
+     *
+     * NOTE: the on-screen set_destination prompt is intentionally ignored for Scarlet — the
+     *       alt+J agent method is used instead, up front in step 0 (location-independent).
+     * NOTE: locked_anire.png is not captured yet — until it is, findTemplate reads "gone", so the
+     *       20s timer alone gates the jump.
+     */
+    private void handleCombatScarlet(String clientId, ClientState cs) {
+        int step = cs.getCombatStep();
+
+        switch (step) {
+            case 0: {
+                // Extra step up front: set destination home via the alt+J agent method so the
+                // route is ready. When Anire dies we just jump — destination already set.
+                log(clientId, "COMBAT[Scarlet] Step 0: set destination home via agent (alt+J) up front.");
+                missionProcessor.setDestinationViaAgent();
+                cs.setCombatStep(1);
+                break;
+            }
+            case 1: {
+                log(clientId, "COMBAT[Scarlet] Step 1: shift+'as', activate gate → mission_start, press 's' twice.");
+                missionProcessor.shiftKeyPress("as");
+                missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
+                missionProcessor.keyPress("s");
+                missionProcessor.keyPress("s");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(2);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Scarlet] gate loading — safe wait 30s, switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
+                break;
+            }
+            case 2: {
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 30) {
+                    return;
+                }
+                log(clientId, "COMBAT[Scarlet] 30s gate load complete — activating next gate.");
+                cs.setCombatStep(3);
+                break;
+            }
+            case 3: {
+                log(clientId, "COMBAT[Scarlet] Step 3: activate gate → mission_start, press 's' twice.");
+                missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
+                missionProcessor.keyPress("s");
+                missionProcessor.keyPress("s");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(4);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Scarlet] gate loading — safe wait 30s, switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
+                break;
+            }
+            case 4: {
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 30) {
+                    return;
+                }
+                log(clientId, "COMBAT[Scarlet] 30s wait complete — engaging Anire.");
+                cs.setCombatStep(5);
+                break;
+            }
+            case 5: {
+                log(clientId, "COMBAT[Scarlet] Step 5: double-click 'anire' (select), press 's' twice.");
+                missionProcessor.doubleClickTemplate("anire");
+                missionProcessor.keyPress("s");
+                missionProcessor.keyPress("s");
+                cs.setCombatStep(6);
+                break;
+            }
+            case 6: {
+                log(clientId, "COMBAT[Scarlet] Step 6: ctrl-click 'anire' (lock target). Dedicating this client until Anire dies — no switching.");
+                missionProcessor.ctrlClickTemplate("anire");
+                cs.setCombatWaitStart(LocalDateTime.now()); // anchors both the 5s adc delay and the 20s death-watch
+                cs.setCombatStep(7);
+                break;
+            }
+            case 7: {
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 5) {
+                    log(clientId, "COMBAT[Scarlet] wait before 'adc': " + elapsed + "s / 5s.");
+                    return;
+                }
+                log(clientId, "COMBAT[Scarlet] Step 7: press 'adc' (activate modules).");
+                missionProcessor.keyPress("adc");
+                cs.setCombatStep(8);
+                break;
+            }
+            case 8: {
+                // No client switching — stay and wait for Anire to die. Hold off polling until
+                // 20s after the lock, then watch for the locked_anire bracket to disappear.
+                // Destination is already set (step 0), so on death we just jump and head home.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 20) {
+                    log(clientId, "COMBAT[Scarlet] waiting for Anire to die (" + elapsed + "s / 20s before checking).");
+                    return;
+                }
+                if (missionProcessor.findTemplate("locked_anire") == null) {
+                    log(clientId, "COMBAT[Scarlet] locked_anire gone — Anire destroyed, jumping stargate (destination already set).");
+                    missionProcessor.rightClickAndSelect("stargate", "jump");
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
+                    stateManager.setState(clientId, ClientState.State.WARPING); // wait out the jump-warp → IDLE[RETURNING_HOME]
+                    break;
+                }
+                log(clientId, "COMBAT[Scarlet] Anire still locked (" + elapsed + "s) — waiting (no client switch).");
+                break;
+            }
+            default:
+                log(clientId, "COMBAT[Scarlet] unexpected step " + step + " — resetting.");
+                cs.setCombatStep(0);
+        }
+    }
+
+    /**
      * Angel / Dramiel — combat sequence.
      *
      * Steps:
@@ -2742,24 +2923,7 @@ public class ClientManager {
         missionProcessor.clickCompleteMission();
 
         // Fleet reward decision based on agent standings.
-        // Below 0: take all rewards (fleet_no) to recover standings; healthy: share (fleet_yes).
-        // Exact standings are not logged — OCR misreads the value; only a low-standings warning is kept.
-        if (Double.isNaN(standings)) {
-            log(clientId, "COMPLETING: standings OCR failed — defaulting to fleet YES.");
-            missionProcessor.clickFleetYes();
-        } else if (standings < -1.0) {
-            log(clientId, "COMPLETING: standings critical — fleet NO.");
-            if (standings < -1.5) {
-                EventLog.log("STANDINGS_LOW", clientId + " — low standings warning");
-            }
-            missionProcessor.clickFleetNo();
-        } else if (standings < 0.0) {
-            log(clientId, "COMPLETING: standings low — fleet NO.");
-            missionProcessor.clickFleetNo();
-        } else {
-            log(clientId, "COMPLETING: standings healthy — fleet YES.");
-            missionProcessor.clickFleetYes();
-        }
+        chooseFleetReward(clientId, standings);
         missionProcessor.waitAndClickOk(); // dismiss fleet reward confirmation dialog
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
 
@@ -2786,6 +2950,202 @@ public class ClientManager {
         stateManager.getState(clientId).setCurrentMission(null);
         stateManager.getState(clientId).setMissionCheckStartTime(LocalDateTime.MIN);
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+    }
+
+    /**
+     * Pick the fleet reward (share vs take-all) from the agent's standing and click it.
+     * Below 0: take all (fleet_no) to recover standings; healthy: share (fleet_yes).
+     * Exact standings are not logged — OCR misreads the value; only a low-standings warning is kept.
+     */
+    private void chooseFleetReward(String clientId, double standings) {
+        if (Double.isNaN(standings)) {
+            log(clientId, "COMPLETING: standings OCR failed — defaulting to fleet YES.");
+            missionProcessor.clickFleetYes();
+        } else if (standings < -1.0) {
+            log(clientId, "COMPLETING: standings critical — fleet NO.");
+            if (standings < -1.5) {
+                EventLog.log("STANDINGS_LOW", clientId + " — low standings warning");
+            }
+            missionProcessor.clickFleetNo();
+        } else if (standings < 0.0) {
+            log(clientId, "COMPLETING: standings low — fleet NO.");
+            missionProcessor.clickFleetNo();
+        } else {
+            log(clientId, "COMPLETING: standings healthy — fleet YES.");
+            missionProcessor.clickFleetYes();
+        }
+    }
+
+    // =======================================================================
+    // FACTION AGENT — every-2h check, then run the kernite ("Resources for War")
+    // mission: undock → dock at the SOE station → complete → undock → dock home.
+    // =======================================================================
+
+    /**
+     * FACTION_CHECK — open the faction agent and classify his offer:
+     *   - kernite ("Resources for War")  → accept and run it (→ FACTION_TRAVEL).
+     *   - "Evolution" (OCR, no template) → leave it for the user, lock the agent for the session.
+     *   - anything else                  → decline, but at most once per 4h (else leave the offer).
+     * Always returns to IDLE for outcomes that don't start the kernite run.
+     */
+    private void handleFactionCheck(String clientId, ClientWindowInfo window) {
+        ClientState cs = stateManager.getState(clientId);
+
+        // No faction agent icon on screen (e.g. this character has none) — just proceed normally.
+        if (!missionProcessor.isFactionAgentVisible()) {
+            log(clientId, "FACTION_CHECK: no faction agent icon — proceeding normally.");
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            return;
+        }
+
+        // Open the faction agent's conversation.
+        missionProcessor.doubleClickFactionAgent();
+
+        // If no live offer is showing, request one.
+        if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
+            missionProcessor.clickRequestMissionPlain();
+            if (!missionProcessor.waitForNewOffer()) {
+                log(clientId, "FACTION_CHECK: no offer from faction agent — resuming (leaving dialogs as-is).");
+                stateManager.setState(clientId, ClientState.State.IDLE);
+                return;
+            }
+        }
+
+        // 1) Kernite ("Resources for War") — can't accept remotely, so don't click accept here.
+        //    Just undock and head to the SOE station; we accept + complete on arrival.
+        if (missionProcessor.isKerniteOffer()) {
+            log(clientId, "FACTION_CHECK: kernite offer ('Resources for War') — can't accept remotely, undocking to SOE (accept on arrival).");
+            EventLog.log("FACTION_KERNITE", clientId + " — kernite (Resources for War) offered, heading to SOE to accept + complete");
+            cs.setFactionLeg(ClientState.FactionLeg.TO_SOE);
+            stateManager.setState(clientId, ClientState.State.FACTION_TRAVEL);
+            return;
+        }
+
+        // 2) Evolution (no template — OCR) — leave it, never check the faction agent again this session.
+        Mission offer = missionProcessor.readMission(getMissionAreaForClient(clientId));
+        String title = (offer != null && offer.getTitle()   != null) ? offer.getTitle().toLowerCase()   : "";
+        String raw   = (offer != null && offer.getRawText() != null) ? offer.getRawText().toLowerCase() : "";
+        if (title.contains("evolution") || raw.contains("evolution")) {
+            log(clientId, "FACTION_CHECK: 'Evolution' offered — leaving it for manual handling, locking faction agent for the session.");
+            EventLog.log("FACTION_EVOLUTION", clientId + " — Evolution offered, faction agent locked for session");
+            cs.setFactionLocked(true);
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            return;
+        }
+
+        // 3) Anything else — decline, but at most once per 4h.
+        long sinceDecline = Duration.between(cs.getLastFactionDecline(), LocalDateTime.now()).toHours();
+        if (sinceDecline >= FACTION_DECLINE_HOURS) {
+            log(clientId, "FACTION_CHECK: unwanted faction mission — declining (last decline " + sinceDecline + "h ago).");
+            EventLog.log("FACTION_DECLINE", clientId + " — declined faction mission: "
+                    + (offer != null && offer.getTitle() != null ? offer.getTitle() : "unknown"));
+            missionProcessor.clickDeclineButton();
+            cs.setLastFactionDecline(LocalDateTime.now());
+        } else {
+            log(clientId, "FACTION_CHECK: unwanted faction mission but declined < " + FACTION_DECLINE_HOURS
+                    + "h ago (" + sinceDecline + "h) — leaving offer, will retry in " + FACTION_CHECK_HOURS + "h.");
+        }
+        stateManager.setState(clientId, ClientState.State.IDLE);
+    }
+
+    /**
+     * FACTION_TRAVEL — for the current leg (TO_SOE / TO_HOME): undock (any ship), then
+     * right-click the leg's station and Dock. If the station isn't on screen, nudge the
+     * camera ('spin') and retry. Docking is driven through WARPING (dockingToStation),
+     * which routes back here / to FACTION_COMPLETING once the warp lands.
+     */
+    private void handleFactionTravel(String clientId, ClientWindowInfo window) {
+        ClientState cs = stateManager.getState(clientId);
+        ClientState.FactionLeg leg = cs.getFactionLeg();
+        if (leg == ClientState.FactionLeg.NONE) {
+            log(clientId, "FACTION_TRAVEL: no leg set (restart mid-flow?) — returning to IDLE.");
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            return;
+        }
+        String stationKey = (leg == ClientState.FactionLeg.TO_SOE) ? "soe_station" : "home_station";
+
+        // Step 1 — undock (any ship). undockStartTime is reset to MIN on entering FACTION_TRAVEL.
+        if (cs.getUndockStartTime().equals(LocalDateTime.MIN)) {
+            log(clientId, "FACTION_TRAVEL[" + leg + "]: undocking (any ship).");
+            missionProcessor.clickUndock();
+            cs.setUndockStartTime(LocalDateTime.now());
+            return;
+        }
+
+        // Step 2 — wait out the undock animation.
+        long undockElapsed = Duration.between(cs.getUndockStartTime(), LocalDateTime.now()).getSeconds();
+        if (undockElapsed < UNDOCK_WAIT_SECS) {
+            return;
+        }
+
+        // Step 3 — right-click the station → Dock. Spin (nudgeView) until it's visible.
+        if (!missionProcessor.isStationVisible(stationKey)) {
+            long sinceNudge = Duration.between(cs.getLastViewNudge(), LocalDateTime.now()).getSeconds();
+            if (sinceNudge >= VIEW_NUDGE_THROTTLE_SECS) {
+                log(clientId, "FACTION_TRAVEL[" + leg + "]: " + stationKey + " not visible — nudging view (spin) to find it.");
+                missionProcessor.nudgeView();
+                cs.setLastViewNudge(LocalDateTime.now());
+            }
+            return;
+        }
+
+        log(clientId, "FACTION_TRAVEL[" + leg + "]: " + stationKey + " visible — right-click → Dock.");
+        cs.setDockingToStation(true);
+        cs.setWarpStartTime(LocalDateTime.now());
+        stateManager.setState(clientId, ClientState.State.WARPING);
+        new Thread(() -> missionProcessor.rightClickAndSelect(stationKey, "dock")).start();
+    }
+
+    /**
+     * FACTION_COMPLETING — docked at the SOE station: turn in the kernite mission with the
+     * same standings + fleet-reward flow as the normal agent, then head home (→ FACTION_TRAVEL,
+     * TO_HOME leg).
+     */
+    private void handleFactionCompleting(String clientId, ClientWindowInfo window) {
+        ClientState cs = stateManager.getState(clientId);
+        if (cs.getFactionLeg() == ClientState.FactionLeg.NONE) {
+            log(clientId, "FACTION_COMPLETING: no leg set (restart mid-flow?) — returning to IDLE.");
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            return;
+        }
+
+        // Wait until docked — the faction agent's portrait is visible in the station.
+        if (!missionProcessor.isFactionAgentVisible()) {
+            long waiting   = Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds();
+            long sinceDock = Duration.between(cs.getLastCompletingDock(), LocalDateTime.now()).getSeconds();
+            if (waiting >= 60 && sinceDock >= 60 && missionProcessor.isDockVisible()) {
+                log(clientId, "FACTION_COMPLETING: 60s without faction agent — dock visible, clicking dock (twice) in case we never docked.");
+                missionProcessor.clickDockTwice();
+                cs.setLastCompletingDock(LocalDateTime.now());
+                return;
+            }
+            log(clientId, "FACTION_COMPLETING: faction agent not visible yet — waiting.");
+            try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            return;
+        }
+
+        // Accept on the spot (we couldn't accept remotely), then complete immediately.
+        missionProcessor.doubleClickFactionAgent();
+        log(clientId, "FACTION_COMPLETING: accepting kernite at the SOE station.");
+        missionProcessor.clickAcceptButton();
+
+        // Turn in: read standings, complete, fleet reward, OK.
+        missionProcessor.clickAgentStandings();
+        double standings = missionProcessor.readAgentStandings();
+        if (!Double.isNaN(standings)) {
+            cs.setLastKnownStanding(standings);
+        }
+        missionProcessor.doubleClickFactionAgent(); // refocus agent dialog (standings covers complete_mission)
+        missionProcessor.clickCompleteMission();
+        chooseFleetReward(clientId, standings);
+        missionProcessor.waitAndClickOk();
+
+        EventLog.log("FACTION_COMPLETE", clientId + " — kernite (Resources for War) turned in");
+        log(clientId, "FACTION_COMPLETING: kernite turned in — undocking and heading home.");
+
+        // Head back to the home station, then resume normal mission checking.
+        cs.setFactionLeg(ClientState.FactionLeg.TO_HOME);
+        stateManager.setState(clientId, ClientState.State.FACTION_TRAVEL);
     }
 
     // -----------------------------------------------------------------------
@@ -2960,8 +3320,22 @@ public class ClientManager {
 
         if (!missionProcessor.isWarpActive()) {
             if (cs.isDockingToStation()) {
-                log(clientId, "WARPING: dock warp complete after " + elapsed + "s — transitioning to COMPLETING.");
                 cs.setDockingToStation(false);
+                // Faction kernite run docks route differently than normal mission docks.
+                if (cs.getFactionLeg() == ClientState.FactionLeg.TO_SOE) {
+                    log(clientId, "WARPING[FACTION]: docked at SOE station after " + elapsed + "s — transitioning to FACTION_COMPLETING.");
+                    stateManager.setState(clientId, ClientState.State.FACTION_COMPLETING);
+                    return;
+                }
+                if (cs.getFactionLeg() == ClientState.FactionLeg.TO_HOME) {
+                    log(clientId, "WARPING[FACTION]: warp home complete after " + elapsed + "s — waiting for dock confirmation before resuming.");
+                    cs.setFactionLeg(ClientState.FactionLeg.NONE);
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                    cs.setFactionResumePending(true); // IDLE waits for agent_icon, skips travel-resume meanwhile
+                    stateManager.setState(clientId, ClientState.State.IDLE);
+                    return;
+                }
+                log(clientId, "WARPING: dock warp complete after " + elapsed + "s — transitioning to COMPLETING.");
                 stateManager.setState(clientId, ClientState.State.COMPLETING);
                 return;
             }

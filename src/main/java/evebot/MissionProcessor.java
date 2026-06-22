@@ -187,6 +187,39 @@ public class MissionProcessor {
         sleep(1200);
     }
 
+    // -----------------------------------------------------------------------
+    // Faction agent (every-2h kernite check + run)
+    // -----------------------------------------------------------------------
+
+    public void doubleClickFactionAgent() {
+        log("Double-clicking faction_agent to open faction agent dialog");
+        ocrBridge.doubleClickTemplate("faction_agent");
+        sleep(1200);
+    }
+
+    /** True when the faction agent's portrait is visible (docked at his station / convo reachable). */
+    public boolean isFactionAgentVisible() {
+        return ocrBridge.findAnyTemplate("faction_agent") != null;
+    }
+
+    /** True when the 'kernite' (Resources for War) offer dialog template is on screen. */
+    public boolean isKerniteOffer() {
+        return ocrBridge.findAnyTemplate("kernite") != null;
+    }
+
+    /** True when the given station template (e.g. soe_station / home_station) is visible in space. */
+    public boolean isStationVisible(String stationKey) {
+        return ocrBridge.findAnyTemplate(stationKey) != null;
+    }
+
+    /** Request a mission with NO agent_icon fallback — used for the faction agent so we never
+     *  accidentally re-open the regular home agent. */
+    public void clickRequestMissionPlain() {
+        log("Clicking REQUEST MISSION (template only — no agent_icon fallback)");
+        ocrBridge.waitAndClickTemplate("request_mission", 1);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void doubleClickTemplate(String key) {
         log("Double-clicking template: " + key);
         ocrBridge.doubleClickTemplate(key);
@@ -460,6 +493,26 @@ public class MissionProcessor {
             ocrBridge.clickPos(fallbackX, fallbackY);
         }
         sleep(1000); // 1s settle after pressing Set Destination
+    }
+
+    /**
+     * Alternative set-destination via the agent, for missions where the normal on-screen
+     * set_destination prompt isn't used (Dread Pirate Scarlet). Opens the Agency window
+     * (alt+J), clicks the 'active' tab, then right-clicks the agent portrait → hovers the
+     * agent entry → clicks Set Destination. Location-independent, so it can run at any point.
+     */
+    public void setDestinationViaAgent() {
+        log("Set destination via agent: alt+J → 'active' → right-click agent_portrait → hover lara_mesi → set destination.");
+        ocrBridge.altKeyPress("j");          // open the Agency / opportunities window
+        sleep(800);
+        ocrBridge.clickTemplate("active");   // 'Active' tab — must be clicked before right-clicking the portrait
+        sleep(800);
+        ocrBridge.rightClickTemplate("agent_portrait");
+        sleep(800);
+        ocrBridge.hoverTemplate("agent_lara_mesi");
+        sleep(800);
+        ocrBridge.clickTemplate("agent_set_destination");
+        sleep(POST_CLICK_DELAY_MS);
     }
 
     public void clickWarpToLocation() {
@@ -795,6 +848,8 @@ public class MissionProcessor {
         // ship_sk
         if (lower.contains("infested") || lower.contains("ruins")) return "infested";
         if (lower.contains("recon"))                         return "recon1";
+        // Dread Pirate Scarlet (boss "Anire") — also flies ship_sk.
+        if (lower.contains("scarlet") || lower.contains("anire"))  return "scarlet";
         return null;
     }
 

@@ -128,6 +128,7 @@ TEMPLATE_FILES = {
     "agent_portrait": "agent_portrait",          # opportunities screen agent portrait — right-click target
     "agent_lara_mesi": "agent_lara_mesi",        # "Agent: Lara Mesi" submenu entry — hover target
     "agent_set_destination": "agent_set_destination",  # "Set Destination" context menu item — click target
+    "active": "active",  # 'Active' tab in the Agency window (alt+J) — click before right-clicking the agent portrait
     "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
     "enemy2": "enemy2",        # alternate enemy icon in local chat
     "warp_bubble1": "warp_bubble1",  # warp bubble on undock — bubble camp indicator
@@ -196,8 +197,15 @@ TEMPLATE_FILES = {
     "hive": "hive",
     "lock_target": "lock_target",
     "jamed": "jamed",  # ECM jam indicator — Angel combat
+    # Dread Pirate Scarlet — boss "Anire"
+    "anire": "anire",                # Anire overview/target row — double-click to select, ctrl-click to lock
+    "locked_anire": "locked_anire",  # Anire locked-target bracket — gone = destroyed (NOTE: locked_anire.png not present yet)
     # Recon mission — dock at home station to complete
     "home_station": "home_station",
+    # Faction agent (every-2h kernite check + run)
+    "faction_agent": "faction_agent",  # faction agent portrait — double-click to open his convo
+    "soe_station": "soe_station",       # SOE station in space — right-click → Dock for the kernite mission
+    "kernite": "kernite",               # 'Resources for War' (kernite) offer dialog template — accept
 }
 
 # Maps mission dialog template keys → ship template keys.

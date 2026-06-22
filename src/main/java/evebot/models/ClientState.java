@@ -34,7 +34,10 @@ public class ClientState {
         IN_COMBAT,
         RETURNING,    // one-shot setup: set destination home
         COMPLETING,
-        POD_COOLDOWN  // podded — waiting 10min cooldown before resuming
+        POD_COOLDOWN, // podded — waiting 10min cooldown before resuming
+        FACTION_CHECK,      // open the faction agent, classify his offer (every 2h)
+        FACTION_TRAVEL,     // undock + right-click station (soe/home) + dock → WARPING
+        FACTION_COMPLETING  // turn in the kernite mission at the SOE station
     }
 
     /** Tracks which leg of navigation IDLE should handle after a warp lands. */
@@ -42,6 +45,13 @@ public class ClientState {
         NONE,            // at station — check missions normally
         TO_MISSION,      // en route to mission — look for stargates / warp_to_location / activate_gate
         RETURNING_HOME   // heading back   — look for stargates / dock
+    }
+
+    /** Which leg of the faction kernite run is in progress (drives FACTION_TRAVEL + WARPING dock routing). */
+    public enum FactionLeg {
+        NONE,     // not on a faction run
+        TO_SOE,   // outbound — undock home, dock at the SOE station to complete
+        TO_HOME   // returning — undock SOE, dock back home to resume normal checking
     }
 
     // -----------------------------------------------------------------------
@@ -173,6 +183,30 @@ public class ClientState {
     /** When the IDLE travel loop first found no navigation UI on screen (MIN = not waiting). Drives the 60s podded-at-station escalation. */
     private LocalDateTime noTravelUiSince = LocalDateTime.MIN;
 
+    /** Parked for the rest of the session: the faction agent offered "Evolution".
+     *  Per the user's workflow that mission is done manually, so the bot stops checking
+     *  the faction agent until restart. Like standingsLocked, NOT reset by setState. */
+    private boolean factionLocked = false;
+
+    /** Last time the faction agent was checked — the 2h faction-check cadence. Initialised to
+     *  MIN so the very first check fires before anything else (on the first idle tick), then
+     *  every 2h after. NOT reset by setState. */
+    private LocalDateTime lastFactionCheck = LocalDateTime.MIN;
+
+    /** Last time a faction mission was declined — enforces the "decline at most once per 4h" rule.
+     *  MIN until the first decline. NOT reset by setState. */
+    private LocalDateTime lastFactionDecline = LocalDateTime.MIN;
+
+    /** Which leg of the faction kernite run is active — drives FACTION_TRAVEL station choice and
+     *  the WARPING post-dock routing. NOT reset by setState (a cross-state flag like dockingToStation). */
+    private FactionLeg factionLeg = FactionLeg.NONE;
+
+    /** Set when a faction run has docked back home: IDLE must wait for the docked confirmation
+     *  (agent_icon) before resuming normal checking, and must NOT run the travel-resume detection
+     *  meanwhile — a transient stargate frame during the dock approach would otherwise flip us
+     *  into a phantom TO_MISSION. NOT reset by setState. */
+    private boolean factionResumePending = false;
+
     /** Last time the ship was confirmed alive and active — entering combat or checking missions.
      *  (Returning is right after combat, so it's redundant as a liveness signal; mission checking
      *  proves the ship made it home and docked.) Gates the warp-entry pod check: only probe once
@@ -230,6 +264,11 @@ public class ClientState {
             this.warpEndMisses = 0;
             this.lastViewNudge = LocalDateTime.MIN;
             this.frigateLockRechecked = false;
+        }
+        if (state == State.FACTION_TRAVEL) {
+            // Each FACTION_TRAVEL leg re-undocks and re-spins from scratch.
+            this.undockStartTime = LocalDateTime.MIN;
+            this.lastViewNudge   = LocalDateTime.MIN;
         }
     }
 
@@ -290,6 +329,21 @@ public class ClientState {
 
     public boolean isStandingsLocked()               { return standingsLocked; }
     public void    setStandingsLocked(boolean v)     { this.standingsLocked = v; }
+
+    public boolean isFactionLocked()                 { return factionLocked; }
+    public void    setFactionLocked(boolean v)       { this.factionLocked = v; }
+
+    public LocalDateTime getLastFactionCheck()                { return lastFactionCheck; }
+    public void          setLastFactionCheck(LocalDateTime t) { this.lastFactionCheck = t; }
+
+    public LocalDateTime getLastFactionDecline()                { return lastFactionDecline; }
+    public void          setLastFactionDecline(LocalDateTime t) { this.lastFactionDecline = t; }
+
+    public FactionLeg getFactionLeg()             { return factionLeg; }
+    public void       setFactionLeg(FactionLeg l) { this.factionLeg = l; }
+
+    public boolean isFactionResumePending()           { return factionResumePending; }
+    public void    setFactionResumePending(boolean v) { this.factionResumePending = v; }
 
     public LocalDateTime getCombatStartTime()        { return combatStartTime; }
     public void setCombatStartTime(LocalDateTime t)  { this.combatStartTime = t; }
