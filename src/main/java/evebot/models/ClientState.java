@@ -104,6 +104,9 @@ public class ClientState {
     /** Current step in the combat sequence (0 = first step). Reset on entering IN_COMBAT. */
     private int combatStep = 0;
 
+    /** One-shot: has the focus-away click been done for this combat? Reset on entering IN_COMBAT. */
+    private boolean combatFocusClicked = false;
+
     /** Timestamp when the current combat safe-wait began — used to measure elapsed wait time. */
     private LocalDateTime combatWaitStart = LocalDateTime.MIN;
 
@@ -115,6 +118,9 @@ public class ClientState {
 
     /** True once the Sansha extra Alt+F1 cap pulse (fight > 35s) has fired this combat. */
     private boolean extraCapPulseDone = false;
+
+    /** True once the Angel "stop overloading rep" (Shift+c at &gt; 40s fight) has fired this combat. */
+    private boolean angelRepOverloadStopped = false;
 
     /** True once the one-shot 20s support-frigate lock re-check has run this combat
      *  (team missions excluding Jaguar). Targets can drift out of lock even after the
@@ -147,6 +153,10 @@ public class ClientState {
 
     /** True after set_destination was clicked — verify it's gone after the first jump (else re-click). */
     private boolean verifySetDest = false;
+
+    /** Scarlet: set when warping to the mission location. On the next landing the bot enters
+     *  IN_COMBAT directly — the mission is already started (no first activate_gate to trigger it). */
+    private boolean enterCombatOnWarpLand = false;
 
     /** When the pod-death cooldown expires for this client. */
     private LocalDateTime podCooldownEnd = LocalDateTime.MIN;
@@ -258,6 +268,7 @@ public class ClientState {
         }
         if (state == State.IN_COMBAT) {
             this.combatStep = 0;
+            this.combatFocusClicked = false;
             this.combatWaitStart = LocalDateTime.MIN;
             this.combatPollStart = LocalDateTime.MIN;
             this.combatWarpLanded = false;
@@ -315,6 +326,9 @@ public class ClientState {
     public int  getCombatStep()             { return combatStep; }
     public void setCombatStep(int step)     { this.combatStep = step; }
 
+    public boolean isCombatFocusClicked()          { return combatFocusClicked; }
+    public void    setCombatFocusClicked(boolean b) { this.combatFocusClicked = b; }
+
     public LocalDateTime getCombatWaitStart()                { return combatWaitStart; }
     public void          setCombatWaitStart(LocalDateTime t) { this.combatWaitStart = t; }
 
@@ -350,6 +364,9 @@ public class ClientState {
 
     public boolean isExtraCapPulseDone()             { return extraCapPulseDone; }
     public void    setExtraCapPulseDone(boolean v)   { this.extraCapPulseDone = v; }
+
+    public boolean isAngelRepOverloadStopped()           { return angelRepOverloadStopped; }
+    public void    setAngelRepOverloadStopped(boolean v) { this.angelRepOverloadStopped = v; }
 
     public boolean isFrigateLockRechecked()           { return frigateLockRechecked; }
     public void    setFrigateLockRechecked(boolean v) { this.frigateLockRechecked = v; }
@@ -392,6 +409,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public double getLastKnownStanding()             { return lastKnownStanding; }
     public void   setLastKnownStanding(double v)     { this.lastKnownStanding = v; }
+
+    public boolean isEnterCombatOnWarpLand()           { return enterCombatOnWarpLand; }
+    public void    setEnterCombatOnWarpLand(boolean v) { this.enterCombatOnWarpLand = v; }
 
     public LocalDateTime getLastCompletingDock()                { return lastCompletingDock; }
     public void          setLastCompletingDock(LocalDateTime t) { this.lastCompletingDock = t; }

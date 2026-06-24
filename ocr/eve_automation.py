@@ -156,6 +156,7 @@ TEMPLATE_FILES = {
     "mission_sansha": "mission_sansha",  # → ship_sansha
     "mission_angel": "mission_angel",  # → ship_angel
     "mission_infested": "mission_infested",  # → ship_sk  (Infested Ruins)
+    "mission_scarlet": "mission_scarlet",  # → ship_sk  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
@@ -199,7 +200,7 @@ TEMPLATE_FILES = {
     "jamed": "jamed",  # ECM jam indicator — Angel combat
     # Dread Pirate Scarlet — boss "Anire"
     "anire": "anire",                # Anire overview/target row — double-click to select, ctrl-click to lock
-    "locked_anire": "locked_anire",  # Anire locked-target bracket — gone = destroyed (NOTE: locked_anire.png not present yet)
+    "locked_anire": "locked_anire",  # Anire locked-target bracket — gone = destroyed
     # Recon mission — dock at home station to complete
     "home_station": "home_station",
     # Faction agent (every-2h kernite check + run)
@@ -223,6 +224,7 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_sansha",    "ship_sansha",  None),
     ("mission_angel",     "ship_angel",   None),
     ("mission_infested",  "ship_sk",     ["infested", "hive", "ruins"]),
+    ("mission_scarlet",   "ship_sk",     None),
 ]
 
 # -----------------------------------------------------------------------------

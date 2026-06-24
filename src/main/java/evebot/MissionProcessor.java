@@ -230,6 +230,22 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate(key);
     }
 
+    /**
+     * Confirm a template is really gone, filtering single-frame false negatives.
+     * Re-scans up to {@code samples} times (with {@code gapMs} between scans) and
+     * returns true ONLY if every scan misses. Returns false as soon as one scan finds
+     * it — so a momentary match-miss on something still on screen won't read as "gone".
+     */
+    public boolean confirmTemplateGone(String key, int samples, int gapMs) {
+        for (int i = 0; i < samples; i++) {
+            if (ocrBridge.findAnyTemplate(key) != null) {
+                return false; // still there — the earlier miss was a false negative
+            }
+            if (i < samples - 1) sleep(gapMs);
+        }
+        return true; // missed every scan — genuinely gone
+    }
+
     public String findAnyTemplate(String... keys) {
         return ocrBridge.findAnyTemplate(keys);
     }
@@ -454,6 +470,19 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    /**
+     * Press a key, wait, then press it again — used to toggle a module off (e.g. 's' to
+     * deactivate the warp module). Back-to-back presses fire too fast for EVE to register
+     * the second one as a deactivation, so a gap is needed between them.
+     */
+    public void keyPressTwice(String keys, int gapMs) {
+        log("Pressing keys twice (" + gapMs + "ms gap): " + keys);
+        ocrBridge.keyPress(keys);
+        sleep(gapMs);
+        ocrBridge.keyPress(keys);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
     public void shiftKeyPress(String keys) {
         log("Shift+pressing keys: " + keys);
         ocrBridge.shiftKeyPress(keys);
@@ -507,11 +536,14 @@ public class MissionProcessor {
         sleep(800);
         ocrBridge.clickTemplate("active");   // 'Active' tab — must be clicked before right-clicking the portrait
         sleep(800);
+        sleep(1000);                         // extra settle before right-clicking the agent icon
         ocrBridge.rightClickTemplate("agent_portrait");
         sleep(800);
         ocrBridge.hoverTemplate("agent_lara_mesi");
         sleep(800);
         ocrBridge.clickTemplate("agent_set_destination");
+        sleep(800);
+        ocrBridge.clickTemplate("close_active_window");  // close the agency window once, now that destination is set
         sleep(POST_CLICK_DELAY_MS);
     }
 
