@@ -32,6 +32,12 @@ public class OCRBridge {
     private final Gson gson;
     private final PyDaemon daemon;
 
+    /** Name of the client currently being processed — used as the log tag instead of "OCRBridge"
+     *  so each line shows which EVE client it acted on. Set by ClientManager on every tick. */
+    private static volatile String activeClient = "OCRBridge";
+    public static void setActiveClient(String c) { if (c != null && !c.isEmpty()) activeClient = c; }
+    public static String getActiveClient() { return activeClient; }
+
     // -----------------------------------------------------------------------
 
     public OCRBridge() {
@@ -50,11 +56,11 @@ public class OCRBridge {
         };
         for (String path : candidates) {
             if (new java.io.File(path).exists()) {
-                System.out.println("[OCRBridge] Found " + filename + " at: " + path);
+                System.out.println("[" + activeClient + "] Found " + filename + " at: " + path);
                 return path;
             }
         }
-        System.err.printf("[%s] [OCRBridge] WARNING: %s not found.%n",
+        System.err.printf("[%s] [" + activeClient + "] WARNING: %s not found.%n",
                 ts(), filename);
         return "ocr/" + filename;
     }
@@ -95,14 +101,14 @@ public class OCRBridge {
 
             int exitCode = process.waitFor();
             if (exitCode != 0) {
-                System.err.println("[OCRBridge] Python exited with code " + exitCode);
+                System.err.println("[" + activeClient + "] Python exited with code " + exitCode);
             }
 
             String result = output.toString().trim();
             return result.isEmpty() ? "" : result;
 
         } catch (Exception e) {
-            System.err.println("[OCRBridge] Error running Python: " + e.getMessage());
+            System.err.println("[" + activeClient + "] Error running Python: " + e.getMessage());
             return null;
         }
     }
@@ -125,7 +131,7 @@ public class OCRBridge {
             JsonObject r = trySend(cmd);
             if (r != null) return r;
             // One restart + retry — covers a daemon that died between calls.
-            System.err.printf("[%s] [OCRBridge] daemon call failed — restarting daemon.%n", ts());
+            System.err.printf("[%s] [" + activeClient + "] daemon call failed — restarting daemon.%n", ts());
             stop();
             return trySend(cmd);
         }
@@ -140,7 +146,7 @@ public class OCRBridge {
                 if (line == null) throw new IOException("daemon closed stdout");
                 return gson.fromJson(line, JsonObject.class);
             } catch (Exception e) {
-                System.err.printf("[%s] [OCRBridge] daemon send error: %s%n", ts(), e.getMessage());
+                System.err.printf("[%s] [" + activeClient + "] daemon send error: %s%n", ts(), e.getMessage());
                 stop();
                 return null;
             }
@@ -169,7 +175,7 @@ public class OCRBridge {
             stderrThread.start();
 
             String ready = out.readLine();  // daemon prints {"ok":true,"value":"ready"}
-            System.out.printf("[%s] [OCRBridge] daemon started: %s%n", ts(), ready);
+            System.out.printf("[%s] [" + activeClient + "] daemon started: %s%n", ts(), ready);
         }
 
         synchronized void stop() {
@@ -230,7 +236,7 @@ public class OCRBridge {
      * visible. One screenshot inside the daemon.
      */
     public String classifyMissionOffer(int x, int y, int width, int height) {
-        System.out.printf("[%s] [OCRBridge] classifyMissionOffer (template-first, region %d,%d %dx%d)%n",
+        System.out.printf("[%s] [" + activeClient + "] classifyMissionOffer (template-first, region %d,%d %dx%d)%n",
                 ts(), x, y, width, height);
         JsonObject c = cmd("classify_offer");
         JsonObject region = new JsonObject();
@@ -244,11 +250,11 @@ public class OCRBridge {
 
     private Mission parseMissionJson(String jsonString) {
         if (jsonString == null || jsonString.isEmpty()) return null;
-        System.out.printf("[%s] [OCRBridge] Raw OCR output: %s%n", ts(), jsonString);
+        System.out.printf("[%s] [" + activeClient + "] Raw OCR output: %s%n", ts(), jsonString);
         try {
             JsonObject json = gson.fromJson(jsonString, JsonObject.class);
             if (json.has("error")) {
-                System.err.println("[OCRBridge] OCR error: " + json.get("error").getAsString());
+                System.err.println("[" + activeClient + "] OCR error: " + json.get("error").getAsString());
                 return null;
             }
             Mission mission = new Mission();
@@ -269,7 +275,7 @@ public class OCRBridge {
             }
             return mission;
         } catch (JsonSyntaxException e) {
-            System.err.println("[OCRBridge] Invalid JSON: " + e.getMessage());
+            System.err.println("[" + activeClient + "] Invalid JSON: " + e.getMessage());
             return null;
         }
     }
@@ -284,16 +290,16 @@ public class OCRBridge {
                 String.valueOf(x), String.valueOf(y),
                 String.valueOf(width), String.valueOf(height));
         if (json == null || json.isEmpty()) return Double.NaN;
-        System.out.printf("[%s] [OCRBridge] Standings OCR output: %s%n", ts(), json);
+        System.out.printf("[%s] [" + activeClient + "] Standings OCR output: %s%n", ts(), json);
         try {
             JsonObject obj = gson.fromJson(json, JsonObject.class);
             if (obj.has("error")) {
-                System.err.println("[OCRBridge] Standings OCR error: " + obj.get("error").getAsString());
+                System.err.println("[" + activeClient + "] Standings OCR error: " + obj.get("error").getAsString());
                 return Double.NaN;
             }
             return obj.get("standings").getAsDouble();
         } catch (Exception e) {
-            System.err.println("[OCRBridge] Standings parse error: " + e.getMessage());
+            System.err.println("[" + activeClient + "] Standings parse error: " + e.getMessage());
             return Double.NaN;
         }
     }
@@ -307,7 +313,7 @@ public class OCRBridge {
      * exit 0 = clicked, exit 1 = not found within timeout.
      */
     public void clickTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] clickTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] clickTemplate: %s%n", ts(), key);
         JsonObject c = cmd("click");
         c.addProperty("key", key);
         sendAction(c);
@@ -317,7 +323,7 @@ public class OCRBridge {
      * Left-click a template, offset offsetY pixels below its centre.
      */
     public void clickTemplateBelow(String key, int offsetY) {
-        System.out.printf("[%s] [OCRBridge] clickTemplateBelow: %s +%dpx%n", ts(), key, offsetY);
+        System.out.printf("[%s] [" + activeClient + "] clickTemplateBelow: %s +%dpx%n", ts(), key, offsetY);
         JsonObject c = cmd("click");
         c.addProperty("key", key);
         c.addProperty("offset_y", offsetY);
@@ -329,7 +335,7 @@ public class OCRBridge {
      * Used for: activating ships in hangar, opening agent dialog.
      */
     public void doubleClickTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] doubleClickTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] doubleClickTemplate: %s%n", ts(), key);
         JsonObject c = cmd("double_click");
         c.addProperty("key", key);
         sendAction(c);
@@ -339,7 +345,7 @@ public class OCRBridge {
      * Right-click: find the named template on screen and right-click its centre.
      */
     public void rightClickTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] rightClickTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] rightClickTemplate: %s%n", ts(), key);
         JsonObject c = cmd("right_click");
         c.addProperty("key", key);
         sendAction(c);
@@ -349,7 +355,7 @@ public class OCRBridge {
      * Right-click at fixed screen coordinates (not template-based).
      */
     public void rightClickPos(int x, int y) {
-        System.out.printf("[%s] [OCRBridge] rightClickPos: (%d,%d)%n", ts(), x, y);
+        System.out.printf("[%s] [" + activeClient + "] rightClickPos: (%d,%d)%n", ts(), x, y);
         JsonObject c = cmd("right_click_pos");
         c.addProperty("x", x);
         c.addProperty("y", y);
@@ -360,7 +366,7 @@ public class OCRBridge {
      * Left-click at fixed screen coordinates (not template-based).
      */
     public void clickPos(int x, int y) {
-        System.out.printf("[%s] [OCRBridge] clickPos: (%d,%d)%n", ts(), x, y);
+        System.out.printf("[%s] [" + activeClient + "] clickPos: (%d,%d)%n", ts(), x, y);
         JsonObject c = cmd("click_pos");
         c.addProperty("x", x);
         c.addProperty("y", y);
@@ -373,7 +379,7 @@ public class OCRBridge {
      * re-paints — used to help template detection. Does not move the ship.
      */
     public void dragPos(int x, int y, int dx, int dy) {
-        System.out.printf("[%s] [OCRBridge] dragPos: (%d,%d) by (%d,%d)%n", ts(), x, y, dx, dy);
+        System.out.printf("[%s] [" + activeClient + "] dragPos: (%d,%d) by (%d,%d)%n", ts(), x, y, dx, dy);
         JsonObject c = cmd("drag_pos");
         c.addProperty("x", x);
         c.addProperty("y", y);
@@ -387,7 +393,7 @@ public class OCRBridge {
      * Used for opening submenus on hover (e.g. Locations in right-click context menu).
      */
     public void hoverTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] hoverTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] hoverTemplate: %s%n", ts(), key);
         JsonObject c = cmd("hover");
         c.addProperty("key", key);
         sendAction(c);
@@ -398,7 +404,7 @@ public class OCRBridge {
      * Used for stargate jumps and activate-gate interactions.
      */
     public void eClickTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] eClickTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] eClickTemplate: %s%n", ts(), key);
         JsonObject c = cmd("e_click");
         c.addProperty("key", key);
         sendAction(c);
@@ -409,7 +415,7 @@ public class OCRBridge {
      * Used for keep-at-range commands in combat.
      */
     public void wClickTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] wClickTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] wClickTemplate: %s%n", ts(), key);
         JsonObject c = cmd("w_click");
         c.addProperty("key", key);
         sendAction(c);
@@ -420,7 +426,7 @@ public class OCRBridge {
      * Used for orbit commands in combat.
      */
     public void qClickTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] qClickTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] qClickTemplate: %s%n", ts(), key);
         JsonObject c = cmd("q_click");
         c.addProperty("key", key);
         sendAction(c);
@@ -431,7 +437,7 @@ public class OCRBridge {
      * Used for locking targets in combat.
      */
     public void ctrlClickTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] ctrlClickTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] ctrlClickTemplate: %s%n", ts(), key);
         JsonObject c = cmd("ctrl_click");
         c.addProperty("key", key);
         sendAction(c);
@@ -442,16 +448,16 @@ public class OCRBridge {
      * Returns the number of targets clicked, or 0 if none found.
      */
     public int ctrlClickAllTemplate(String key) {
-        System.out.printf("[%s] [OCRBridge] ctrlClickAllTemplate: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] ctrlClickAllTemplate: %s%n", ts(), key);
         JsonObject c = cmd("ctrl_click_all");
         c.addProperty("key", key);
         JsonObject r = daemon.send(c);
         if (r == null || !r.has("value") || r.get("value").isJsonNull()) {
-            System.err.printf("[%s] [OCRBridge] ctrlClickAllTemplate: no result.%n", ts());
+            System.err.printf("[%s] [" + activeClient + "] ctrlClickAllTemplate: no result.%n", ts());
             return 0;
         }
         int count = r.get("value").getAsInt();
-        System.out.printf("[%s] [OCRBridge] ctrlClickAllTemplate: locked %d targets.%n", ts(), count);
+        System.out.printf("[%s] [" + activeClient + "] ctrlClickAllTemplate: locked %d targets.%n", ts(), count);
         return count;
     }
 
@@ -460,28 +466,28 @@ public class OCRBridge {
      * Used for activating module groups in combat (e.g., "adc").
      */
     public void keyPress(String keys) {
-        System.out.printf("[%s] [OCRBridge] keyPress: %s%n", ts(), keys);
+        System.out.printf("[%s] [" + activeClient + "] keyPress: %s%n", ts(), keys);
         JsonObject c = cmd("key_press");
         c.addProperty("keys", keys);
         sendAction(c);
     }
 
     public void shiftKeyPress(String keys) {
-        System.out.printf("[%s] [OCRBridge] shiftKeyPress: %s%n", ts(), keys);
+        System.out.printf("[%s] [" + activeClient + "] shiftKeyPress: %s%n", ts(), keys);
         JsonObject c = cmd("shift_key_press");
         c.addProperty("keys", keys);
         sendAction(c);
     }
 
     public void ctrlKeyPress(String keys) {
-        System.out.printf("[%s] [OCRBridge] ctrlKeyPress: %s%n", ts(), keys);
+        System.out.printf("[%s] [" + activeClient + "] ctrlKeyPress: %s%n", ts(), keys);
         JsonObject c = cmd("ctrl_key_press");
         c.addProperty("keys", keys);
         sendAction(c);
     }
 
     public void altKeyPress(String key) {
-        System.out.printf("[%s] [OCRBridge] altKeyPress: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] altKeyPress: %s%n", ts(), key);
         JsonObject c = cmd("alt_key_press");
         c.addProperty("key", key);
         sendAction(c);
@@ -491,7 +497,7 @@ public class OCRBridge {
      * Hold Ctrl and press R — reloads modules in EVE.
      */
     public void ctrlR() {
-        System.out.printf("[%s] [OCRBridge] ctrlR (reload modules)%n", ts());
+        System.out.printf("[%s] [" + activeClient + "] ctrlR (reload modules)%n", ts());
         sendAction(cmd("ctrl_r"));
     }
 
@@ -502,7 +508,7 @@ public class OCRBridge {
      * the menu with a left-click in space. Returns true if podded, false otherwise.
      */
     public boolean isFlyingPod() {
-        System.out.printf("[%s] [OCRBridge] podCheck (right-click centre → look for eject)%n", ts());
+        System.out.printf("[%s] [" + activeClient + "] podCheck (right-click centre → look for eject)%n", ts());
         return sendBool(cmd("pod_check"));
     }
 
@@ -527,14 +533,14 @@ public class OCRBridge {
     public static final String SHIP_NOT_FOUND = "SHIP_NOT_FOUND";
 
     public String repairShip(String missionTitle) {
-        System.out.printf("[%s] [OCRBridge] repairShip for mission: %s%n", ts(), missionTitle);
+        System.out.printf("[%s] [" + activeClient + "] repairShip for mission: %s%n", ts(), missionTitle);
         String output = runPython("python", automationScriptPath,
                 "--repair-ship", missionTitle != null ? missionTitle : "");
         if (output == null || output.isEmpty()) {
-            System.err.printf("[%s] [OCRBridge] repairShip FAILED (no output).%n", ts());
+            System.err.printf("[%s] [" + activeClient + "] repairShip FAILED (no output).%n", ts());
             return null;
         }
-        System.out.printf("[%s] [OCRBridge] repairShip result: %s%n", ts(), output);
+        System.out.printf("[%s] [" + activeClient + "] repairShip result: %s%n", ts(), output);
         try {
             JsonObject json = gson.fromJson(output, JsonObject.class);
             if (json.has("ship_not_found") && json.get("ship_not_found").getAsBoolean()) {
@@ -545,7 +551,7 @@ public class OCRBridge {
             }
             return "";  // success but no dialog match (OCR fallback was used)
         } catch (JsonSyntaxException e) {
-            System.err.printf("[%s] [OCRBridge] repairShip: could not parse JSON: %s%n", ts(), e.getMessage());
+            System.err.printf("[%s] [" + activeClient + "] repairShip: could not parse JSON: %s%n", ts(), e.getMessage());
             return "";  // repair succeeded (got output) but JSON parse failed — treat as success
         }
     }
@@ -556,7 +562,7 @@ public class OCRBridge {
      * multiple waitForTemplate calls.
      */
     public String findAnyTemplate(String... keys) {
-        System.out.printf("[%s] [OCRBridge] findAnyTemplate: %s%n", ts(), java.util.Arrays.toString(keys));
+        System.out.printf("[%s] [" + activeClient + "] findAnyTemplate: %s%n", ts(), java.util.Arrays.toString(keys));
         JsonObject c = cmd("find_any");
         JsonArray arr = new JsonArray();
         for (String key : keys) arr.add(key);
@@ -568,7 +574,7 @@ public class OCRBridge {
      * Find a template and return its centre coordinates as {x, y}, or null if not found.
      */
     public int[] findTemplatePos(String key) {
-        System.out.printf("[%s] [OCRBridge] findTemplatePos: %s%n", ts(), key);
+        System.out.printf("[%s] [" + activeClient + "] findTemplatePos: %s%n", ts(), key);
         JsonObject c = cmd("find_pos");
         c.addProperty("key", key);
         String result = sendString(c);
@@ -577,7 +583,7 @@ public class OCRBridge {
             try {
                 return new int[]{ Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) };
             } catch (NumberFormatException e) {
-                System.err.printf("[%s] [OCRBridge] findTemplatePos: bad output '%s'%n", ts(), result);
+                System.err.printf("[%s] [" + activeClient + "] findTemplatePos: bad output '%s'%n", ts(), result);
             }
         }
         return null;
@@ -587,7 +593,7 @@ public class OCRBridge {
      * Wait up to timeoutSeconds for a template to appear. Returns true if found.
      */
     public boolean waitForTemplate(String key, int timeoutSeconds) {
-        System.out.printf("[%s] [OCRBridge] waitForTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
+        System.out.printf("[%s] [" + activeClient + "] waitForTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
         JsonObject c = cmd("wait");
         c.addProperty("key", key);
         c.addProperty("timeout", timeoutSeconds);
@@ -595,7 +601,7 @@ public class OCRBridge {
     }
 
     public boolean waitForTemplateGone(String key, int timeoutSeconds) {
-        System.out.printf("[%s] [OCRBridge] waitForTemplateGone: %s (%ds)%n", ts(), key, timeoutSeconds);
+        System.out.printf("[%s] [" + activeClient + "] waitForTemplateGone: %s (%ds)%n", ts(), key, timeoutSeconds);
         JsonObject c = cmd("wait_gone");
         c.addProperty("key", key);
         c.addProperty("timeout", timeoutSeconds);
@@ -607,7 +613,7 @@ public class OCRBridge {
      * or null on timeout. One screenshot per poll cycle checks all keys.
      */
     public String waitForAnyTemplate(int timeoutSeconds, String... keys) {
-        System.out.printf("[%s] [OCRBridge] waitForAnyTemplate: %s (%ds)%n",
+        System.out.printf("[%s] [" + activeClient + "] waitForAnyTemplate: %s (%ds)%n",
                 ts(), java.util.Arrays.toString(keys), timeoutSeconds);
         JsonObject c = cmd("wait_any");
         JsonArray arr = new JsonArray();
@@ -622,7 +628,7 @@ public class OCRBridge {
      * Returns true on success, false on timeout.
      */
     public boolean waitAndClickTemplate(String key, int timeoutSeconds) {
-        System.out.printf("[%s] [OCRBridge] waitAndClickTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
+        System.out.printf("[%s] [" + activeClient + "] waitAndClickTemplate: %s (%ds)%n", ts(), key, timeoutSeconds);
         JsonObject c = cmd("wait_click");
         c.addProperty("key", key);
         c.addProperty("timeout", timeoutSeconds);

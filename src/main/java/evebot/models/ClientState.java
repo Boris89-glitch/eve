@@ -95,11 +95,18 @@ public class ClientState {
     /** True on the first IDLE tick right after exiting WARPING — triggers the 8s jump-settle wait. */
     private boolean justExitedWarp = false;
 
+    /** True when the just-ended warp was long enough that the landing safe wait should be skipped. */
+    private boolean skipLandingSettle = false;
+
     /** Current step in the bubble escape sequence (0 = not in bubble escape). Reset on entering WARPING. */
     private int bubbleEscapeStep = 0;
 
     /** Timestamp when the current bubble escape wait began. */
     private LocalDateTime bubbleEscapeStart = LocalDateTime.MIN;
+
+    /** Times the current warp has been re-issued after a failed warp-start check
+     *  (bubble present or warp_active not showing). Reset on entering WARPING. */
+    private int warpRetryCount = 0;
 
     /** Current step in the combat sequence (0 = first step). Reset on entering IN_COMBAT. */
     private int combatStep = 0;
@@ -139,6 +146,11 @@ public class ClientState {
      *  This client yields to the other and does no work until the bot is restarted.
      *  Deliberately NOT reset by setState — it persists across all state transitions. */
     private boolean standingsLocked = false;
+
+    /** Parked for the rest of the session due to an unrecoverable error (e.g. redock not
+     *  confirmed, repair failed / hangar not found). Yields to the other client and does no
+     *  work until the bot is restarted. Like standingsLocked, NOT reset by setState. */
+    private boolean parked = false;
 
     /** Last agent standing read at mission completion, used to gate standings-restricted
      *  missions (recon 1, scarlet, pot-and-kettle — accepted only when standing &lt; 1).
@@ -265,6 +277,7 @@ public class ClientState {
             this.lastWarpCheck = LocalDateTime.MIN;
             this.bubbleEscapeStep = 0;
             this.bubbleEscapeStart = LocalDateTime.MIN;
+            this.warpRetryCount = 0;
         }
         if (state == State.IN_COMBAT) {
             this.combatStep = 0;
@@ -322,6 +335,8 @@ public class ClientState {
 
     public boolean isJustExitedWarp()              { return justExitedWarp; }
     public void    setJustExitedWarp(boolean v)    { this.justExitedWarp = v; }
+    public boolean isSkipLandingSettle()           { return skipLandingSettle; }
+    public void    setSkipLandingSettle(boolean v) { this.skipLandingSettle = v; }
 
     public int  getCombatStep()             { return combatStep; }
     public void setCombatStep(int step)     { this.combatStep = step; }
@@ -343,6 +358,8 @@ public class ClientState {
 
     public boolean isStandingsLocked()               { return standingsLocked; }
     public void    setStandingsLocked(boolean v)     { this.standingsLocked = v; }
+    public boolean isParked()                        { return parked; }
+    public void    setParked(boolean v)              { this.parked = v; }
 
     public boolean isFactionLocked()                 { return factionLocked; }
     public void    setFactionLocked(boolean v)       { this.factionLocked = v; }
@@ -376,6 +393,9 @@ public class ClientState {
 
     public LocalDateTime getBubbleEscapeStart()                { return bubbleEscapeStart; }
     public void          setBubbleEscapeStart(LocalDateTime t) { this.bubbleEscapeStart = t; }
+
+    public int  getWarpRetryCount()         { return warpRetryCount; }
+    public void setWarpRetryCount(int v)    { this.warpRetryCount = v; }
 
 public boolean isDockingToStation()             { return dockingToStation; }
     public void    setDockingToStation(boolean v)   { this.dockingToStation = v; }

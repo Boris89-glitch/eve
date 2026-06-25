@@ -201,6 +201,7 @@ TEMPLATE_FILES = {
     # Dread Pirate Scarlet — boss "Anire"
     "anire": "anire",                # Anire overview/target row — double-click to select, ctrl-click to lock
     "locked_anire": "locked_anire",  # Anire locked-target bracket — gone = destroyed
+    "approach": "approach",          # right-click menu "Approach" item — used on locked_anire
     # Recon mission — dock at home station to complete
     "home_station": "home_station",
     # Faction agent (every-2h kernite check + run)

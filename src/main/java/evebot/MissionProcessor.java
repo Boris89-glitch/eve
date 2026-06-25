@@ -33,6 +33,9 @@ public class MissionProcessor {
     private final OCRBridge ocrBridge;
 
     private static final int POST_CLICK_DELAY_MS = 40;
+    // Emergency redock confirmation: poll agent_icon up to ~24s while the dock completes.
+    private static final int REDOCK_CONFIRM_TRIES = 12;
+    private static final int REDOCK_CONFIRM_INTERVAL_MS = 2000;
 
     public MissionProcessor() {
         this.ocrBridge = new OCRBridge();
@@ -315,7 +318,7 @@ public class MissionProcessor {
         log("Step 1: Repair + activate ship");
         String dialogMatched = ocrBridge.repairShip(lookup);
         if (dialogMatched == null) {
-            System.err.println("[MissionProcessor] repairShip failed — aborting.");
+            System.err.println("[" + OCRBridge.getActiveClient() + "] repairShip failed — aborting.");
             return null;
         }
         if (OCRBridge.SHIP_NOT_FOUND.equals(dialogMatched)) {
@@ -581,14 +584,27 @@ public class MissionProcessor {
     }
 
     /**
-     * Emergency re-dock: right-click home_station → click dock_safe.
+     * Emergency re-dock: right-click home_station → click dock_safe, then confirm we
+     * actually made it into the hangar. Docking warps to the station first and then docks,
+     * so it is NOT instant — poll for the agent icon before reporting success, otherwise the
+     * caller would try to repair/board while still in space (hangar not found).
+     * Returns true only when agent_icon is visible (confirmed docked).
      */
-    public void emergencyRedock() {
-        log("EMERGENCY-REDOCK: bubble camp detected — docking back");
+    public boolean emergencyRedock() {
+        log("EMERGENCY-REDOCK: docking back to station");
         ocrBridge.rightClickTemplate("home_station");
         sleep(800);
         ocrBridge.clickTemplate("dock_safe");
         sleep(POST_CLICK_DELAY_MS);
+        for (int i = 0; i < REDOCK_CONFIRM_TRIES; i++) {
+            sleep(REDOCK_CONFIRM_INTERVAL_MS);
+            if (ocrBridge.findAnyTemplate("agent_icon") != null) {
+                log("EMERGENCY-REDOCK: agent_icon visible — confirmed docked in station.");
+                return true;
+            }
+        }
+        log("EMERGENCY-REDOCK: agent_icon NOT visible after wait — dock NOT confirmed.");
+        return false;
     }
 
     /** Check if we are in the KLY-C0 system. */
@@ -886,7 +902,7 @@ public class MissionProcessor {
     }
 
     private void log(String msg) {
-        System.out.printf("[%s] [MissionProcessor] %s%n",
-                java.time.LocalDateTime.now().format(TS), msg);
+        System.out.printf("[%s] [%s] %s%n",
+                java.time.LocalDateTime.now().format(TS), OCRBridge.getActiveClient(), msg);
     }
 }
