@@ -338,6 +338,20 @@ class TemplateMatcher:
                     directory / fname,
                 )
 
+        # Auto-reject mission templates: any 'mission_reject_*' image in the
+        # templates dir is loaded under its filename stem, no registry entry
+        # needed. classify_offer matches these to decline an offer immediately
+        # (no OCR). Drop a PNG in to add another unwanted mission.
+        for ext in (".png", ".jpg", ".bmp"):
+            for path in sorted(directory.glob("mission_reject_*" + ext)):
+                key = path.stem
+                if key in self.templates:
+                    continue
+                img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                if img is not None:
+                    self.templates[key] = img
+                    log.debug("Loaded auto-reject template '%s' (%s)", key, path.name)
+
     def status(self) -> str:
         loaded = sorted(self.templates.keys())
         missing = sorted(k for k in TEMPLATE_FILES if k not in self.templates)
@@ -793,7 +807,7 @@ class TemplateMatcher:
         self,
         key: str,
         timeout: float = 10.0,
-        interval: float = 0.4,
+        interval: float = 0.5,
         delay: float = 0.3,
         threshold=None,
     ) -> bool:
@@ -1886,6 +1900,15 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
             y1 = max(y0, min(int(region["y"]) + int(region["h"]), sh))
             if x1 > x0 and y1 > y0:
                 search = screen[y0:y1, x0:x1]
+        # Auto-reject templates first: a match means decline immediately (no OCR).
+        # Signalled to Java with a 'reject:' prefix on the matched key.
+        for reject_key in sorted(k for k in matcher.templates if k.startswith("mission_reject_")):
+            try:
+                hit = matcher.find(reject_key, screen=search)
+            except Exception:
+                hit = matcher.find(reject_key, screen=screen)  # crop smaller than template
+            if hit:
+                return {"ok": True, "value": "reject:" + reject_key}
         for dialog_key, _ship_key, _kw in MISSION_TEMPLATE_TO_SHIP:
             if dialog_key not in matcher.templates:
                 continue

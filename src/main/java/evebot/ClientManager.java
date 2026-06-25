@@ -928,6 +928,23 @@ public class ClientManager {
         // Scan is restricted to the dialog region for speed (~9x vs full screen).
         String missionTemplate = missionProcessor.classifyMissionOffer(getMissionAreaForClient(clientId));
 
+        // --- Auto-reject fast path ---------------------------------------
+        // A 'mission_reject_*' template matched: decline immediately, no OCR.
+        // Confirm a live OFFER dialog first so a stale match can't mis-click.
+        if (missionTemplate != null && missionTemplate.startsWith("reject:")) {
+            if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
+                log(clientId, "Auto-reject template '" + missionTemplate.substring(7)
+                        + "' matched but no live OFFER dialog — requesting new mission.");
+                missionProcessor.clickRequestMission();
+                return;
+            }
+            System.out.println(">>> [" + clientId + "] DECLINE — auto-reject template "
+                    + missionTemplate.substring(7) + " (no OCR)");
+            missionProcessor.clickDeclineButton();
+            stateManager.setState(clientId, ClientState.State.DECLINING);
+            return;
+        }
+
         if (missionTemplate == null) {
             // No known wanted-mission template visible. Some wanted missions have no
             // dialog template and are identified by title only (e.g. Scarlet, Pot and
