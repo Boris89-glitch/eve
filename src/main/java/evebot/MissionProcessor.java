@@ -176,8 +176,10 @@ public class MissionProcessor {
         if ("untrack".equals(found)) {
             log("'untrack' visible — already tracked, skipping.");
         } else if ("track".equals(found)) {
+            // 'track' was just confirmed present by the scan above — click with a 1s cap
+            // instead of clickTemplate's default 2s re-search (avoids locating it twice).
             log("'track' visible — clicking Track.");
-            ocrBridge.clickTemplate("track");
+            ocrBridge.waitAndClickTemplate("track", 1);
             sleep(POST_CLICK_DELAY_MS);
         } else {
             log("Neither 'track' nor 'untrack' found — assuming past tracking step.");
@@ -369,6 +371,7 @@ public class MissionProcessor {
 
     public void clickUndock() {
         log("Clicking UNDOCK (template)");
+        sleep(1000);   // 1s settle before clicking undock
         ocrBridge.clickTemplate("undock");
         sleep(POST_CLICK_DELAY_MS);
     }
@@ -537,9 +540,17 @@ public class MissionProcessor {
         log("Set destination via agent: alt+J → 'active' → right-click agent_portrait → hover lara_mesi → set destination.");
         ocrBridge.altKeyPress("j");          // open the Agency / opportunities window
         sleep(800);
-        ocrBridge.clickTemplate("active");   // 'Active' tab — must be clicked before right-clicking the portrait
-        sleep(800);
-        sleep(1000);                         // extra settle before right-clicking the agent icon
+        // Click the 'Active' tab (must precede the portrait right-click), wait 1s for the
+        // agent portrait to render, then check. The portrait sometimes isn't ready yet (slow
+        // Agency load, or the tab click missed) — re-click 'Active' and recheck, up to 5x.
+        int activeRetries = 0;
+        while (true) {
+            ocrBridge.clickTemplate("active");
+            sleep(1000);   // 1s delay before checking for the agent portrait
+            if (ocrBridge.findAnyTemplate("agent_portrait") != null) break;
+            if (++activeRetries >= 5) break;
+            log("agent_portrait not visible — re-clicking 'active' and rechecking (attempt " + activeRetries + "/5).");
+        }
         ocrBridge.rightClickTemplate("agent_portrait");
         sleep(800);
         ocrBridge.hoverTemplate("agent_lara_mesi");
@@ -814,7 +825,7 @@ public class MissionProcessor {
      * Used by the WARPING state to know when warp has ended.
      */
     public boolean isWarpActive() {
-        return ocrBridge.findAnyTemplate("warp_active", "warp_active2") != null;
+        return ocrBridge.findAnyTemplate("warp_active", "warp_active2", "warp_active3") != null;
     }
 
     /**

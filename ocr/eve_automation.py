@@ -107,6 +107,7 @@ TEMPLATE_FILES = {
     "orbit": "orbit",            # orbit target button
     "warp_active": "warp_active",
     "warp_active2": "warp_active2",
+    "warp_active3": "warp_active3",
     "dock": "dock",
     "dock_safe": "dock_safe",  # safe dock option in Locations submenu (insta-dock)
     "abort": "abort",          # abort undock button — visible during undock animation
@@ -792,7 +793,7 @@ class TemplateMatcher:
         self,
         key: str,
         timeout: float = 10.0,
-        interval: float = 0.5,
+        interval: float = 0.4,
         delay: float = 0.3,
         threshold=None,
     ) -> bool:
@@ -1051,16 +1052,18 @@ def quit_mission_and_request_new(matcher) -> bool:
     return False
 
 
-def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
+def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bool = False) -> dict:
     """
-    Full ship select + repair flow for the ship matching mission_title:
+    Full ship select + repair flow for the ship matching mission_title, using a
+    caller-supplied matcher (CLI spawn OR resident daemon — the daemon reuses its
+    already-loaded templates so there's no per-call process/import cost):
       0. Click Ship Hangar to open the hangar view
       1. Find ship icon via template matching
       2. Right-click ship icon → Get Repair Quote → Repair All → Yes
       3. Right-click ship icon → Board Ship to make it the active ship
-    Exit 0 = success, 1 = ship template not found.
+    Returns a result dict; does NOT print or exit (the caller surfaces it):
+      {"ship_not_found": True} | {"failed": True} | {"ship_template": k[, "dialog_matched": k]}
     """
-    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
     ship_map = load_ship_mission_map()
 
     # Primary: scan the open mission dialog for a known visual template
@@ -1083,8 +1086,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             mission_title,
         )
         quit_mission_and_request_new(matcher)
-        print(json.dumps({"ship_not_found": True}), flush=True)
-        sys.exit(0)
+        return {"ship_not_found": True}
 
     if ship_template not in matcher.templates:
         log.error(
@@ -1092,7 +1094,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             ship_template,
             ship_template,
         )
-        sys.exit(1)
+        return {"failed": True}
 
     log.info("=== Repair + Activate flow for mission: '%s' ===", mission_title)
     log.info("Using ship template: %s", ship_template)
@@ -1116,28 +1118,34 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             result = {"ship_template": ship_template}
             if dialog_matched:
                 result["dialog_matched"] = dialog_matched
-            print(json.dumps(result), flush=True)
-            sys.exit(0)
+            return result
         else:
             log.warning(
                 "[DRY RUN] Ship template '%s' not found on screen", ship_template
             )
-            sys.exit(1)
+            return {"failed": True}
 
-    # --- Step 0: Open Ship Hangar ---
-    log.info("Step 0: Clicking 'Ship Hangar' to open hangar view...")
-    if not matcher.wait_and_click("ship_hangar", timeout=1.0, delay=1.0):
-        log.error("'Ship Hangar' not found — cannot open hangar")
-        sys.exit(1)
+    # --- Step 0: Open Ship Hangar (only if the ship isn't already on screen) ---
+    # The ship hangar is usually already open — the ship icon is right there. Check for it
+    # first; if it's visible the hangar is open, so skip the hangar click and its 1s settle.
+    # Only open the hangar when no ship is detected.
+    log.info("Step 0: Checking whether ship icon '%s' is already visible...", ship_template)
+    ship_match = matcher.find(ship_template)
+    if ship_match:
+        log.info("Ship icon already visible — hangar open, skipping hangar click.")
+    else:
+        log.info("Ship not visible — clicking 'Ship Hangar' to open hangar view...")
+        if not matcher.wait_and_click("ship_hangar", timeout=1.0, delay=1.0):
+            log.error("'Ship Hangar' not found — cannot open hangar")
+            return {"failed": True}
+        # --- Step 1: Find ship icon now that the hangar is open ---
+        log.info("Step 1: Locating ship icon '%s'...", ship_template)
+        ship_match = matcher.wait_for(ship_template, timeout=2.0)
 
-    # --- Step 1: Find ship icon and lock its coordinates ---
-    log.info("Step 1: Locating ship icon '%s'...", ship_template)
-    ship_match = matcher.wait_for(ship_template, timeout=2.0)
     if not ship_match:
         log.warning("Ship icon '%s' not found — quitting mission and requesting new one", ship_template)
         quit_mission_and_request_new(matcher)
-        print(json.dumps({"ship_not_found": True}), flush=True)
-        sys.exit(0)
+        return {"ship_not_found": True}
     ship_cx, ship_cy = matcher.center(ship_match)
     log.info(
         "Ship icon locked at (%d,%d) — will reuse for repair and activation",
@@ -1151,9 +1159,9 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
 
     # --- Step 3: Click "Get Repair Quote" ---
     log.info("Step 3: Clicking 'Get Repair Quote'...")
-    if not matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=1.2):
+    if not matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6):
         log.error("'Get Repair Quote' not found in context menu")
-        sys.exit(1)
+        return {"failed": True}
 
     # --- Step 4: Click "Repair" (Repair All) — unless ship is already fully repaired ---
     log.info("Step 4: Checking for 'already repaired' notice or 'Repair' button...")
@@ -1164,7 +1172,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
     else:
         if not matcher.wait_and_click("repair", timeout=2.0, delay=0.8):
             log.error("'Repair' button not found in repair dialog")
-            sys.exit(1)
+            return {"failed": True}
 
         # --- Step 5: Confirm with "Yes" or "OK" ---
         log.info("Step 5: Clicking 'Yes'/'OK' to confirm repair...")
@@ -1181,7 +1189,7 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
             )
 
     log.info("Repair complete. Waiting for dialog to settle...")
-    time.sleep(1.0)
+    time.sleep(0.5)
 
     # --- Step 6: Right-click the SAME locked coordinates → Board Ship ---
     log.info(
@@ -1196,10 +1204,19 @@ def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
         log.warning("'Board Ship' not found in context menu — ship may already be active.")
 
     log.info("=== Ship repaired and activated successfully ===")
-    # Print JSON result to stdout so Java can read the dialog match
     result = {"ship_template": ship_template}
     if dialog_matched:
         result["dialog_matched"] = dialog_matched
+    return result
+
+
+def cmd_repair_ship(mission_title: str, dry_run: bool, threshold: float):
+    """CLI/spawn-path entry: build a matcher, run the flow, and preserve the original
+    stdout/exit contract (result JSON on stdout, exit 1 on hard failure)."""
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    result = repair_ship_flow(matcher, mission_title, dry_run=dry_run)
+    if result.get("failed"):
+        sys.exit(1)
     print(json.dumps(result), flush=True)
     sys.exit(0)
 
@@ -1888,13 +1905,24 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         )
         return {"ok": True, "value": mission}
 
+    if cmd == "repair_ship":
+        # Full repair + activate flow on the resident matcher — no spawn/import cost.
+        # value is the result dict: ship_not_found / failed / {ship_template[,dialog_matched]}.
+        result = repair_ship_flow(matcher, msg.get("title", ""))
+        return {"ok": True, "value": result}
+
     if cmd == "shutdown":
         return {"ok": True, "value": "bye"}
 
     return {"ok": False, "error": "unknown cmd: %s" % cmd}
 
 
-def run_daemon(threshold: float = 0.80):
+def run_daemon(threshold: float = 0.80, verbose: bool = False):
+    # Quiet by default: the per-action INFO echoes (clicks, dialog matched, pod verdict)
+    # duplicate the Java-side state logs. Raise to WARNING unless --verbose is passed, so
+    # warnings/errors still surface. Java passes --verbose when -Docr.verbose=true.
+    if not verbose:
+        log.setLevel(logging.WARNING)
     matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
     reader_box: dict = {}  # lazily holds an EVEMissionReader for OCR commands
     log.info("Daemon ready — %d templates loaded.", len(matcher.templates))
@@ -1948,6 +1976,9 @@ Examples:
     parser.add_argument("--daemon", action="store_true",
                         help="Run as a persistent daemon: read JSON commands from stdin, "
                              "reply with JSON on stdout. Templates load once.")
+    parser.add_argument("--verbose", action="store_true",
+                        help="Daemon: keep INFO-level per-action logs (clicks, dialog match, "
+                             "pod verdict). Off by default — only WARNING+ is logged.")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--loop", action="store_true")
     parser.add_argument("--run-once", action="store_true")
@@ -2043,7 +2074,7 @@ Examples:
     args = parser.parse_args()
 
     if args.daemon:
-        run_daemon(threshold=args.threshold)
+        run_daemon(threshold=args.threshold, verbose=args.verbose)
         return
 
     if args.check:
