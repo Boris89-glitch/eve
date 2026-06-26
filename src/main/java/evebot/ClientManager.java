@@ -1914,8 +1914,8 @@ public class ClientManager {
                 // support at a time means there is never a second support bracket to stall on;
                 // the main stays locked throughout — we only ever re-lock supports.
                 log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click ONE target_navitas (support) + target_enyo (main).");
-                missionProcessor.ctrlClickTemplate("target_navitas");
-                missionProcessor.ctrlClickTemplate("target_enyo");
+                missionProcessor.ctrlClickTemplateOnce("target_navitas");
+                missionProcessor.ctrlClickTemplateOnce("target_enyo");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
@@ -1932,7 +1932,7 @@ public class ClientManager {
                     cs.setCombatStep(8);
                 } else {
                     log(clientId, "COMBAT[Enyo] Step 7: locked_navitas NOT found (out of range) — relocking one support.");
-                    missionProcessor.ctrlClickTemplate("target_navitas");
+                    missionProcessor.ctrlClickTemplateOnce("target_navitas");
                     cs.setCombatWaitStart(LocalDateTime.now());
                 }
                 break;
@@ -1963,7 +1963,7 @@ public class ClientManager {
                     cs.setFrigateLockRechecked(true);
                     if (missionProcessor.findTemplate("locked_navitas") == null) {
                         log(clientId, "COMBAT[Enyo] 20s lock re-check: locked_navitas gone (drifted) — re-locking + re-firing, restarting firing wait.");
-                        missionProcessor.ctrlClickTemplate("target_navitas");
+                        missionProcessor.ctrlClickTemplateOnce("target_navitas");
                         missionProcessor.keyPress("adc");
                         cs.setCombatWaitStart(LocalDateTime.now()); // fire just restarted — reset countdown
                         return;
@@ -2011,7 +2011,7 @@ public class ClientManager {
                     }
                 } else if (elapsed >= 3) {
                     log(clientId, "COMBAT[Enyo] Step 10: locked_enyo NOT found — relocking the enyo.");
-                    missionProcessor.ctrlClickTemplate("target_enyo");
+                    missionProcessor.ctrlClickTemplateOnce("target_enyo");
                     cs.setCombatWaitStart(LocalDateTime.now());
                 }
                 break;
@@ -2097,8 +2097,8 @@ public class ClientManager {
                 // Lock exactly ONE support (bantam) + the main ship (hawk). Only ever one support
                 // bracket at a time, so a survivor can't stall the kill loop; the main stays locked.
                 log(clientId, "COMBAT[Hawk] Step 5: Ctrl+click ONE target_bantam (support) + target_hawk (main).");
-                missionProcessor.ctrlClickTemplate("target_bantam");
-                missionProcessor.ctrlClickTemplate("target_hawk");
+                missionProcessor.ctrlClickTemplateOnce("target_bantam");
+                missionProcessor.ctrlClickTemplateOnce("target_hawk");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(6);
                 break;
@@ -2115,7 +2115,7 @@ public class ClientManager {
                     cs.setCombatStep(7);
                 } else {
                     log(clientId, "COMBAT[Hawk] Step 6: locked_bantam NOT found (out of range) — relocking one support.");
-                    missionProcessor.ctrlClickTemplate("target_bantam");
+                    missionProcessor.ctrlClickTemplateOnce("target_bantam");
                     cs.setCombatWaitStart(LocalDateTime.now());
                 }
                 break;
@@ -2146,7 +2146,7 @@ public class ClientManager {
                     cs.setFrigateLockRechecked(true);
                     if (missionProcessor.findTemplate("locked_bantam") == null) {
                         log(clientId, "COMBAT[Hawk] 20s lock re-check: locked_bantam gone (drifted) — re-locking + re-firing, restarting firing wait.");
-                        missionProcessor.ctrlClickTemplate("target_bantam");
+                        missionProcessor.ctrlClickTemplateOnce("target_bantam");
                         missionProcessor.keyPress("adc");
                         cs.setCombatWaitStart(LocalDateTime.now()); // fire just restarted — reset countdown
                         return;
@@ -2194,7 +2194,7 @@ public class ClientManager {
                     }
                 } else if (elapsed >= 3) {
                     log(clientId, "COMBAT[Hawk] Step 9: locked_hawk NOT found — relocking the hawk.");
-                    missionProcessor.ctrlClickTemplate("target_hawk");
+                    missionProcessor.ctrlClickTemplateOnce("target_hawk");
                     cs.setCombatWaitStart(LocalDateTime.now());
                 }
                 break;
@@ -2308,6 +2308,15 @@ public class ClientManager {
                 missionProcessor.altKeyPress("f1");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(10);
+                // Modules are running and keep-at-range is set — the fight runs unattended, so
+                // switch to the other client once here as we start waiting for mission end (same
+                // as Angel). Focus returns via the force-switch watchdog / other client yielding,
+                // and step 10 then polls completion (and the >60s extra cap pulse).
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Sansha] cap set — waiting for mission end, switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
                 break;
             }
             case 10: {
@@ -2319,11 +2328,11 @@ public class ClientManager {
                     break;
                 }
 
-                // Long fight: if the whole combat has run past 50s and we're still not
+                // Long fight: if the whole combat has run past 60s and we're still not
                 // done, give the cap module another Alt+F1 pulse (once).
                 if (!cs.isExtraCapPulseDone()
-                        && Duration.between(cs.getCombatStartTime(), LocalDateTime.now()).getSeconds() > 50) {
-                    log(clientId, "COMBAT[Sansha] fight > 50s — Alt+F1 again (extra cap pulse).");
+                        && Duration.between(cs.getCombatStartTime(), LocalDateTime.now()).getSeconds() > 60) {
+                    log(clientId, "COMBAT[Sansha] fight > 60s — Alt+F1 again (extra cap pulse).");
                     missionProcessor.altKeyPress("f1");
                     cs.setExtraCapPulseDone(true);
                 }
@@ -2778,11 +2787,11 @@ public class ClientManager {
             }
             case 11: {
                 // No client switching — stay and wait for Anire to die. Hold off polling until
-                // 15s after activating modules, then watch for the locked_anire bracket to disappear.
+                // 20s after activating modules, then watch for the locked_anire bracket to disappear.
                 // Destination is already set (step 2), so on death we just jump and head home.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    log(clientId, "COMBAT[Scarlet] waiting for Anire to die (" + elapsed + "s / 15s before checking).");
+                if (elapsed < 20) {
+                    log(clientId, "COMBAT[Scarlet] waiting for Anire to die (" + elapsed + "s / 20s before checking).");
                     return;
                 }
                 if (missionProcessor.findTemplate("locked_anire") == null) {
@@ -2862,9 +2871,17 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                // Range settle (keep_at_range template check removed)
+                // Range settle (keep_at_range template check removed). Modules are running and
+                // keep-at-range is set, so the fight runs unattended — switch to the other client
+                // once here, as we start waiting for mission end. Focus returns via the
+                // force-switch watchdog / other client yielding, and step 6 then polls completion.
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(6);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Angel] range set — waiting for mission end, switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
                 break;
             }
             case 6: {
@@ -3298,13 +3315,16 @@ public class ClientManager {
         }
 
         // 3) Anything else — decline, but at most once per 4h.
+        boolean neverDeclined = cs.getLastFactionDecline().equals(LocalDateTime.MIN);
         long sinceDecline = Duration.between(cs.getLastFactionDecline(), LocalDateTime.now()).toHours();
-        if (sinceDecline >= FACTION_DECLINE_HOURS) {
-            log(clientId, "FACTION_CHECK: unwanted faction mission — declining (last decline " + sinceDecline + "h ago).");
+        String sinceStr = neverDeclined ? "never" : sinceDecline + "h ago";
+        if (neverDeclined || sinceDecline >= FACTION_DECLINE_HOURS) {
+            log(clientId, "FACTION_CHECK: unwanted faction mission — declining (last decline " + sinceStr + ").");
             EventLog.log("FACTION_DECLINE", clientId + " — declined faction mission: "
                     + (offer != null && offer.getTitle() != null ? offer.getTitle() : "unknown"));
             missionProcessor.clickDeclineButton();
-            cs.setLastFactionDecline(LocalDateTime.now());
+            missionProcessor.clickTemplate("close");   // dismiss the agent window after declining
+            stateManager.recordFactionDecline(clientId, LocalDateTime.now());
         } else {
             log(clientId, "FACTION_CHECK: unwanted faction mission but declined < " + FACTION_DECLINE_HOURS
                     + "h ago (" + sinceDecline + "h) — leaving offer, will retry in " + FACTION_CHECK_HOURS + "h.");
@@ -3728,6 +3748,12 @@ public class ClientManager {
                 }
                 log(clientId, "WARPING: dock warp complete after " + elapsed + "s — transitioning to COMPLETING.");
                 stateManager.setState(clientId, ClientState.State.COMPLETING);
+                // Check once for the agent icon before yielding — we may already be in station with
+                // the icon loaded, in which case keep focus and let COMPLETING run next tick.
+                if (missionProcessor.detectCompletingUI() != null) {
+                    log(clientId, "COMPLETING: agent icon already visible — holding focus to complete now.");
+                    return;
+                }
                 // The agent icon can take a while to appear after docking (station UI load).
                 // Hand the foreground to the other client meanwhile rather than spinning on the
                 // wait — the watchdog brings focus back here once it's time to complete.

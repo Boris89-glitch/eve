@@ -423,7 +423,21 @@ public class MissionProcessor {
     }
 
     public void ctrlClickTemplate(String key) {
-        log("Ctrl+clicking template: " + key);
+        // Lock reliability: a single ctrl+click sometimes fails to register the lock. So
+        // ctrl+click the target, a swift click in empty space (screen centre) to clear the
+        // active selection, then ctrl+click again to make sure the lock takes.
+        log("Ctrl+clicking template (lock, double-tap): " + key);
+        ocrBridge.ctrlClickTemplate(key);
+        ocrBridge.clickPos(960, 540);   // swift click away in the middle (empty space)
+        ocrBridge.ctrlClickTemplate(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** Single ctrl+click lock — the original behaviour, no mid-click double-tap. Used by
+     *  Enyo/Hawk where several supports are locked in sequence and the {@link #ctrlClickTemplate}
+     *  mid-click reset would clear a just-made lock selection. */
+    public void ctrlClickTemplateOnce(String key) {
+        log("Ctrl+clicking template (lock, single): " + key);
         ocrBridge.ctrlClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }

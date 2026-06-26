@@ -81,6 +81,7 @@ TEMPLATE_FILES = {
     "track": "track",
     "untrack": "untrack",  # visible when mission is already tracked
     "close_active_window": "close_active_window",
+    "close": "close",  # generic close button — clicked once after declining a faction mission
     "complete_mission": "complete_mission",
     "not_complete": "not_complete",  # mission accepted but not yet completable
     "completed": "completed",  # mission done, ready to turn in

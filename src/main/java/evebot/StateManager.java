@@ -31,6 +31,10 @@ public class StateManager {
     /** Global pod-death cooldown — all clients must wait until this time before resuming. */
     private volatile LocalDateTime podCooldownEnd = LocalDateTime.MIN;
     private static final Path STATE_FILE = Paths.get("config", "bot_state.json");
+    /** Faction decline timestamps live in their own file so they survive a bot_state.json wipe
+     *  (which is cleared every restart). Maps clientId → last faction-decline time. */
+    private static final Path FACTION_FILE = Paths.get("config", "faction_decline.json");
+    private final Map<String, LocalDateTime> factionDeclines = new ConcurrentHashMap<>();
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss");
     private final Gson gson;
 
@@ -44,6 +48,7 @@ public class StateManager {
                 .registerTypeAdapter(LocalDateTime.class, new LocalDateTimeAdapter())
                 .create();
 
+        loadFactionDeclines();   // before loadStates so loaded clients pick up their decline time
         loadStates();
         registerHotkey();
     }
@@ -148,6 +153,8 @@ public class StateManager {
         return states.computeIfAbsent(clientId, id -> {
             ClientState cs = new ClientState(id);
             cs.setState(DEFAULT_START_STATE);
+            LocalDateTime fd = factionDeclines.get(id);
+            if (fd != null) cs.setLastFactionDecline(fd);   // survives bot_state.json wipe
             log("[StateManager] New client '" + id + "' starting in " + DEFAULT_START_STATE);
             return cs;
         });
@@ -197,6 +204,8 @@ public class StateManager {
                     cs.setMissionTracked(dto.missionTracked);
                     cs.setCombatStep(dto.combatStep);
                     cs.setLastKnownStanding(dto.lastKnownStanding != null ? dto.lastKnownStanding : Double.NaN);
+                    LocalDateTime fd = factionDeclines.get(id);
+                    if (fd != null) cs.setLastFactionDecline(fd);
                     if (dto.missionTitle != null || dto.missionTarget != null || dto.missionShipTarget != null) {
                         Mission m = new Mission();
                         m.setTitle(dto.missionTitle);
@@ -228,6 +237,39 @@ public class StateManager {
             // scheduled monitor tick, and an uncaught throw here cancels the whole
             // ScheduledExecutorService task — silently killing the bot.
             System.err.println("[StateManager] Failed to save state: " + e.getMessage());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Faction decline persistence (separate file — outlives a bot_state.json wipe)
+    // -----------------------------------------------------------------------
+
+    private void loadFactionDeclines() {
+        if (!Files.exists(FACTION_FILE)) return;
+        try {
+            String json = new String(Files.readAllBytes(FACTION_FILE));
+            Type t = new TypeToken<Map<String, LocalDateTime>>(){}.getType();
+            Map<String, LocalDateTime> m = gson.fromJson(json, t);
+            if (m != null) {
+                factionDeclines.putAll(m);
+                log("[StateManager] Loaded " + factionDeclines.size() + " faction decline time(s) from disk.");
+            }
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to load faction declines: " + e.getMessage());
+        }
+    }
+
+    /** Record a faction decline for a client — updates the in-memory state and persists to the
+     *  dedicated faction file so the 4h cooldown survives restarts (and bot_state.json wipes). */
+    public void recordFactionDecline(String clientId, LocalDateTime when) {
+        factionDeclines.put(clientId, when);
+        getState(clientId).setLastFactionDecline(when);
+        try {
+            Files.createDirectories(FACTION_FILE.getParent());
+            Files.write(FACTION_FILE, gson.toJson(factionDeclines).getBytes(),
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to save faction declines: " + e.getMessage());
         }
     }
 
