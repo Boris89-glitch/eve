@@ -108,6 +108,11 @@ public class ClientState {
      *  (bubble present or warp_active not showing). Reset on entering WARPING. */
     private int warpRetryCount = 0;
 
+    /** True when the current WARPING was entered to evade to a safe spot (enemy in local).
+     *  If warp_active never engages, the handler nudges + retries the safe-spot warp twice,
+     *  then abandons the evade and jumps the gate normally instead of redocking. */
+    private boolean safeSpotWarp = false;
+
     /** Current step in the combat sequence (0 = first step). Reset on entering IN_COMBAT. */
     private int combatStep = 0;
 
@@ -154,7 +159,9 @@ public class ClientState {
 
     /** Last agent standing read at mission completion, used to gate standings-restricted
      *  missions (recon 1, scarlet, pot-and-kettle — accepted only when standing &lt; 1).
-     *  NaN until the first completion populates it. NOT reset by setState. */
+     *  NaN until the first completion populates it. NOT reset by setState.
+     *  TODO: allow one client to read/share the other client's standing (currently strictly
+     *  per-client — each client only ever sees its own agent's standing). */
     private double lastKnownStanding = Double.NaN;
 
 /** True when docking to home station after combat — WARPING should transition to COMPLETING. */
@@ -172,6 +179,12 @@ public class ClientState {
 
     /** When the pod-death cooldown expires for this client. */
     private LocalDateTime podCooldownEnd = LocalDateTime.MIN;
+
+    /** Set when an emergency redock fired and we switched away: the next time this client
+     *  regains focus (in POD_COOLDOWN), check for pod_station before anything else. A match
+     *  means the redock failed and we were podded. One-shot, cleared after the check.
+     *  NOT reset by setState (a cross-state flag like dockingToStation). */
+    private boolean pendingPodStationCheck = false;
 
     /** True after the first re-click of decline in DECLINING — next failure triggers agent double-click. */
     private boolean declineRetried = false;
@@ -195,6 +208,9 @@ public class ClientState {
 
     /** Last time the POD_COOLDOWN handler swapped clients — prevents rapid-fire switching. */
     private LocalDateTime lastCooldownSwap = LocalDateTime.MIN;
+
+    /** Last time the POD_COOLDOWN handler logged the remaining time — throttles the countdown log. */
+    private LocalDateTime lastCooldownLog = LocalDateTime.MIN;
 
     /** Last time the WARPING test pod check ran — throttles the eject-menu probe. */
     private LocalDateTime lastPodCheck = LocalDateTime.MIN;
@@ -271,6 +287,7 @@ public class ClientState {
             this.jumpCount        = 0;
             this.klyChecked       = false;
             this.warpedToSafeSpot = false;
+            this.safeSpotWarp     = false;
             this.windowsClosedAfterJump1 = false;
         }
         if (state == State.WARPING) {
@@ -278,6 +295,7 @@ public class ClientState {
             this.bubbleEscapeStep = 0;
             this.bubbleEscapeStart = LocalDateTime.MIN;
             this.warpRetryCount = 0;
+            this.safeSpotWarp = false; // evade entries re-set this true after setState(WARPING)
         }
         if (state == State.IN_COMBAT) {
             this.combatStep = 0;
@@ -397,11 +415,17 @@ public class ClientState {
     public int  getWarpRetryCount()         { return warpRetryCount; }
     public void setWarpRetryCount(int v)    { this.warpRetryCount = v; }
 
+    public boolean isSafeSpotWarp()         { return safeSpotWarp; }
+    public void    setSafeSpotWarp(boolean v) { this.safeSpotWarp = v; }
+
 public boolean isDockingToStation()             { return dockingToStation; }
     public void    setDockingToStation(boolean v)   { this.dockingToStation = v; }
 
     public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
     public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }
+
+    public boolean isPendingPodStationCheck()           { return pendingPodStationCheck; }
+    public void    setPendingPodStationCheck(boolean v) { this.pendingPodStationCheck = v; }
 
     public boolean isDeclineRetried()              { return declineRetried; }
     public void    setDeclineRetried(boolean v)    { this.declineRetried = v; }
@@ -423,6 +447,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public LocalDateTime getLastCooldownSwap()                { return lastCooldownSwap; }
     public void          setLastCooldownSwap(LocalDateTime t) { this.lastCooldownSwap = t; }
+
+    public LocalDateTime getLastCooldownLog()                 { return lastCooldownLog; }
+    public void          setLastCooldownLog(LocalDateTime t)  { this.lastCooldownLog = t; }
 
     public LocalDateTime getLastPodCheck()                { return lastPodCheck; }
     public void          setLastPodCheck(LocalDateTime t) { this.lastPodCheck = t; }

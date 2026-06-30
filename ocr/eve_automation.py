@@ -206,6 +206,8 @@ TEMPLATE_FILES = {
     "approach": "approach",          # right-click menu "Approach" item — used on locked_anire
     # Recon mission — dock at home station to complete
     "home_station": "home_station",
+    # Pod sitting in the station hangar — confirms an emergency redock ended in a pod death
+    "pod_station": "pod_station",
     # Faction agent (every-2h kernite check + run)
     "faction_agent": "faction_agent",  # faction agent portrait — double-click to open his convo
     "soe_station": "soe_station",       # SOE station in space — right-click → Dock for the kernite mission
@@ -1179,16 +1181,41 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
         return {"failed": True}
 
     # --- Step 4: Click "Repair" (Repair All) — unless ship is already fully repaired ---
-    log.info("Step 4: Checking for 'already repaired' notice or 'Repair' button...")
-    if matcher.find("already_repaired"):
-        log.info(
-            "Ship already fully repaired — skipping repair steps, proceeding to activation."
+    # The repair-quote dialog needs a server round-trip to populate the "Repair All"
+    # button, and sometimes the dialog fails to open at all. Instead of a single fixed
+    # wait, instantly re-check for the button; if it isn't there, re-issue the
+    # right-click → Get Repair Quote sequence and check again, looping until it shows.
+    # Bounded by MAX_REPAIR_ATTEMPTS so a station with no repair facility can't spin
+    # forever and block the other clients.
+    MAX_REPAIR_ATTEMPTS = 8
+    log.info("Step 4: Looking for 'already repaired' notice or 'Repair' button (retrying)...")
+    repaired_already = False
+    repair_clicked = False
+    for attempt in range(1, MAX_REPAIR_ATTEMPTS + 1):
+        if matcher.find("already_repaired"):
+            log.info(
+                "Ship already fully repaired — skipping repair steps, proceeding to activation."
+            )
+            repaired_already = True
+            break
+        if matcher.click("repair", delay=0.8):
+            log.info("'Repair' button clicked (attempt %d).", attempt)
+            repair_clicked = True
+            break
+        # Button not on screen yet — re-open the quote dialog and check again.
+        log.warning(
+            "'Repair' button not visible (attempt %d/%d) — re-requesting quote...",
+            attempt,
+            MAX_REPAIR_ATTEMPTS,
         )
-    else:
-        if not matcher.wait_and_click("repair", timeout=2.0, delay=0.8):
-            log.error("'Repair' button not found in repair dialog")
-            return {"failed": True}
+        matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
+        matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6)
 
+    if not repaired_already and not repair_clicked:
+        log.error("'Repair' button not found after %d attempts", MAX_REPAIR_ATTEMPTS)
+        return {"failed": True}
+
+    if repair_clicked:
         # --- Step 5: Confirm with "Yes" or "OK" ---
         log.info("Step 5: Clicking 'Yes'/'OK' to confirm repair...")
         confirm_key, confirm_match = matcher.wait_for_any(
