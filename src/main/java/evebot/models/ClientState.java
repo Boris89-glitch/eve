@@ -160,9 +160,14 @@ public class ClientState {
     /** Last agent standing read at mission completion, used to gate standings-restricted
      *  missions (recon 1, scarlet, pot-and-kettle — accepted only when standing &lt; 1).
      *  NaN until the first completion populates it. NOT reset by setState.
-     *  TODO: allow one client to read/share the other client's standing (currently strictly
-     *  per-client — each client only ever sees its own agent's standing). */
+     *  Shared across clients via {@link evebot.StateManager#getOtherState}: a completing
+     *  client compares its own standing against the fleet partner's to decide the fleet reward. */
     private double lastKnownStanding = Double.NaN;
+
+    /** When this client last grabbed (accepted) a mission. Read by the fleet partner: for 2
+     *  minutes after a grab, the partner raises its take-all threshold (fleet reward). MIN until
+     *  the first accept. NOT reset by setState. */
+    private LocalDateTime lastMissionGrab = LocalDateTime.MIN;
 
 /** True when docking to home station after combat — WARPING should transition to COMPLETING. */
     private boolean dockingToStation = false;
@@ -456,6 +461,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public double getLastKnownStanding()             { return lastKnownStanding; }
     public void   setLastKnownStanding(double v)     { this.lastKnownStanding = v; }
+
+    public LocalDateTime getLastMissionGrab()                { return lastMissionGrab; }
+    public void          setLastMissionGrab(LocalDateTime t) { this.lastMissionGrab = t; }
 
     public boolean isEnterCombatOnWarpLand()           { return enterCombatOnWarpLand; }
     public void    setEnterCombatOnWarpLand(boolean v) { this.enterCombatOnWarpLand = v; }

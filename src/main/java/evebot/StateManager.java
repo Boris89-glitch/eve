@@ -35,6 +35,11 @@ public class StateManager {
      *  (which is cleared every restart). Maps clientId → last faction-decline time. */
     private static final Path FACTION_FILE = Paths.get("config", "faction_decline.json");
     private final Map<String, LocalDateTime> factionDeclines = new ConcurrentHashMap<>();
+    /** Last known agent standings live in their own file so they survive a bot_state.json wipe
+     *  (which is cleared every restart) — otherwise every restart re-starts with unknown standings.
+     *  Maps clientId → last read standing. */
+    private static final Path STANDINGS_FILE = Paths.get("config", "standings.json");
+    private final Map<String, Double> standings = new ConcurrentHashMap<>();
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss");
     private final Gson gson;
 
@@ -49,6 +54,7 @@ public class StateManager {
                 .create();
 
         loadFactionDeclines();   // before loadStates so loaded clients pick up their decline time
+        loadStandings();         // before loadStates so loaded clients pick up their standing
         loadStates();
         registerHotkey();
     }
@@ -155,9 +161,21 @@ public class StateManager {
             cs.setState(DEFAULT_START_STATE);
             LocalDateTime fd = factionDeclines.get(id);
             if (fd != null) cs.setLastFactionDecline(fd);   // survives bot_state.json wipe
+            Double st = standings.get(id);
+            if (st != null) cs.setLastKnownStanding(st);     // survives bot_state.json wipe
             log("[StateManager] New client '" + id + "' starting in " + DEFAULT_START_STATE);
             return cs;
         });
+    }
+
+    /** Returns another client's state (any client whose id differs from {@code clientId}),
+     *  or null if this is the only client. Practically the fleet partner — used to share
+     *  standings and grab timing across the two clients. */
+    public ClientState getOtherState(String clientId) {
+        for (Map.Entry<String, ClientState> e : states.entrySet()) {
+            if (!e.getKey().equals(clientId)) return e.getValue();
+        }
+        return null;
     }
 
     public void setState(String clientId, ClientState.State newState) {
@@ -204,6 +222,8 @@ public class StateManager {
                     cs.setMissionTracked(dto.missionTracked);
                     cs.setCombatStep(dto.combatStep);
                     cs.setLastKnownStanding(dto.lastKnownStanding != null ? dto.lastKnownStanding : Double.NaN);
+                    Double st = standings.get(id);
+                    if (st != null) cs.setLastKnownStanding(st);   // dedicated file wins — survives bot_state.json wipe
                     LocalDateTime fd = factionDeclines.get(id);
                     if (fd != null) cs.setLastFactionDecline(fd);
                     if (dto.missionTitle != null || dto.missionTarget != null || dto.missionShipTarget != null) {
@@ -270,6 +290,41 @@ public class StateManager {
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (Exception e) {
             System.err.println("[StateManager] Failed to save faction declines: " + e.getMessage());
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Standings persistence (separate file — outlives a bot_state.json wipe)
+    // -----------------------------------------------------------------------
+
+    private void loadStandings() {
+        if (!Files.exists(STANDINGS_FILE)) return;
+        try {
+            String json = new String(Files.readAllBytes(STANDINGS_FILE));
+            Type t = new TypeToken<Map<String, Double>>(){}.getType();
+            Map<String, Double> m = gson.fromJson(json, t);
+            if (m != null) {
+                standings.putAll(m);
+                log("[StateManager] Loaded " + standings.size() + " agent standing(s) from disk.");
+            }
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to load standings: " + e.getMessage());
+        }
+    }
+
+    /** Record a client's last known agent standing — updates the in-memory state and persists to
+     *  the dedicated standings file so it survives restarts (and bot_state.json wipes), meaning we
+     *  no longer start with unknown standings. NaN reads are ignored (never clobber a good value). */
+    public void recordStanding(String clientId, double standing) {
+        if (Double.isNaN(standing)) return;
+        standings.put(clientId, standing);
+        getState(clientId).setLastKnownStanding(standing);
+        try {
+            Files.createDirectories(STANDINGS_FILE.getParent());
+            Files.write(STANDINGS_FILE, gson.toJson(standings).getBytes(),
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to save standings: " + e.getMessage());
         }
     }
 

@@ -67,6 +67,10 @@ public class ClientManager {
      *  client exists, force a switch so the idle client cannot sit AFK in space (and get podded)
      *  while the foreground client is busy in a long combat. */
     private static final long FORCE_SWITCH_SECS         = 120;
+    /** When the foreground client is warping and the OTHER client is ALSO warping, hold focus
+     *  on the current one for this many seconds before switching, instead of ping-ponging every
+     *  poll. Neither has anything to do mid-warp, so a longer hold just looks more natural. */
+    private static final long WARP_HOLD_SECS            = 6;
     /** Minimum seconds between view-nudges (camera drag to refresh a stale frame) while
      *  waiting on a detection — keeps the nudge from firing every poll tick. */
     private static final long VIEW_NUDGE_THROTTLE_SECS  = 10;
@@ -683,7 +687,6 @@ public class ClientManager {
             boolean justLanded = cs.isJustExitedWarp();
             if (justLanded) {
                 cs.setJustExitedWarp(false);
-                long warpSecs = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
                 // One-time check after the first jump: if set_destination is still on
                 // screen, the earlier click missed and we jumped a random gate — click
@@ -696,10 +699,17 @@ public class ClientManager {
                         return;
                     }
                 }
+            }
 
-                // Just exited warp — check dock first (no stargate yet, same false-match risk).
-                String dockCheck = missionProcessor.detectDockOnly();
-                if (dockCheck != null) {
+            // Single returning-UI scan (dock/stargate/agent), reused for the just-landed
+            // handling AND the dispatch below — one screenshot instead of re-scanning dock
+            // (detectDockOnly) and then dock/stargate/agent again. detectReturningUI checks
+            // dock before stargate, so a real dock still wins over a background stargate.
+            String found = missionProcessor.detectReturningUI();
+
+            if (justLanded) {
+                // Just exited warp — dock first (no stargate false-match during the gate tunnel).
+                if ("dock".equals(found)) {
                     if (missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
                         if (missionProcessor.instaDock()) {
@@ -736,8 +746,6 @@ public class ClientManager {
                 log(clientId, "IDLE[RETURNING_HOME]: dock not visible — checking stargate.");
             }
 
-            // Normal tick: full returning UI check including stargate.
-            String found = missionProcessor.detectReturningUI();
             if (found == null) {
                 // detectReturningUI already includes agent_icon, so a null result means
                 // dock/stargate/agent are all absent. The agent_icon case below recovers
@@ -1082,6 +1090,9 @@ public class ClientManager {
         if (decision == MissionConfig.Decision.ACCEPT) {
             System.out.println(">>> [" + clientId + "] ACCEPT — " + mission.getTitle());
             missionProcessor.clickAcceptButton();
+            // Record the grab time so the fleet partner can raise its take-all threshold
+            // (fleet reward) for the next 2 minutes — see chooseFleetReward.
+            stateManager.getState(clientId).setLastMissionGrab(LocalDateTime.now());
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
         } else {
             System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle());
@@ -1254,10 +1265,10 @@ public class ClientManager {
         if (!cs.isCombatWarpLanded()) {
             long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
-            // 0–10s: grace — give the right-click+mission_start click time to land and
+            // 0–5s: grace — give the right-click+mission_start click time to land and
             // the gate warp to begin before polling warp_active (a grayed-out gate that
             // never warped is caught afterward by the re-click logic).
-            if (elapsed < 10) {
+            if (elapsed < 5) {
                 if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
                     log(clientId, "IN_COMBAT: waiting for gate warp to begin.");
                     cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker
@@ -1283,41 +1294,46 @@ public class ClientManager {
                 return;
             }
 
-            // Warp not active. If we'd already confirmed it (not the first check), the
-            // warp may have landed — but guard against a single sub-threshold frame of the
-            // solid warp_active block and against landing implausibly early (no target yet):
-            //   • require WARP_END_MISS_CONFIRM consecutive polls with warp_active gone, and
-            //   • never confirm before the WARP_LAND_MIN_SECS hard floor, no matter what.
-            if (!firstCheck) {
-                int misses = cs.getWarpEndMisses() + 1;
-                cs.setWarpEndMisses(misses);
-                if (elapsed < WARP_LAND_MIN_SECS || misses < WARP_END_MISS_CONFIRM) {
-                    log(clientId, "IN_COMBAT: warp_active gone (confirm " + misses + "/"
-                            + WARP_END_MISS_CONFIRM + ", elapsed " + elapsed + "s/min "
-                            + WARP_LAND_MIN_SECS + "s) — re-confirming before combat.");
-                    return;
-                }
-                log(clientId, "IN_COMBAT: gate warp landed after " + elapsed + "s — starting combat.");
-                gateWarpRetries.put(clientId, 0);
-                cs.setCombatWarpLanded(true);
-                // Anchor the 2-minute no_ship timer to combat start. Without this the timer
-                // measures from a stale/MIN timestamp and the check fires at ~0s — right when
-                // the HUD is still settling after warp-in, producing a false PODDED verdict.
-                cs.setLastPodCheck(LocalDateTime.now());
+            // Warp not active this poll. Disambiguate "gate never fired" from "warped through"
+            // on the gate itself, then double-check the landing before committing to combat.
+            if (missionProcessor.findTemplate("activate_gate") != null) {
+                // Gate still on screen (grayed on session change) — it didn't activate. Keep
+                // re-clicking activate_gate → mission_start until the warp starts; never drop to
+                // IDLE (IDLE[TO_MISSION] would mis-read the mission gate as a travel stargate and
+                // jump it off-route). Self-heals once the session-change timer clears.
+                cs.setWarpEndMisses(0); // gate visible — not landing; reset the gone-streak
+                int retries = gateWarpRetries.merge(clientId, 1, Integer::sum);
+                log(clientId, "IN_COMBAT: no warp after " + elapsed + "s — gate still grayed, re-clicking activate_gate (attempt "
+                        + retries + ").");
+                new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
+                cs.setWarpStartTime(LocalDateTime.now());       // restart the 5s grace
+                cs.setLastWarpCheck(LocalDateTime.MIN);          // next poll is a fresh first check
                 return;
             }
 
-            // First check and no warp — the gate likely didn't activate (grayed out on
-            // session change). Keep re-clicking activate_gate → mission_start until the warp
-            // starts; never drop to IDLE. IDLE[TO_MISSION] would mis-read the mission gate as a
-            // travel stargate and jump it (off-route), so stay here and keep activating the gate.
-            // This self-heals once the (usually transient) session-change timer clears.
-            int retries = gateWarpRetries.merge(clientId, 1, Integer::sum);
-            log(clientId, "IN_COMBAT: no warp after " + elapsed + "s — gate grayed, re-clicking activate_gate (attempt "
-                    + retries + ").");
-            new Thread(() -> missionProcessor.rightClickAndSelect("activate_gate", "mission_start")).start();
-            cs.setWarpStartTime(LocalDateTime.now());       // restart the 10s grace
-            cs.setLastWarpCheck(LocalDateTime.MIN);          // next poll is a fresh first check
+            // activate_gate gone — the ship warped through (either we saw warp_active earlier, or
+            // a short warp started AND finished inside the grace window). Confirm the landing
+            // before starting combat — guard against a single dropped frame (the session-change
+            // tunnel briefly shows neither warp_active nor the gate) and against landing too early
+            // with no target yet:
+            //   • require WARP_END_MISS_CONFIRM consecutive polls with both gone, and
+            //   • never confirm before the WARP_LAND_MIN_SECS hard floor, no matter what.
+            int misses = cs.getWarpEndMisses() + 1;
+            cs.setWarpEndMisses(misses);
+            if (elapsed < WARP_LAND_MIN_SECS || misses < WARP_END_MISS_CONFIRM) {
+                log(clientId, "IN_COMBAT: warp gone + gate gone (confirm " + misses + "/"
+                        + WARP_END_MISS_CONFIRM + ", elapsed " + elapsed + "s/min "
+                        + WARP_LAND_MIN_SECS + "s) — re-confirming landing before combat.");
+                return;
+            }
+            log(clientId, "IN_COMBAT: gate warp landed after " + elapsed + "s — starting combat.");
+            gateWarpRetries.put(clientId, 0);
+            cs.setWarpEndMisses(0);
+            cs.setCombatWarpLanded(true);
+            // Anchor the 2-minute no_ship timer to combat start. Without this the timer
+            // measures from a stale/MIN timestamp and the check fires at ~0s — right when
+            // the HUD is still settling after warp-in, producing a false PODDED verdict.
+            cs.setLastPodCheck(LocalDateTime.now());
             return;
         }
 
@@ -2200,10 +2216,19 @@ public class ClientManager {
                     // turns them OFF. So a single missed frame must NOT trigger a re-fire: confirm
                     // the lock is really gone across several scans before re-locking + re-firing.
                     if (missionProcessor.confirmTemplateGone("locked_bantam", 4, 300)) {
-                        log(clientId, "COMBAT[Hawk] 30s lock re-check: locked_bantam gone (drifted, confirmed) — re-locking + re-firing, restarting firing wait.");
+                        log(clientId, "COMBAT[Hawk] 30s lock re-check: locked_bantam gone (drifted, confirmed) — re-locking, waiting for lock, then re-firing.");
                         missionProcessor.ctrlClickTemplateOnce("target_bantam");
-                        missionProcessor.keyPress("adc");
-                        cs.setCombatWaitStart(LocalDateTime.now()); // fire just restarted — reset countdown
+                        // Wait for the lock to take, then SELECT the locked bracket BEFORE firing.
+                        // Pressing 'adc' straight after the ctrl-click fires the modules before the
+                        // target is locked+selected (modules apply to nothing), like steps 6→7 do.
+                        try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                        if (missionProcessor.findTemplate("locked_bantam") != null) {
+                            missionProcessor.clickTemplate("locked_bantam"); // select first
+                            missionProcessor.keyPress("adc");                 // then fire
+                        } else {
+                            log(clientId, "COMBAT[Hawk] 30s lock re-check: re-lock not confirmed (no locked_bantam) — not firing, re-polling.");
+                        }
+                        cs.setCombatWaitStart(LocalDateTime.now()); // fire (re)started — reset countdown
                         return;
                     } else {
                         log(clientId, "COMBAT[Hawk] 30s lock re-check: locked_bantam still held (false-negative filtered) — keep firing.");
@@ -2456,7 +2481,7 @@ public class ClientManager {
      *   2  → press 's' (activate web)
      *   3  → WAIT 15s
      *   4  → press 's' (cycle web)
-     *   5  → Ctrl+click target_hive/hive1/hive2/hive3 (lock) + press 'a' + (3s) Ctrl+Space (stop ship) + switch client
+     *   5  → Ctrl+click target_hive/hive1/hive2/hive3 (lock) + press 'a' + (1s) Ctrl+Space (stop ship) + switch client
      *   6  → SAFE WAIT 50s (switch to other client every 10s during the wait)
      *   7  → await set_destination/dock (→ RETURNING/WARPING); 120s backstop → RETURNING; pod check; if jamed → step 8
      *        NOTE: no client switching after the 50s wait — stay on this client until done or jam-escaped
@@ -2508,7 +2533,7 @@ public class ClientManager {
                 break;
             }
             case 5: {
-                log(clientId, "COMBAT[Infested] Step 5: Ctrl+click hive (lock), press 'a', then Ctrl+Space (stop ship) after 3s.");
+                log(clientId, "COMBAT[Infested] Step 5: Ctrl+click hive (lock), press 'a', then Ctrl+Space (stop ship) after 1s.");
                 String hive5 = missionProcessor.findAnyTemplate("target_hive", "target_hive1", "target_hive2", "target_hive3");
                 if (hive5 != null) {
                     missionProcessor.ctrlClickTemplate(hive5);
@@ -2518,8 +2543,8 @@ public class ClientManager {
                     log(clientId, "COMBAT[Infested] Step 5: no hive target found — skipping lock.");
                     missionProcessor.keyPress("a");
                 }
-                // Ctrl+Space (stop ship) moved to the end, after a 3s delay.
-                try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                // Ctrl+Space (stop ship) after a 1s delay — 2s earlier than the old 3s.
+                try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 missionProcessor.ctrlKeyPress("space");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(6);
@@ -2773,11 +2798,10 @@ public class ClientManager {
                 missionProcessor.keyPressTwice("s", 1000);
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Scarlet] gate loading — safe wait 30s, switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
+                // Stay on this client through the second gate — like angel/worm, no switching
+                // after the second gate. We land straight in the Anire pocket and must be here to
+                // lock and engage.
+                log(clientId, "COMBAT[Scarlet] second gate loading — staying on this client (no switch), waiting to land.");
                 break;
             }
             case 5: {
@@ -2835,25 +2859,40 @@ public class ClientManager {
                 break;
             }
             case 10: {
-                // Wait 2s after the overload, then press 'adc' (activate modules).
+                // Wait 2s after the overload, then press 'ad' (activate the first modules).
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 2) {
-                    log(clientId, "COMBAT[Scarlet] Step 10: wait before 'adc' (" + elapsed + "s / 2s).");
+                    log(clientId, "COMBAT[Scarlet] Step 10: wait before 'ad' (" + elapsed + "s / 2s).");
                     return;
                 }
-                log(clientId, "COMBAT[Scarlet] Step 10: press 'adc' (activate modules).");
-                missionProcessor.keyPress("adc");
-                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the 20s death-watch
+                log(clientId, "COMBAT[Scarlet] Step 10: press 'ad' (activate modules).");
+                missionProcessor.keyPress("ad");
+                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the wait before 'c'
                 cs.setCombatStep(11);
                 break;
             }
             case 11: {
+                // Wait a bit before pressing 'c' — don't fire every module at once right after the
+                // lock; give 'ad' a moment first.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Scarlet] Step 11: wait before 'c' (" + elapsed + "s / 10s).");
+                    return;
+                }
+                log(clientId, "COMBAT[Scarlet] Step 11: press 'c' (activate remaining module).");
+                missionProcessor.keyPress("c");
+                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the 10s death-watch
+                cs.setCombatStep(12);
+                break;
+            }
+            case 12: {
                 // No client switching — stay and wait for Anire to die. Hold off polling until
-                // 20s after activating modules, then watch for the locked_anire bracket to disappear.
+                // 10s after 'c' (the 10s pre-'c' wait already elapsed, so ~20s of module time total),
+                // then watch for the locked_anire bracket to disappear.
                 // Destination is already set (step 2), so on death we just jump and head home.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 20) {
-                    log(clientId, "COMBAT[Scarlet] waiting for Anire to die (" + elapsed + "s / 20s before checking).");
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Scarlet] waiting for Anire to die (" + elapsed + "s / 10s before checking).");
                     return;
                 }
                 if (missionProcessor.findTemplate("locked_anire") == null) {
@@ -3262,10 +3301,10 @@ public class ClientManager {
         double standings = missionProcessor.readAgentStandings();
 
         // Track the standing for mission gating (recon 1 / scarlet / pot-and-kettle are
-        // accepted only when standing < 1). Only store a successful read — never clobber a
-        // known value with a NaN OCR miss, so the gate keeps using the last good reading.
+        // accepted only when standing < 1). recordStanding ignores NaN OCR misses (never
+        // clobbers a good value) and persists to disk so it survives restarts.
         if (!Double.isNaN(standings)) {
-            stateManager.getState(clientId).setLastKnownStanding(standings);
+            stateManager.recordStanding(clientId, standings);
             log(clientId, "COMPLETING: tracked agent standing updated for mission gating (gate: < 1).");
         }
 
@@ -3301,28 +3340,67 @@ public class ClientManager {
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
+    /** Take-all standings threshold is normally 0.0, but is raised to 1.0 (this client grabs
+     *  the standings for itself more eagerly) when either: the fleet partner grabbed a mission
+     *  in the last 2 minutes, or the partner's standing is more than 1.5 above ours. */
+    private static final double TAKE_ALL_THRESHOLD_HIGH = 1.0;
+    private static final long   PARTNER_GRAB_WINDOW_MIN  = 2;
+    private static final double PARTNER_STANDING_GAP     = 1.5;
+
     /**
      * Pick the fleet reward (share vs take-all) from the agent's standing and click it.
-     * Below 0: take all (fleet_no) to recover standings; healthy: share (fleet_yes).
+     * Below the take-all threshold: take all (fleet_no) to recover standings; healthy: share
+     * (fleet_yes). The threshold is normally 0, raised to 1 when the fleet partner just grabbed
+     * a mission or is well ahead of us in standing (see {@link #takeAllThreshold}).
      * Exact standings are not logged — OCR misreads the value; only a low-standings warning is kept.
      */
     private void chooseFleetReward(String clientId, double standings) {
         if (Double.isNaN(standings)) {
             log(clientId, "COMPLETING: standings OCR failed — defaulting to fleet YES.");
             missionProcessor.clickFleetYes();
-        } else if (standings < -1.0) {
+            return;
+        }
+        double threshold = takeAllThreshold(clientId, standings);
+        if (standings < -1.0) {
             log(clientId, "COMPLETING: standings critical — fleet NO.");
             if (standings < -1.5) {
                 EventLog.log("STANDINGS_LOW", clientId + " — low standings warning");
             }
             missionProcessor.clickFleetNo();
-        } else if (standings < 0.0) {
-            log(clientId, "COMPLETING: standings low — fleet NO.");
+        } else if (standings < threshold) {
+            log(clientId, String.format("COMPLETING: standings low (< %.1f) — fleet NO.", threshold));
             missionProcessor.clickFleetNo();
         } else {
             log(clientId, "COMPLETING: standings healthy — fleet YES.");
             missionProcessor.clickFleetYes();
         }
+    }
+
+    /**
+     * The take-all (fleet_no) threshold for this client's completion. Normally 0.0, raised to
+     * {@link #TAKE_ALL_THRESHOLD_HIGH} when the fleet partner grabbed a mission within the last
+     * {@link #PARTNER_GRAB_WINDOW_MIN} minutes, or when the partner's standing is more than
+     * {@link #PARTNER_STANDING_GAP} above ours (so the lagging client catches up).
+     */
+    private double takeAllThreshold(String clientId, double standings) {
+        ClientState partner = stateManager.getOtherState(clientId);
+        if (partner == null) return 0.0;
+
+        LocalDateTime grab = partner.getLastMissionGrab();
+        if (grab.isAfter(LocalDateTime.now().minusMinutes(PARTNER_GRAB_WINDOW_MIN))) {
+            log(clientId, "COMPLETING: partner grabbed a mission recently — take-all threshold raised to "
+                    + TAKE_ALL_THRESHOLD_HIGH + ".");
+            return TAKE_ALL_THRESHOLD_HIGH;
+        }
+
+        double partnerStanding = partner.getLastKnownStanding();
+        if (!Double.isNaN(standings) && !Double.isNaN(partnerStanding)
+                && partnerStanding - standings > PARTNER_STANDING_GAP) {
+            log(clientId, "COMPLETING: partner standing well ahead of ours — take-all threshold raised to "
+                    + TAKE_ALL_THRESHOLD_HIGH + ".");
+            return TAKE_ALL_THRESHOLD_HIGH;
+        }
+        return 0.0;
     }
 
     // =======================================================================
@@ -3485,7 +3563,7 @@ public class ClientManager {
         missionProcessor.clickAgentStandings();
         double standings = missionProcessor.readAgentStandings();
         if (!Double.isNaN(standings)) {
-            cs.setLastKnownStanding(standings);
+            stateManager.recordStanding(clientId, standings);   // persist — survives restarts
         }
         missionProcessor.doubleClickFactionAgent(); // refocus agent dialog (standings covers complete_mission)
         missionProcessor.clickCompleteMission();
@@ -3550,14 +3628,12 @@ public class ClientManager {
      * in-system and must not win over the mission-specific UI.)
      */
     private String detectLandingElement(ClientState cs) {
+        // One screenshot per branch (dock has priority over stargate in detectReturningUI,
+        // so a real dock still wins). Was two scans — dock/arrival then a separate stargate.
         if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
-            String dock = missionProcessor.detectDockOnly();
-            if (dock != null) return dock;
-        } else {
-            String arrival = missionProcessor.detectMissionArrivalUI();
-            if (arrival != null) return arrival;
+            return missionProcessor.detectReturningUI();   // dock / stargate / agent_icon
         }
-        return missionProcessor.findTemplate("stargate") != null ? "stargate" : null;
+        return missionProcessor.detectTravelUI();          // activate_gate / warp_to_location / stargate
     }
 
     /**
@@ -3669,6 +3745,10 @@ public class ClientManager {
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
+                    if (holdWarpFocus(other)) {
+                        log(clientId, "WARPING[POST-MISS]: jump issued — other client also warping, holding focus.");
+                        return;
+                    }
                     log(clientId, "WARPING[POST-MISS]: jump issued — switching focus to: " + other.getClientId());
                     bringToForeground(other);
                 } else {
@@ -3832,6 +3912,10 @@ public class ClientManager {
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
+                    if (holdWarpFocus(other)) {
+                        log(clientId, "WARPING: warp active, no bubble — other client also warping, holding focus.");
+                        return;
+                    }
                     log(clientId, "WARPING: warp active, no bubble — switching focus to: " + other.getClientId());
                     bringToForeground(other);
                 } else {
@@ -3920,6 +4004,10 @@ public class ClientManager {
             // ~2s window every 15s, which left this client hogging focus when it shouldn't).
             ClientWindowInfo other = findOtherClient(clientId);
             if (other != null) {
+                if (holdWarpFocus(other)) {
+                    log(clientId, "still WARPING (" + elapsed + "s) — other client also warping, holding focus.");
+                    return;
+                }
                 log(clientId, "WARPING: " + elapsed + "s elapsed — switching focus to: " + other.getClientId());
                 bringToForeground(other);
             }
@@ -3931,6 +4019,19 @@ public class ClientManager {
     // -----------------------------------------------------------------------
     // Window focus switching
     // -----------------------------------------------------------------------
+
+    /**
+     * True while we should KEEP focus on the current warping client rather than yield to
+     * {@code other}: only when {@code other} is also WARPING and we've held the foreground for
+     * less than {@link #WARP_HOLD_SECS} since the last switch. If the other client isn't warping
+     * (it has real work to do), yield immediately as before.
+     */
+    private boolean holdWarpFocus(ClientWindowInfo other) {
+        if (other == null) return false;
+        if (stateManager.getStateEnum(other.getClientId()) != ClientState.State.WARPING) return false;
+        long sinceSwitch = Duration.between(lastClientSwitch, LocalDateTime.now()).getSeconds();
+        return sinceSwitch < WARP_HOLD_SECS;
+    }
 
     /** Returns the first registered client that is not {@code excludeId}. */
     private ClientWindowInfo findOtherClient(String excludeId) {
