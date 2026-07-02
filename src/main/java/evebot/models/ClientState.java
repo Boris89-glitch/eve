@@ -104,6 +104,9 @@ public class ClientState {
     /** Timestamp when the current bubble escape wait began. */
     private LocalDateTime bubbleEscapeStart = LocalDateTime.MIN;
 
+    /** Full bubble-escape cycles attempted this WARPING (capped at 2). Reset on entering WARPING. */
+    private int bubbleEscapeAttempts = 0;
+
     /** Times the current warp has been re-issued after a failed warp-start check
      *  (bubble present or warp_active not showing). Reset on entering WARPING. */
     private int warpRetryCount = 0;
@@ -143,8 +146,13 @@ public class ClientState {
     /** True once the gate warp has been verified and landed — combat can begin after a short wait. */
     private boolean combatWarpLanded = false;
 
-    /** Consecutive IN_COMBAT polls that have seen warp_active gone — must reach WARP_END_MISS_CONFIRM
-     *  before landing is declared. Reset to 0 whenever warp_active is seen again. */
+    /** True once warp_active has been observed during the gate-warp verification. Lets the verifier
+     *  tell "gate never fired (grayed)" — re-click — from "warp fired, now stopped" — landed, proceed.
+     *  Reset on IN_COMBAT. */
+    private boolean combatWarpSeen = false;
+
+    /** Consecutive gate-warp polls that have read warp_active gone after warp fired — must reach
+     *  WARP_END_MISS_CONFIRM before landing is declared. Reset to 0 whenever warp_active is seen. */
     private int warpEndMisses = 0;
 
     /** Parked for the rest of the session: the agent refused missions (standing too low).
@@ -299,6 +307,7 @@ public class ClientState {
             this.lastWarpCheck = LocalDateTime.MIN;
             this.bubbleEscapeStep = 0;
             this.bubbleEscapeStart = LocalDateTime.MIN;
+            this.bubbleEscapeAttempts = 0;
             this.warpRetryCount = 0;
             this.safeSpotWarp = false; // evade entries re-set this true after setState(WARPING)
         }
@@ -308,6 +317,7 @@ public class ClientState {
             this.combatWaitStart = LocalDateTime.MIN;
             this.combatPollStart = LocalDateTime.MIN;
             this.combatWarpLanded = false;
+            this.combatWarpSeen = false;
             this.warpEndMisses = 0;
             this.lastViewNudge = LocalDateTime.MIN;
             this.frigateLockRechecked = false;
@@ -376,8 +386,12 @@ public class ClientState {
     public boolean isCombatWarpLanded()              { return combatWarpLanded; }
     public void    setCombatWarpLanded(boolean v)    { this.combatWarpLanded = v; }
 
+    public boolean isCombatWarpSeen()                { return combatWarpSeen; }
+    public void    setCombatWarpSeen(boolean v)      { this.combatWarpSeen = v; }
+
     public int  getWarpEndMisses()                   { return warpEndMisses; }
     public void setWarpEndMisses(int v)              { this.warpEndMisses = v; }
+
 
     public boolean isStandingsLocked()               { return standingsLocked; }
     public void    setStandingsLocked(boolean v)     { this.standingsLocked = v; }
@@ -416,6 +430,9 @@ public class ClientState {
 
     public LocalDateTime getBubbleEscapeStart()                { return bubbleEscapeStart; }
     public void          setBubbleEscapeStart(LocalDateTime t) { this.bubbleEscapeStart = t; }
+
+    public int  getBubbleEscapeAttempts()          { return bubbleEscapeAttempts; }
+    public void setBubbleEscapeAttempts(int n)     { this.bubbleEscapeAttempts = n; }
 
     public int  getWarpRetryCount()         { return warpRetryCount; }
     public void setWarpRetryCount(int v)    { this.warpRetryCount = v; }

@@ -207,6 +207,23 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate("faction_agent") != null;
     }
 
+    /**
+     * Confirm the faction agent icon is *stably* present across several sweeps, not a single
+     * false positive from another client's window (a live EVE-O Preview thumbnail or a stale
+     * frame that hasn't repainted yet after the focus switch). Requires EVERY sample to hit;
+     * one miss means it isn't really this client's icon. Used to gate FACTION_CHECK so a client
+     * with no faction agent can't be dragged into the kernite run by the other client's icon.
+     */
+    public boolean confirmFactionAgentVisible(int samples, int gapMs) {
+        for (int i = 0; i < samples; i++) {
+            if (ocrBridge.findAnyTemplate("faction_agent") == null) {
+                return false; // missed a scan — not stably present, treat as absent
+            }
+            if (i < samples - 1) sleep(gapMs);
+        }
+        return true;
+    }
+
     /** True when the 'kernite' (Resources for War) offer dialog template is on screen. */
     public boolean isKerniteOffer() {
         return ocrBridge.findAnyTemplate("kernite") != null;
@@ -603,6 +620,29 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate("dock") != null;
     }
 
+    /**
+     * Dock when returning to a station, with a backup so a returning dock never silently
+     * no-ops. Main option: click the DOCK button (twice) if it's visible. Backup: if the
+     * button isn't on screen, right-click the station (soe_station / home_station) → Dock.
+     * Returns true if a dock action was issued, false if neither button nor station was found.
+     */
+    public boolean dockWithStationBackup() {
+        if (isDockVisible()) {
+            clickDockTwice();
+            return true;
+        }
+        String station = isStationVisible("soe_station")  ? "soe_station"
+                       : isStationVisible("home_station") ? "home_station"
+                       : null;
+        if (station != null) {
+            log("DOCK button not visible — right-click " + station + " → Dock (backup).");
+            rightClickAndSelect(station, "dock");
+            return true;
+        }
+        log("No DOCK button or station visible — cannot dock.");
+        return false;
+    }
+
     /** Returns "dock_safe" if the safe dock button is visible, null otherwise. */
     public String detectDockSafe() {
         return ocrBridge.findAnyTemplate("dock_safe");
@@ -661,6 +701,15 @@ public class MissionProcessor {
         if (ocrBridge.findAnyTemplate("bubble_text") != null) {
             log("INSTA-DOCK: bubble detected — skipping Ctrl+S autopilot (escape bubble first).");
             return true;
+        }
+        // Confirm the warp to the dock bookmark has actually engaged before enabling autopilot.
+        // Firing Ctrl+S from a standstill (dock click missed / warp not yet spun up) engages
+        // autopilot against a ship that isn't warping. Give the warp another 5s, then verify
+        // warp_active — if it's not warping, skip Ctrl+S and let WARPING reissue the dock.
+        sleep(5000);
+        if (!isWarpActive()) {
+            log("INSTA-DOCK: warp not active after 5s — skipping Ctrl+S autopilot this pass.");
+            return false;
         }
         ctrlKeyPress("s");                    // autopilot to insta-dock bookmark
         return false;

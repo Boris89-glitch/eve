@@ -160,6 +160,7 @@ TEMPLATE_FILES = {
     "mission_infested": "mission_infested",  # → ship_sk  (Infested Ruins)
     "mission_scarlet": "mission_scarlet",  # → ship_sk  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
+    "mission_evolution": "evolution",  # evolution.png → never run: leave for manual handling, lock faction agent
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
     "ship_worm": "ship_worm",
@@ -1937,6 +1938,15 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
                 hit = matcher.find(reject_key, screen=screen)  # crop smaller than template
             if hit:
                 return {"ok": True, "value": "reject:" + reject_key}
+        # Evolution — never decline, never run. Signalled to Java so it leaves the
+        # offer for manual handling, closes the dialog, and locks the faction agent.
+        if "mission_evolution" in matcher.templates:
+            try:
+                hit = matcher.find("mission_evolution", screen=search)
+            except Exception:
+                hit = matcher.find("mission_evolution", screen=screen)
+            if hit:
+                return {"ok": True, "value": "evolution"}
         for dialog_key, _ship_key, _kw in MISSION_TEMPLATE_TO_SHIP:
             if dialog_key not in matcher.templates:
                 continue

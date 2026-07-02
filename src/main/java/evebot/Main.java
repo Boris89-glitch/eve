@@ -32,7 +32,7 @@ public class Main {
         System.out.println("╔══════════════════════════════════════════╗");
         System.out.println("║   EVE Online Multi-Client Bot  v0.2      ║");
         System.out.println("║   Ctrl+Shift+O : start / pause           ║");
-        System.out.println("║   Ctrl+Shift+R : reset all states        ║");
+        System.out.println("║   Ctrl+Shift+R : end session (park)      ║");
         System.out.println("╚══════════════════════════════════════════╝");
 
         // 1. State manager (also registers hotkey)

@@ -28,6 +28,11 @@ public class StateManager {
     private final Map<String, ClientState> states = new ConcurrentHashMap<>();
     private volatile boolean botRunning = false;
 
+    /** Graceful session end (Ctrl+Shift+R): one-way flag. Once armed, clients finish the
+     *  mission they're on (turning it in), then park docked at their agent; clients merely
+     *  deciding on a new mission park immediately. Every client ends the session docked. */
+    private volatile boolean sessionEnding = false;
+
     /** Global pod-death cooldown — all clients must wait until this time before resuming. */
     private volatile LocalDateTime podCooldownEnd = LocalDateTime.MIN;
     private static final Path STATE_FILE = Paths.get("config", "bot_state.json");
@@ -73,19 +78,19 @@ public class StateManager {
         if (botRunning) printStatesSummary();
     }
 
+    public boolean isSessionEnding() { return sessionEnding; }
+
     /**
-     * Reset all client states — the in-place equivalent of clearing
-     * {@code config/bot_state.json} and restarting, but without pausing. Drops
-     * every client's saved state (each re-initialises at IDLE on the next tick),
-     * clears the global pod cooldown, and wipes the persisted state file. The bot
-     * keeps running, so clients immediately resume fresh from IDLE.
+     * Arm a graceful session end (Ctrl+Shift+R). One-way: clients already on a mission run
+     * it through to turn-in, then park docked at their agent; clients merely deciding on a
+     * new mission park immediately. Every client ends the session docked at its agent, so the
+     * next launch starts clean from IDLE. The bot keeps running until each client parks.
      */
-    public void resetStates() {
-        states.clear();
-        podCooldownEnd = LocalDateTime.MIN;
-        saveStates();       // persist the now-empty map (clears the state file)
+    public void requestSessionEnd() {
+        if (sessionEnding) return;   // one-way — ignore repeats
+        sessionEnding = true;
         log("==============================================");
-        log("  STATES RESET ⟲ — all clients cleared (IDLE), bot " + (botRunning ? "RUNNING ▶" : "PAUSED ■"));
+        log("  SESSION END ⏹ — clients finish current missions, then park at their agents.");
         log("==============================================");
     }
 
@@ -95,13 +100,13 @@ public class StateManager {
 
     private void registerHotkey() {
         if (tryRegisterJnaHotkey()) {
-            log("[Hotkey] Ctrl+Shift+O (start/pause) and Ctrl+Shift+R (reset states) registered (JNA).");
+            log("[Hotkey] Ctrl+Shift+O (start/pause) and Ctrl+Shift+R (session end) registered (JNA).");
         } else {
-            log("[Hotkey] JNA unavailable — use 'toggle' / 'reset' commands instead.");
+            log("[Hotkey] JNA unavailable — use the 'toggle' command instead.");
         }
         // Always start the stdin command listener (override commands work regardless of JNA)
         Thread cmdThread = new Thread(() -> {
-            log("[Cmd] Commands: toggle | reset | status | state <STATE> | phase <PHASE> | mission <TITLE> | target <TARGET> | ship <SHIP> | step <N>");
+            log("[Cmd] Commands: toggle | end | status | state <STATE> | phase <PHASE> | mission <TITLE> | target <TARGET> | ship <SHIP> | step <N>");
             try (BufferedReader reader = new BufferedReader(new InputStreamReader(System.in))) {
                 String line;
                 while ((line = reader.readLine()) != null) {
@@ -134,7 +139,7 @@ public class StateManager {
                         boolean pressedO = ctrlShift && (o & 0x8000) != 0;
                         boolean pressedR = ctrlShift && (r & 0x8000) != 0;
                         if (pressedO && !wasPressedO) toggleBot();
-                        if (pressedR && !wasPressedR) resetStates();
+                        if (pressedR && !wasPressedR) requestSessionEnd();
                         wasPressedO = pressedO;
                         wasPressedR = pressedR;
                         Thread.sleep(100);
@@ -377,8 +382,8 @@ public class StateManager {
                 toggleBot();
                 break;
 
-            case "reset":
-                resetStates();
+            case "end":
+                requestSessionEnd();
                 break;
 
             case "status":
@@ -500,7 +505,7 @@ public class StateManager {
             }
 
             default:
-                log("[Cmd] Unknown command '" + cmd + "'. Commands: toggle | reset | status | state | phase | mission | target | ship | step");
+                log("[Cmd] Unknown command '" + cmd + "'. Commands: toggle | end | status | state | phase | mission | target | ship | step");
         }
     }
 
