@@ -1,5 +1,8 @@
 package evebot;
 
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.LocalTime;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -52,6 +55,12 @@ public class Main {
         // Auto-save state every 20 s
         scheduler.scheduleAtFixedRate(stateManager::saveStates, 20, 20, TimeUnit.SECONDS);
 
+        // Pre-downtime auto session-end: servers reset at ~13:00, so at 12:50 (machine local
+        // time — assumed CET/CEST) arm the graceful session end, the same action as Ctrl+Shift+R.
+        // Every client finishes its current mission and parks docked at its agent before the
+        // servers drop, so none are caught in space at disconnect. Fires daily.
+        scheduleDailySessionEnd(LocalTime.of(12, 50));
+
         // Keep the JVM alive
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\n[Main] Shutting down.");
@@ -60,5 +69,31 @@ public class Main {
             clientManager.shutdown();
             scheduler.shutdownNow();
         }));
+    }
+
+    /**
+     * Schedule a graceful session end (park all clients docked) at {@code when} every day —
+     * used to get clients docked before the daily server downtime. The armed session end is
+     * one-way per process (see {@link StateManager#requestSessionEnd()}), so within a single
+     * bot run this effectively fires once; the daily re-fire is a harmless no-op if the bot is
+     * left running across a downtime. Restart the bot after downtime to re-arm.
+     */
+    private void scheduleDailySessionEnd(LocalTime when) {
+        long initialDelay = secondsUntilNext(when);
+        scheduler.scheduleAtFixedRate(() -> {
+            System.out.println("[Main] Scheduled pre-downtime session end (" + when +
+                    ") — clients finish current missions, then park docked.");
+            stateManager.requestSessionEnd();
+        }, initialDelay, TimeUnit.DAYS.toSeconds(1), TimeUnit.SECONDS);
+        System.out.printf("[Main] Daily pre-downtime session end scheduled for %s local (first in %d min).%n",
+                when, initialDelay / 60);
+    }
+
+    /** Seconds from now until the next occurrence of {@code when} in the machine's local time. */
+    private static long secondsUntilNext(LocalTime when) {
+        LocalDateTime now  = LocalDateTime.now();
+        LocalDateTime next = now.toLocalDate().atTime(when);
+        if (!next.isAfter(now)) next = next.plusDays(1);   // already past today → tomorrow
+        return Duration.between(now, next).getSeconds();
     }
 }

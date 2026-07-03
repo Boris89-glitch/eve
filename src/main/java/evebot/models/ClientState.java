@@ -111,6 +111,11 @@ public class ClientState {
      *  (bubble present or warp_active not showing). Reset on entering WARPING. */
     private int warpRetryCount = 0;
 
+    /** Consecutive insta-dock attempts where the dock warp never engaged. Counted in IDLE
+     *  while re-trying the insta-dock; once it hits the cap the caller falls back to a direct
+     *  dock. Reset on entering WARPING (i.e. once we commit to a dock/warp). */
+    private int instaDockMissCount = 0;
+
     /** True when the current WARPING was entered to evade to a safe spot (enemy in local).
      *  If warp_active never engages, the handler nudges + retries the safe-spot warp twice,
      *  then abandons the evade and jumps the gate normally instead of redocking. */
@@ -201,6 +206,11 @@ public class ClientState {
 
     /** True after the first re-click of decline in DECLINING — next failure triggers agent double-click. */
     private boolean declineRetried = false;
+
+    /** True once Scarlet has been declined in the current mission-checking session — it may be
+     *  declined only once per session, so the next Scarlet offer in the same session is accepted.
+     *  Reset when a new checking session starts. Independent of standings gating. */
+    private boolean scarletDeclinedThisCheck = false;
 
     /** Number of stargate jumps since undocking — logged on pod death for location context. */
     private int jumpCount = 0;
@@ -309,6 +319,7 @@ public class ClientState {
             this.bubbleEscapeStart = LocalDateTime.MIN;
             this.bubbleEscapeAttempts = 0;
             this.warpRetryCount = 0;
+            this.instaDockMissCount = 0;
             this.safeSpotWarp = false; // evade entries re-set this true after setState(WARPING)
         }
         if (state == State.IN_COMBAT) {
@@ -437,6 +448,9 @@ public class ClientState {
     public int  getWarpRetryCount()         { return warpRetryCount; }
     public void setWarpRetryCount(int v)    { this.warpRetryCount = v; }
 
+    public int  getInstaDockMissCount()      { return instaDockMissCount; }
+    public void setInstaDockMissCount(int v) { this.instaDockMissCount = v; }
+
     public boolean isSafeSpotWarp()         { return safeSpotWarp; }
     public void    setSafeSpotWarp(boolean v) { this.safeSpotWarp = v; }
 
@@ -451,6 +465,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isDeclineRetried()              { return declineRetried; }
     public void    setDeclineRetried(boolean v)    { this.declineRetried = v; }
+
+    public boolean isScarletDeclinedThisCheck()           { return scarletDeclinedThisCheck; }
+    public void    setScarletDeclinedThisCheck(boolean v) { this.scarletDeclinedThisCheck = v; }
 
     public int  getJumpCount()          { return jumpCount; }
     public void incrementJumpCount()    { this.jumpCount++; }

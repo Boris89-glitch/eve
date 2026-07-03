@@ -682,37 +682,53 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate("enemy", "enemy2") != null;
     }
 
+    /** Outcome of an insta-dock attempt, so the caller can distinguish a warp that engaged
+     *  from one that never started (and therefore must NOT be treated as a dock-in-progress). */
+    public enum InstaDockResult {
+        /** Warp to the dock bookmark engaged (autopilot fired) — safe to enter WARPING to verify. */
+        ENGAGED,
+        /** Dock warp never engaged (bookmark/menu click missed, or bubbled) — retry the insta-dock;
+         *  do NOT commit to WARPING, or a missed click escalates into a bubble-escape gate jump. */
+        NOT_ENGAGED
+    }
+
     /**
      * Insta-dock sequence for when enemies are in local:
      * right-click empty space → hover Locations → click Dock → Ctrl+S (autopilot).
      */
-    public boolean instaDock() {
+    public InstaDockResult instaDock() {
         log("INSTA-DOCK: enemy in local — using safe dock sequence");
-        ocrBridge.rightClickPos(960, 540);   // right-click centre of space view
+        ocrBridge.rightClickPos(960, 300);   // right-click above centre (avoid clicking the ship)
         sleep(800);
+        // If Locations isn't in the menu but the dock/station is clearly on screen, the
+        // right-click likely landed on the ship or a stale frame. Nudge the camera to refresh
+        // and re-open the menu (up to twice) so we open Locations instead of missing the dock.
+        for (int attempt = 1; attempt <= 2
+                && ocrBridge.findAnyTemplate("locations") == null
+                && (isDockVisible() || isStationVisible("home_station") || isStationVisible("soe_station"));
+                attempt++) {
+            log("INSTA-DOCK: Locations not in menu but dock/station visible — nudge + retry right-click (" + attempt + "/2).");
+            nudgeView();
+            ocrBridge.rightClickPos(960, 300);
+            sleep(800);
+        }
         ocrBridge.hoverTemplate("locations"); // hover Locations submenu
         sleep(800);
         ocrBridge.clickTemplate("dock_safe");  // click Dock from submenu
         sleep(POST_CLICK_DELAY_MS);
-        // Let the bubble warning render, then check BEFORE autopilot: autopilot can't
-        // warp through a bubble, so if we're bubbled, skip Ctrl+S and report it so the
-        // bubble gets escaped first instead of engaging autopilot for nothing.
-        sleep(2000);
-        if (ocrBridge.findAnyTemplate("bubble_text") != null) {
-            log("INSTA-DOCK: bubble detected — skipping Ctrl+S autopilot (escape bubble first).");
-            return true;
-        }
         // Confirm the warp to the dock bookmark has actually engaged before enabling autopilot.
         // Firing Ctrl+S from a standstill (dock click missed / warp not yet spun up) engages
-        // autopilot against a ship that isn't warping. Give the warp another 5s, then verify
-        // warp_active — if it's not warping, skip Ctrl+S and let WARPING reissue the dock.
-        sleep(5000);
+        // autopilot against a ship that isn't warping. Give the warp ~7s, then verify warp_active —
+        // if it's not warping, report NOT_ENGAGED so the caller retries (and, after the cap, docks
+        // directly). No bubble handling here: if we're bubbled at the dock we just accept getting
+        // podded and wait out the cooldown rather than fleeing the system.
+        sleep(7000);
         if (!isWarpActive()) {
             log("INSTA-DOCK: warp not active after 5s — skipping Ctrl+S autopilot this pass.");
-            return false;
+            return InstaDockResult.NOT_ENGAGED;
         }
         ctrlKeyPress("s");                    // autopilot to insta-dock bookmark
-        return false;
+        return InstaDockResult.ENGAGED;
     }
 
     /**
@@ -734,7 +750,7 @@ public class MissionProcessor {
             log("SAFE-SPOT: enemy in local but no jcv_next/kly_next found");
             return false;
         }
-        ocrBridge.rightClickPos(960, 540);   // right-click centre of space view
+        ocrBridge.rightClickPos(960, 300);   // right-click above centre (avoid clicking the ship)
         sleep(800);
         ocrBridge.hoverTemplate("locations"); // hover Locations submenu
         sleep(800);
@@ -751,7 +767,7 @@ public class MissionProcessor {
      */
     public boolean warpToGenericSafeSpot() {
         log("SAFE-SPOT: enemy in local — warping to safe spot via Locations");
-        ocrBridge.rightClickPos(960, 540);
+        ocrBridge.rightClickPos(960, 300);   // right-click above centre (avoid clicking the ship)
         sleep(300);
         ocrBridge.hoverTemplate("locations");
         sleep(300);
@@ -857,6 +873,15 @@ public class MissionProcessor {
      */
     public String detectDockOnly() {
         return ocrBridge.findAnyTemplate("dock");
+    }
+
+    /**
+     * Dock button or agent icon — the home-arrival elements, excluding the always-present
+     * stargate. Used to end the RETURNING_HOME landing settle only once we've actually arrived
+     * home, so a stargate (which renders before the DOCK button) can't short-circuit the wait.
+     */
+    public String detectDockOrAgent() {
+        return ocrBridge.findAnyTemplate("dock", "agent_icon");
     }
 
     /**

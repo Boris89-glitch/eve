@@ -59,7 +59,7 @@ public class ClientManager {
     /** Safe settle window (seconds) held in IDLE after a warp lands before this client navigates,
      *  so it doesn't grab a stargate before warp_to_location / dock has rendered. Exits early once
      *  the expected landing element is on screen. Non-blocking (ticks per focus, like combat). */
-    private static final long LANDING_SETTLE_SECS        = 9;
+    private static final long LANDING_SETTLE_SECS        = 6;
     // A warp this long means the grid has already rendered/settled by the time it ends —
     // skip the landing safe wait and don't hand focus away on land.
     private static final long LONG_WARP_NO_SETTLE_SECS    = 50;
@@ -205,7 +205,10 @@ public class ClientManager {
         if (stateManager.getState(clientId).isStandingsLocked()
                 || stateManager.getState(clientId).isParked()) {
             ClientWindowInfo other = findOtherClient(clientId);
-            if (other != null) {
+            // Only hand off to a client that can still work. If the other is also parked/
+            // standings-locked, switching just ping-pongs the foreground back and forth
+            // forever (both clients clicking each other's thumbnail) — do nothing instead.
+            if (other != null && !isParkedOrLocked(other.getClientId())) {
                 bringToForeground(other);
             }
             return;
@@ -279,7 +282,7 @@ public class ClientManager {
         log(clientId, "SESSION END: " + reason + " — parked, docked at agent until restart.");
         EventLog.log("SESSION_END", clientId + " — " + reason);
         ClientWindowInfo other = findOtherClient(clientId);
-        if (other != null) bringToForeground(other);
+        if (other != null && !isParkedOrLocked(other.getClientId())) bringToForeground(other);
     }
 
     // -----------------------------------------------------------------------
@@ -287,6 +290,10 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private static final int POD_COOLDOWN_MINUTES = 12;
+
+    /** Insta-dock attempts (dock warp never engaging) before we stop retrying and dock directly
+     *  (DOCK button / right-click station → Dock). */
+    private static final int INSTA_DOCK_MAX_MISSES = 3;
 
     private void handlePodCooldown(String clientId) {
         ClientState cs = stateManager.getState(clientId);
@@ -521,7 +528,7 @@ public class ClientManager {
                 // grid render, so we must stay here to catch the landing element and exit early the
                 // instant it appears. Yielding to the other client here would blind this scan and
                 // degrade the settle into a blind wall-clock wait. Bounded by LANDING_SETTLE_SECS
-                // (9s), well under the 120s force-switch watchdog.
+                // (6s), well under the 120s force-switch watchdog.
                 return;
             }
         }
@@ -758,14 +765,11 @@ public class ClientManager {
                 if ("dock".equals(found)) {
                     if (missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
-                        if (missionProcessor.instaDock()) {
-                            // Bubble in the way — escape it in WARPING first (no autopilot);
-                            // we'll re-dock from IDLE once the bubble is cleared.
-                            log(clientId, "IDLE[RETURNING_HOME]: bubble on insta-dock — escaping before docking.");
-                            cs.setWarpStartTime(LocalDateTime.now());
-                            stateManager.setState(clientId, ClientState.State.WARPING);
-                            return;
+                        if (missionProcessor.instaDock() == MissionProcessor.InstaDockResult.NOT_ENGAGED
+                                && !instaDockFallback(clientId, cs)) {
+                            return; // still retrying the insta-dock — stay in IDLE, don't commit to WARPING
                         }
+                        // ENGAGED, or NOT_ENGAGED past the retry cap (direct dock issued) — commit to WARPING.
                     } else {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking (button, station backup).");
                         missionProcessor.dockWithStationBackup();
@@ -811,7 +815,10 @@ public class ClientManager {
                 case "dock":
                     if (missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
-                        missionProcessor.instaDock();
+                        if (missionProcessor.instaDock() == MissionProcessor.InstaDockResult.NOT_ENGAGED
+                                && !instaDockFallback(clientId, cs)) {
+                            return; // still retrying the insta-dock — stay in IDLE
+                        }
                     } else {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking (button, station backup).");
                         missionProcessor.dockWithStationBackup();
@@ -1015,6 +1022,8 @@ public class ClientManager {
 
         if (cs.getMissionCheckStartTime().equals(LocalDateTime.MIN)) {
             cs.setMissionCheckStartTime(LocalDateTime.now());
+            // New checking session — Scarlet may be declined once per session; clear the flag.
+            cs.setScarletDeclinedThisCheck(false);
         }
         long cycleElapsed = Duration.between(cs.getMissionCheckStartTime(), LocalDateTime.now()).getSeconds();
         if (cycleElapsed >= 45) {
@@ -1122,17 +1131,23 @@ public class ClientManager {
             return;
         }
 
-        // Scarlet is decided purely on standing — its dialog text OCRs unreliably (the title
-        // comes through as "Sc a rlet"), so skip OCR entirely. The template match already
-        // identifies the mission; synthesize a minimal Mission so the standings-gated
-        // 'scarlet' rule fires (accept while standing < 1.0 or unknown, else decline).
+        // Scarlet is decided by the decline-once flag, independent of standings. Its dialog text
+        // OCRs unreliably (the title comes through as "Sc a rlet"), so skip OCR entirely — the
+        // template match already identifies it. Decline the first Scarlet offer per checking
+        // session; if it comes back around in the same session, accept it (can't decline twice).
         if ("mission_scarlet".equals(missionTemplate)) {
             Mission scarlet = new Mission();
             scarlet.setTitle("scarlet");
             scarlet.setShipTarget("scarlet"); // so IN_COMBAT routes to handleCombatScarlet
             cs.setCurrentMission(scarlet);
-            log(clientId, "Scarlet template matched — deciding on standing (no OCR).");
-            applyDecision(clientId, scarlet, missionConfig.evaluate(scarlet, cs.getLastKnownStanding()));
+            if (cs.isScarletDeclinedThisCheck()) {
+                log(clientId, "Scarlet template matched — already declined once this check, accepting.");
+                applyDecision(clientId, scarlet, MissionConfig.Decision.ACCEPT);
+            } else {
+                cs.setScarletDeclinedThisCheck(true);
+                log(clientId, "Scarlet template matched — declining (once per check).");
+                applyDecision(clientId, scarlet, MissionConfig.Decision.DECLINE);
+            }
             return;
         }
 
@@ -1816,9 +1831,12 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                log(clientId, "COMBAT[Vengeance] Step 4: Ctrl+click 1 target_inquisitor + target_vengeance (lock one inquisitor).");
-                missionProcessor.ctrlClickTemplate("target_inquisitor");
-                missionProcessor.ctrlClickTemplate("target_vengeance");
+                // Single ctrl+click only — the double-tap variant can lock TWO inquisitors at
+                // once (the second tap lands on a different row once the first locks), leaving a
+                // survivor bracket that stalls step 7. Step 5's 3s check retries a missed lock.
+                log(clientId, "COMBAT[Vengeance] Step 4: Ctrl+click ONE target_inquisitor + target_vengeance (lock one inquisitor).");
+                missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
+                missionProcessor.ctrlClickTemplateOnce("target_vengeance");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
@@ -1868,10 +1886,18 @@ public class ClientManager {
                     // turns them OFF. So a single missed frame must NOT trigger a re-fire: confirm
                     // the lock is really gone across several scans before re-locking + re-firing.
                     if (missionProcessor.confirmTemplateGone("locked_inquisitor", 4, 300)) {
-                        log(clientId, "COMBAT[Vengeance] 30s lock re-check: locked_inquisitor gone (drifted, confirmed) — re-locking + re-firing, restarting firing wait.");
-                        missionProcessor.ctrlClickTemplate("target_inquisitor");
-                        missionProcessor.keyPress("adc");
-                        cs.setCombatWaitStart(LocalDateTime.now()); // fire just restarted — reset countdown
+                        log(clientId, "COMBAT[Vengeance] 30s lock re-check: locked_inquisitor gone (drifted, confirmed) — re-locking, waiting for lock, then re-firing.");
+                        missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
+                        // Wait for the lock to take, then SELECT the locked bracket BEFORE firing —
+                        // firing straight after the ctrl-click applies the modules to nothing.
+                        try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                        if (missionProcessor.findTemplate("locked_inquisitor") != null) {
+                            missionProcessor.clickTemplate("locked_inquisitor"); // select first
+                            missionProcessor.keyPress("adc");                     // then fire
+                        } else {
+                            log(clientId, "COMBAT[Vengeance] 30s lock re-check: re-lock not confirmed (no locked_inquisitor) — not firing, re-polling.");
+                        }
+                        cs.setCombatWaitStart(LocalDateTime.now()); // fire (re)started — reset countdown
                         return;
                     } else {
                         log(clientId, "COMBAT[Vengeance] 30s lock re-check: locked_inquisitor still held (false-negative filtered) — keep firing.");
@@ -1898,14 +1924,19 @@ public class ClientManager {
                     } else {
                         log(clientId, "COMBAT[Vengeance] Step 7: locked_inquisitor missed frame (false-negative filtered) — keep shooting.");
                     }
+                } else if (elapsed >= 150) {
+                    // Failsafe: a stale bracket (e.g. a second inquisitor locked by accident) can
+                    // keep "still alive" up forever — after 150s assume dead and move on.
+                    log(clientId, "COMBAT[Vengeance] Step 7: still alive after " + elapsed + "s — 150s failsafe, assuming dead — re-targeting.");
+                    cs.setCombatStep(8);
                 } else {
                     log(clientId, "COMBAT[Vengeance] Step 7: inquisitor still alive (" + elapsed + "s) — keep shooting.");
                 }
                 break;
             }
             case 8: {
-                log(clientId, "COMBAT[Vengeance] Step 8: Ctrl+click target_inquisitor (lock).");
-                missionProcessor.ctrlClickTemplate("target_inquisitor");
+                log(clientId, "COMBAT[Vengeance] Step 8: Ctrl+click ONE target_inquisitor (lock).");
+                missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(9);
                 break;
@@ -1972,8 +2003,10 @@ public class ClientManager {
                 break;
             }
             case 14: {
-                log(clientId, "COMBAT[Vengeance] Step 14: Ctrl+click target_vengeance (lock).");
-                missionProcessor.ctrlClickTemplate("target_vengeance");
+                // Vengeance was locked back in step 4 and stays locked through the inquisitor
+                // kills — no need to relock. Go straight to select + fire; step 15 only relocks
+                // as a fallback if the bracket somehow drifted. Anchor the timer for that fallback.
+                log(clientId, "COMBAT[Vengeance] Step 14: vengeance already locked (step 4) — selecting + firing.");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(15);
                 break;
@@ -1994,8 +2027,13 @@ public class ClientManager {
                         bringToForeground(other);
                     }
                 } else {
-                    log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance NOT found — retrying lock.");
-                    cs.setCombatStep(14);
+                    // Fallback: the step-4 lock drifted off. Relock, then wait 3s between attempts.
+                    long elapsed15 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                    if (elapsed15 >= 3) {
+                        log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance NOT found (drifted) — relocking.");
+                        missionProcessor.ctrlClickTemplateOnce("target_vengeance");
+                        cs.setCombatWaitStart(LocalDateTime.now());
+                    }
                 }
                 break;
             }
@@ -2133,10 +2171,18 @@ public class ClientManager {
                     // turns them OFF. So a single missed frame must NOT trigger a re-fire: confirm
                     // the lock is really gone across several scans before re-locking + re-firing.
                     if (missionProcessor.confirmTemplateGone("locked_navitas", 4, 300)) {
-                        log(clientId, "COMBAT[Enyo] 30s lock re-check: locked_navitas gone (drifted, confirmed) — re-locking + re-firing, restarting firing wait.");
+                        log(clientId, "COMBAT[Enyo] 30s lock re-check: locked_navitas gone (drifted, confirmed) — re-locking, waiting for lock, then re-firing.");
                         missionProcessor.ctrlClickTemplateOnce("target_navitas");
-                        missionProcessor.keyPress("adc");
-                        cs.setCombatWaitStart(LocalDateTime.now()); // fire just restarted — reset countdown
+                        // Wait for the lock to take, then SELECT the locked bracket BEFORE firing —
+                        // firing straight after the ctrl-click applies the modules to nothing.
+                        try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                        if (missionProcessor.findTemplate("locked_navitas") != null) {
+                            missionProcessor.clickTemplate("locked_navitas"); // select first
+                            missionProcessor.keyPress("adc");                 // then fire
+                        } else {
+                            log(clientId, "COMBAT[Enyo] 30s lock re-check: re-lock not confirmed (no locked_navitas) — not firing, re-polling.");
+                        }
+                        cs.setCombatWaitStart(LocalDateTime.now()); // fire (re)started — reset countdown
                         return;
                     } else {
                         log(clientId, "COMBAT[Enyo] 30s lock re-check: locked_navitas still held (false-negative filtered) — keep firing.");
@@ -2154,6 +2200,14 @@ public class ClientManager {
                 if (sincePoll < 5) return;
                 cs.setCombatPollStart(LocalDateTime.now());
                 if (missionProcessor.findTemplate("locked_navitas") != null) {
+                    if (elapsed >= 150) {
+                        // Failsafe: a stale bracket can keep "still alive" up forever — after
+                        // 150s assume dead and move on to the main.
+                        log(clientId, "COMBAT[Enyo] Step 9: still alive after " + elapsed + "s — 150s failsafe, assuming dead — engaging the enyo.");
+                        cs.setCombatWaitStart(LocalDateTime.now());
+                        cs.setCombatStep(10);
+                        break;
+                    }
                     log(clientId, "COMBAT[Enyo] Step 9: support still alive (" + elapsed + "s) — keep shooting.");
                     break;
                 }
@@ -2352,6 +2406,14 @@ public class ClientManager {
                 if (sincePoll < 5) return;
                 cs.setCombatPollStart(LocalDateTime.now());
                 if (missionProcessor.findTemplate("locked_bantam") != null) {
+                    if (elapsed >= 150) {
+                        // Failsafe: a stale bracket can keep "still alive" up forever — after
+                        // 150s assume dead and move on to the main.
+                        log(clientId, "COMBAT[Hawk] Step 8: still alive after " + elapsed + "s — 150s failsafe, assuming dead — engaging the hawk.");
+                        cs.setCombatWaitStart(LocalDateTime.now());
+                        cs.setCombatStep(9);
+                        break;
+                    }
                     log(clientId, "COMBAT[Hawk] Step 8: support still alive (" + elapsed + "s) — keep shooting.");
                     break;
                 }
@@ -2587,7 +2649,7 @@ public class ClientManager {
      *   2  → press 's' (activate web)
      *   3  → WAIT 15s
      *   4  → press 's' (cycle web)
-     *   5  → Ctrl+click target_hive/hive1/hive2/hive3 (lock) + press 'a' + (1s) Ctrl+Space (stop ship) + switch client
+     *   5  → Ctrl+click target_hive/target_hive2 (lock) + press 'a' + (1s) Ctrl+Space (stop ship) + switch client
      *   6  → SAFE WAIT 50s (switch to other client every 10s during the wait)
      *   7  → await set_destination/dock (→ RETURNING/WARPING); 120s backstop → RETURNING; pod check; if jamed → step 8
      *        NOTE: no client switching after the 50s wait — stay on this client until done or jam-escaped
@@ -2604,11 +2666,18 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                String hive1 = missionProcessor.findAnyTemplate("target_hive", "target_hive1", "target_hive2", "target_hive3");
+                String hive1 = missionProcessor.findAnyTemplate("target_hive", "target_hive2");
                 if (hive1 != null) {
-                    log(clientId, "COMBAT[Infested] Step 1: double-click " + hive1 + " (approach).");
+                    log(clientId, "COMBAT[Infested] Step 1: double-click " + hive1 + " (approach), click away to mid.");
                     missionProcessor.doubleClickTemplate(hive1);
+                    missionProcessor.clickPos(960, 540); // click away in space to clear the menu
                     cs.setCombatStep(2);
+                } else if (Duration.between(cs.getLastViewNudge(), LocalDateTime.now()).getSeconds() >= VIEW_NUDGE_THROTTLE_SECS) {
+                    // Neither hive template matched — a stale frame may be hiding it. Nudge
+                    // the camera (throttled) to force a fresh frame and retry next tick.
+                    cs.setLastViewNudge(LocalDateTime.now());
+                    log(clientId, "COMBAT[Infested] Step 1: no hive target (target_hive/target_hive2) — nudging view + retrying.");
+                    missionProcessor.nudgeView();
                 } else {
                     log(clientId, "COMBAT[Infested] Step 1: no hive target found — retrying.");
                 }
@@ -2640,11 +2709,10 @@ public class ClientManager {
             }
             case 5: {
                 log(clientId, "COMBAT[Infested] Step 5: Ctrl+click hive (lock), press 'a', then Ctrl+Space (stop ship) after 1s.");
-                String hive5 = missionProcessor.findAnyTemplate("target_hive", "target_hive1", "target_hive2", "target_hive3");
+                String hive5 = missionProcessor.findAnyTemplate("target_hive", "target_hive2");
                 if (hive5 != null) {
                     missionProcessor.ctrlClickTemplate(hive5);
                     missionProcessor.keyPress("a");
-                    missionProcessor.clickTemplate(hive5);
                 } else {
                     log(clientId, "COMBAT[Infested] Step 5: no hive target found — skipping lock.");
                     missionProcessor.keyPress("a");
@@ -2736,8 +2804,9 @@ public class ClientManager {
 
                 // Warp jam — burn toward the stargate to break it, then wait (step 8).
                 if (missionProcessor.findTemplate("jamed") != null) {
-                    log(clientId, "COMBAT[Infested] JAMED — double-click stargate + press 's' to burn away.");
+                    log(clientId, "COMBAT[Infested] JAMED — double-click stargate, click away to mid, press 's' to burn away.");
                     missionProcessor.doubleClickTemplate("stargate");
+                    missionProcessor.clickPos(960, 540); // click away in space to clear the menu
                     missionProcessor.keyPress("s");
                     cs.setCombatWaitStart(LocalDateTime.now());
                     cs.setCombatStep(8);
@@ -3030,8 +3099,8 @@ public class ClientManager {
      * Steps:
      *   0 → double-click target_angel (select) + Ctrl+click (lock)
      *   1 → Shift+axc (overload modules)
-     *   2 → press 'asdx', click target_angel
-     *   3 → WAIT 5s → press 'c'
+     *   2 → press 'x', click target_angel
+     *   3 → WAIT 2s → press 'asdc'
      *   4 → Right-click target_angel + click range (keep at range)
      *   5 → Proceed (keep_at_range template check removed)
      *   6 → WAIT for set_destination; 60s hardcap (pod check) → step 7
@@ -3057,22 +3126,22 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Angel] Step 2: press 'asdx', click target_angel.");
-                missionProcessor.keyPress("asdx");
+                log(clientId, "COMBAT[Angel] Step 2: press 'x', click target_angel.");
+                missionProcessor.keyPress("x");
                 missionProcessor.clickTemplate("target_angel");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
             case 3: {
-                // WAIT 2s, then press 'c'
+                // WAIT 2s, then press 'asdc'
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 2) {
-                    log(clientId, "COMBAT[Angel] wait before 'c': " + elapsed + "s / 2s.");
+                    log(clientId, "COMBAT[Angel] wait before 'asdc': " + elapsed + "s / 2s.");
                     return;
                 }
-                log(clientId, "COMBAT[Angel] Step 3: press 'c'.");
-                missionProcessor.keyPress("c");
+                log(clientId, "COMBAT[Angel] Step 3: press 'asdc'.");
+                missionProcessor.keyPress("asdc");
                 cs.setCombatStep(4);
                 break;
             }
@@ -3749,10 +3818,13 @@ public class ClientManager {
      * in-system and must not win over the mission-specific UI.)
      */
     private String detectLandingElement(ClientState cs) {
-        // One screenshot per branch (dock has priority over stargate in detectReturningUI,
-        // so a real dock still wins). Was two scans — dock/arrival then a separate stargate.
+        // One screenshot per branch. RETURNING_HOME excludes the stargate on purpose: a stargate
+        // bracket is present in every system (including home) and renders before the DOCK button,
+        // so if it ended the settle we'd conclude "no dock" and jump a gate the instant we land
+        // home. Wait for dock/agent_icon (the home destination); a stargate-only grid keeps
+        // settling so the dock has time to render (and a mid-route gate is fully clickable first).
         if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
-            return missionProcessor.detectReturningUI();   // dock / stargate / agent_icon
+            return missionProcessor.detectDockOrAgent();   // dock / agent_icon (NOT stargate)
         }
         return missionProcessor.detectTravelUI();          // activate_gate / warp_to_location / stargate
     }
@@ -3792,30 +3864,75 @@ public class ClientManager {
     }
 
     /**
-     * Terminal warp-start failure handling: dock back if a station is in reach, otherwise run
-     * the bubble-escape sequence. On a confirmed redock it sets the global pod cooldown, flags
-     * the pod_station check, switches to the other client, and enters POD_COOLDOWN.
+     * Handle an insta-dock attempt whose dock warp never engaged. Counts the miss; while under
+     * {@link #INSTA_DOCK_MAX_MISSES} it returns false so the caller stays in IDLE and retries the
+     * insta-dock next tick. Once the cap is hit it stops retrying, issues a direct dock (DOCK
+     * button / right-click station → Dock) and returns true so the caller commits to WARPING.
+     */
+    private boolean instaDockFallback(String clientId, ClientState cs) {
+        cs.setInstaDockMissCount(cs.getInstaDockMissCount() + 1);
+        if (cs.getInstaDockMissCount() < INSTA_DOCK_MAX_MISSES) {
+            log(clientId, "IDLE[RETURNING_HOME]: insta-dock warp not engaged (miss "
+                    + cs.getInstaDockMissCount() + "/" + INSTA_DOCK_MAX_MISSES + ") — staying to retry.");
+            return false;
+        }
+        log(clientId, "IDLE[RETURNING_HOME]: insta-dock warp not engaged " + INSTA_DOCK_MAX_MISSES
+                + "x — falling back to direct dock (button / right-click station → Dock).");
+        missionProcessor.dockWithStationBackup();
+        return true;
+    }
+
+    /**
+     * Terminal warp-start failure handling. If a station is in reach, dock back (direct redock).
+     * While deliberately docking we NEVER bubble-escape — that jumps a gate and leaves the system;
+     * instead we re-issue the dock and, if a bubble camp pods us, route to pod-death and wait out
+     * the cooldown. Only non-docking warps (safe-spot / travel) fall through to the bubble escape.
      */
     private void redockOrBubbleEscape(String clientId, ClientState cs, boolean held, String why) {
         if (missionProcessor.findTemplate("home_station") != null) {
             log(clientId, "WARPING: " + why + " — station in reach, emergency redock!");
-            if (!missionProcessor.emergencyRedock()) {
+            if (missionProcessor.emergencyRedock()) {
+                LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
+                stateManager.setPodCooldownEnd(cooldownEnd);
+                log(clientId, (held ? "BUBBLE_CAMP: held at station (jam/bubble)" : "WARPING: stuck warp at station")
+                        + " — redocked, " + POD_COOLDOWN_MINUTES + "-minute global cooldown before retry.");
+                cs.setPendingPodStationCheck(true);
+                stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "WARPING: emergency redock done — switching to " + other.getClientId() + ".");
+                    bringToForeground(other);
+                }
+                return;
+            }
+            // Redock not confirmed. When docking, don't park — fall through to the wait-it-out below.
+            if (!cs.isDockingToStation()) {
                 parkClient(clientId, "emergency redock not confirmed — not in station");
                 return;
             }
-            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
-            stateManager.setPodCooldownEnd(cooldownEnd);
-            log(clientId, (held ? "BUBBLE_CAMP: held at station (jam/bubble)" : "WARPING: stuck warp at station")
-                    + " — redocked, " + POD_COOLDOWN_MINUTES + "-minute global cooldown before retry.");
-            cs.setPendingPodStationCheck(true);
-            stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
-            ClientWindowInfo other = findOtherClient(clientId);
-            if (other != null) {
-                log(clientId, "WARPING: emergency redock done — switching to " + other.getClientId() + ".");
-                bringToForeground(other);
+            log(clientId, "WARPING: " + why + " — redock not confirmed while docking; waiting it out (no park).");
+        }
+
+        // Docking: never bubble-escape out of the system. If we've been podded, route to pod-death
+        // (respawn/self-destruct → cooldown); otherwise re-issue the dock and wait it out.
+        if (cs.isDockingToStation()) {
+            if (missionProcessor.findTemplate("agent_icon") != null) {
+                log(clientId, "WARPING: " + why + " while docking — agent_icon visible, podded/respawned at station.");
+                handlePodDeath(clientId, false);
+                return;
             }
+            if (missionProcessor.isFlyingPod()) {
+                log(clientId, "WARPING: " + why + " while docking — podded in space, self-destructing.");
+                handlePodDeath(clientId, true);
+                return;
+            }
+            log(clientId, "WARPING: " + why + " while docking — re-issuing dock and waiting it out (no bubble escape).");
+            reissueWarp(clientId, cs);               // dockingToStation → dockWithStationBackup
+            cs.setWarpRetryCount(0);                  // verify the re-issued dock afresh next cycle
+            cs.setWarpStartTime(LocalDateTime.now());
             return;
         }
+
         log(clientId, "WARPING: " + why + " — no station in reach, starting bubble escape.");
         cs.setBubbleEscapeStep(1);
     }
@@ -3896,7 +4013,12 @@ public class ClientManager {
             if (elapsed < grace) {
                 return;
             }
-            if (!cs.isSafeSpotWarp() && elapsed < 6 && missionProcessor.findTemplate("home_station") != null) {
+            // The extra home-station wait (grace→7s) only exists to give a standstill warp time to
+            // spin up before we'd prematurely read "warp not active". If warp_active is already
+            // showing (docking/undocking warp took), don't sit out the rest — proceed to switch now.
+            if (!cs.isSafeSpotWarp() && elapsed < 7
+                    && !missionProcessor.isWarpActive()
+                    && missionProcessor.findTemplate("home_station") != null) {
                 return;
             }
 
@@ -4054,6 +4176,21 @@ public class ClientManager {
                     return;
                 }
 
+                // Safe-spot evade warps react fast (1s grace), but when a station is right in
+                // front of us the warp is initiated from a standstill and warp_active can flash
+                // on for a frame before the warp actually engages. Don't hand off focus on that
+                // first flash — wait a few seconds and re-confirm warp_active. If it's gone, the
+                // warp never took; redock (station is right here) instead of switching away.
+                if (cs.isSafeSpotWarp() && missionProcessor.findTemplate("home_station") != null) {
+                    log(clientId, "WARPING: warp_active seen but station in front — waiting 3s to confirm the warp took before switching.");
+                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    if (!missionProcessor.isWarpActive()) {
+                        redockOrBubbleEscape(clientId, cs, false, "warp not confirmed in front of station");
+                        return;
+                    }
+                    log(clientId, "WARPING: warp still active after 3s confirm — the warp took, proceeding.");
+                }
+
                 cs.setSafeSpotWarp(false); // warp engaged — clear the evade-retry flag
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
@@ -4144,7 +4281,7 @@ public class ClientManager {
             }
             cs.setSkipLandingSettle(false);
             // Hold focus through the transition — don't switch here. The IDLE landing safe wait
-            // gate also holds focus during its 9s settle so this client can watch its own grid
+            // gate also holds focus during its 6s settle so this client can watch its own grid
             // render. justExitedWarp stays set so the settle + justLanded path run.
             log(clientId, "WARPING: warp landed after " + elapsed + "s — transitioning to IDLE; IDLE holds the "
                     + LANDING_SETTLE_SECS + "s landing safe wait.");
@@ -4180,6 +4317,13 @@ public class ClientManager {
         if (stateManager.getStateEnum(other.getClientId()) != ClientState.State.WARPING) return false;
         long sinceSwitch = Duration.between(lastClientSwitch, LocalDateTime.now()).getSeconds();
         return sinceSwitch < WARP_HOLD_SECS;
+    }
+
+    /** True when a client is parked (session end / unrecoverable error) or standings-locked, i.e.
+     *  it will do no further work this session. Handing it the foreground is pointless. */
+    private boolean isParkedOrLocked(String clientId) {
+        ClientState cs = stateManager.getState(clientId);
+        return cs.isParked() || cs.isStandingsLocked();
     }
 
     /** Returns the first registered client that is not {@code excludeId}. */

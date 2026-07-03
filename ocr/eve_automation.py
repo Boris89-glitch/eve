@@ -215,6 +215,11 @@ TEMPLATE_FILES = {
     "kernite": "kernite",               # 'Resources for War' (kernite) offer dialog template — accept
 }
 
+# Fixed screen position of the "Ship Hangar" station-services button. Used as a
+# last-resort click when the ship_hangar template can't be matched (stale image,
+# occlusion, or an unusual post-respawn layout).
+HANGAR_FALLBACK_XY = (380, 680)
+
 # Maps mission dialog template keys → ship template keys.
 # Checked in order; first match wins.
 MISSION_TEMPLATE_TO_SHIP = [
@@ -399,6 +404,21 @@ class TemplateMatcher:
             return (x, y, w, h)
         log.debug("'%s' not found (best=%.3f < threshold %.3f)", key, max_val, th)
         return None
+
+    def match_conf(
+        self, key: str, screen: Optional[np.ndarray] = None
+    ) -> float:
+        """Return the best template-match confidence for `key` (0.0 if the
+        template isn't loaded). Diagnostic helper — ignores the threshold so
+        the log can show *how close* a miss was."""
+        template = self.templates.get(key)
+        if template is None:
+            return 0.0
+        if screen is None:
+            screen = self.screenshot_cv()
+        result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(result)
+        return float(max_val)
 
     def find_all(
         self,
@@ -1152,10 +1172,22 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
     if ship_match:
         log.info("Ship icon already visible — hangar open, skipping hangar click.")
     else:
-        log.info("Ship not visible — clicking 'Ship Hangar' to open hangar view...")
+        log.info(
+            "Ship '%s' not visible (best conf=%.3f) — opening Ship Hangar...",
+            ship_template,
+            matcher.match_conf(ship_template),
+        )
         if not matcher.wait_and_click("ship_hangar", timeout=1.0, delay=1.0):
-            log.error("'Ship Hangar' not found — cannot open hangar")
-            return {"failed": True}
+            # Template miss (stale image, occlusion, or post-respawn layout). Rather
+            # than abort, click the hangar's known fixed screen position and carry on.
+            log.warning(
+                "'Ship Hangar' template not matched (best conf=%.3f) — "
+                "falling back to hard coordinates (%d,%d).",
+                matcher.match_conf("ship_hangar"),
+                HANGAR_FALLBACK_XY[0],
+                HANGAR_FALLBACK_XY[1],
+            )
+            matcher._do_click(*HANGAR_FALLBACK_XY, delay=1.0)
         # --- Step 1: Find ship icon now that the hangar is open ---
         log.info("Step 1: Locating ship icon '%s'...", ship_template)
         ship_match = matcher.wait_for(ship_template, timeout=2.0)
