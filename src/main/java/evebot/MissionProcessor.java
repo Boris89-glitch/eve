@@ -1003,6 +1003,176 @@ public class MissionProcessor {
         ocrBridge.clickTemplate(key);
     }
 
+    // Kill Report layout (1920×1200, window locked in a fixed spot). The "Final Blow" pilot name
+    // link sits at a stable location; we right-click it to open the pilot context menu. Tune these
+    // if your window is positioned differently.
+    private static final int KILLER_CLICK_X = 1128;  // right-click target on the name
+    private static final int KILLER_CLICK_Y = 318;
+    private static final int MENU_DISMISS_X = 1500;  // empty spot in the kill report to dismiss a menu (never Escape)
+    private static final int MENU_DISMISS_Y = 650;
+    /** Fallback: pixels below the contacts search field to the first result row (backup add). */
+    private static final int CONTACT_RESULT_OFFSET_Y = 150;
+    /** Final-blow name in "Copy Kill Information" text: "Name: <pilot> (laid the final blow)". */
+    private static final java.util.regex.Pattern FINAL_BLOW =
+            java.util.regex.Pattern.compile("Name:\\s*(.+?)\\s*\\(laid the final blow\\)");
+
+    /**
+     * Open the latest Kill Report from the feed and add its Final Blow pilot (the one who podded
+     * us) as a Bad (orange) CORPORATE contact, so they show flagged next time. Pure screen
+     * automation — no API. Best-effort: any missing template makes its click a silent no-op.
+     * MUST run while docked and in the foreground (the kill report closes on undock).
+     *
+     * Primary: right-click the Final Blow name (fixed coords) → add_corporate_contact → standing_bad
+     * → add_contact_confirm. Backup, ONLY if that right-click offers no Add-Contact option: three-dot
+     * → Copy Kill Information → parse the exact name off the clipboard → add via the contacts search.
+     *
+     * @return the killer name if the backup ran (clipboard-exact), or null on the primary path
+     *         (which adds by clicking the name, without reading it).
+     */
+    public String addKillerFromKillReport() {
+        log("Opening kill report to add the killer as a bad (orange) corporate contact.");
+
+        // 1. Open the feed (bottom-right) and the latest kill report.
+        if (!openKillReport()) {
+            log("Kill report did not open — aborting bad-contact add.");
+            return null;
+        }
+
+        // 2. PRIMARY: right-click the Final Blow name. If the pilot menu offers Add Corporate
+        //    Contact, use it — no name lookup needed, we just click the pilot.
+        rightClickPos(KILLER_CLICK_X, KILLER_CLICK_Y);
+        sleep(500);
+        if (findTemplate("add_corporate_contact") != null) {
+            ocrBridge.clickTemplate("add_corporate_contact");
+            sleep(700);
+            ocrBridge.clickTemplate("standing_bad");
+            sleep(300);
+            ocrBridge.clickTemplate("add_contact_confirm");
+            sleep(500);
+            log("Kill-report bad-contact added via name right-click.");
+            return null; // name isn't read on the primary path
+        }
+
+        // 3. BACKUP: the right-click gave no Add-Contact option. Dismiss the menu (left-click in
+        //    empty space — never Escape), then Copy Kill Information → parse the exact name → add it
+        //    through the contacts search.
+        log("No Add-Contact option on the name right-click — using the Copy Kill Information backup.");
+        clickPos(MENU_DISMISS_X, MENU_DISMISS_Y);
+        sleep(300);
+        String killer = copyKillInfoParseName();
+        if (killer != null && !killer.isEmpty()) {
+            addViaContactsSearch(killer);
+        } else {
+            log("Backup: could not determine the killer name — no contact added.");
+        }
+        return killer;
+    }
+
+    /**
+     * Open the latest kill report: feed icon (bottom-right) → kill_report entry.
+     * Verifies each template is actually on screen before clicking (clickTemplate is
+     * fire-and-forget and would silently no-op on a miss, leaving the caller to act on
+     * a report that never opened). Returns true only if both steps matched.
+     */
+    public boolean openKillReport() {
+        int[] feed = ocrBridge.findTemplatePos("feed_icon");
+        if (feed == null) {
+            log("feed_icon not found — is the client docked with the feed icon visible (bottom-right)? Aborting.");
+            return false;
+        }
+        log("Opening feed (feed_icon at " + feed[0] + "," + feed[1] + ").");
+        ocrBridge.clickPos(feed[0], feed[1]);
+        sleep(700);
+
+        int[] report = ocrBridge.findTemplatePos("kill_report");
+        if (report == null) {
+            log("kill_report entry not found in the feed — no kill report to open. Aborting.");
+            return false;
+        }
+        log("Clicking the latest kill report (kill_report at " + report[0] + "," + report[1] + ").");
+        ocrBridge.clickPos(report[0], report[1]);
+        sleep(1300); // let the kill report window open
+        return true;
+    }
+
+    /**
+     * Three-dot menu → Copy Kill Information → read the clipboard → parse the final-blow pilot name.
+     * Returns the exact name, or null if the menu/clipboard/parse fails.
+     */
+    public String copyKillInfoParseName() {
+        // Clear the clipboard first so a stale value (a previous kill, or unrelated copy) can't
+        // masquerade as a successful copy when the menu/template is missing.
+        final String SENTINEL = "<no-kill-info>";
+        setClipboard(SENTINEL);
+        ocrBridge.clickTemplate("kill_report_menu"); // three-dot at the top of the kill report window
+        sleep(500);
+        ocrBridge.clickTemplate("copy_kill_info");
+        sleep(400); // let the clipboard populate
+        String text = readClipboard();
+        if (text == null || text.equals(SENTINEL)) {
+            log("Copy Kill Information: clipboard unchanged — three-dot/copy template likely missing.");
+            return null;
+        }
+        java.util.regex.Matcher m = FINAL_BLOW.matcher(text);
+        if (m.find()) {
+            String name = m.group(1).trim();
+            log("Copy Kill Information → final blow: " + name);
+            return name;
+        }
+        log("Copy Kill Information: couldn't parse the final-blow name from the clipboard.");
+        return null;
+    }
+
+    /** Add {@code pilotName} as a Bad (orange) corporate contact through the contacts search. */
+    public boolean addViaContactsSearch(String pilotName) {
+        log("Backup: adding '" + pilotName + "' via contacts search.");
+        ocrBridge.clickTemplate("contacts");
+        sleep(800);
+        int[] search = ocrBridge.findTemplatePos("contacts_search");
+        if (search == null) {
+            log("contacts_search not visible — aborting backup add.");
+            return false;
+        }
+        ocrBridge.clickPos(search[0], search[1]);
+        sleep(300);
+        setClipboard(pilotName);
+        ocrBridge.ctrlKeyPress("v");
+        sleep(200);
+        ocrBridge.keyPress("\r"); // Enter — execute the search
+        sleep(1200);
+        // Exact name search — right-click the first result below the search field.
+        rightClickPos(search[0], search[1] + CONTACT_RESULT_OFFSET_Y);
+        sleep(500);
+        ocrBridge.clickTemplate("add_corporate_contact");
+        sleep(700);
+        ocrBridge.clickTemplate("standing_bad");
+        sleep(300);
+        ocrBridge.clickTemplate("add_contact_confirm");
+        sleep(500);
+        ocrBridge.clickTemplate("contacts_close");
+        log("Backup contacts-search add complete for: " + pilotName);
+        return true;
+    }
+
+    private void setClipboard(String text) {
+        try {
+            java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
+                    .setContents(new java.awt.datatransfer.StringSelection(text), null);
+        } catch (Exception e) {
+            log("clipboard set failed: " + e.getMessage());
+        }
+    }
+
+    private String readClipboard() {
+        try {
+            return (String) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
+                    .getData(java.awt.datatransfer.DataFlavor.stringFlavor);
+        } catch (Exception e) {
+            log("clipboard read failed: " + e.getMessage());
+            return null;
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------

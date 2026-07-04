@@ -214,6 +214,16 @@ TEMPLATE_FILES = {
     "faction_agent": "faction_agent",  # faction agent portrait — double-click to open his convo
     "soe_station": "soe_station",       # SOE station in space — right-click → Dock for the kernite mission
     "kernite": "kernite",               # 'Resources for War' (kernite) offer dialog template — accept
+    # Kill report → bad-contact flow (ContactTest / addKillerFromKillReport)
+    "feed_icon": "feed_icon",                       # feed icon bottom-right — opens the notifications feed
+    "kill_report": "kill_report",                   # latest kill report entry in the feed
+    "kill_report_menu": "kill_report_menu",         # three-dot menu at the top of the kill report window
+    "copy_kill_info": "copy_kill_info",             # 'Copy Kill Information' menu item
+    "add_corporate_contact": "add_corporate_contact",  # 'Add Corporate Contact' item on the pilot right-click
+    "add_contact_confirm": "add_contact_confirm",   # confirm button in the add-contact dialog
+    "standing_bad": "standing_bad",                 # bad (orange) standing option in the add-contact dialog
+    "contacts": "contacts",                         # contacts window/button — backup add path
+    "contacts_search": "contacts_search",           # search field in the contacts window
 }
 
 # Fixed screen position of the "Ship Hangar" station-services button. Used as a
