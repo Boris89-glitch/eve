@@ -124,6 +124,11 @@ public class ClientState {
     /** Current step in the combat sequence (0 = first step). Reset on entering IN_COMBAT. */
     private int combatStep = 0;
 
+    /** Effective overview-row template key for the current combat target. Set at the lock
+     *  step to the mission-specific template, or 'alt_target' when that can't be found, and
+     *  reused by later steps (range-keep etc.) so the whole fight acts on the same row. */
+    private String combatTargetKey = null;
+
     /** One-shot: has the focus-away click been done for this combat? Reset on entering IN_COMBAT. */
     private boolean combatFocusClicked = false;
 
@@ -191,6 +196,12 @@ public class ClientState {
     /** True after set_destination was clicked — verify it's gone after the first jump (else re-click). */
     private boolean verifySetDest = false;
 
+    /** Set when set_destination was missed on undock and re-clicked one jump late: the route now
+     *  points back 1 jump, so the next gate jump lands on top of the gate and shows no warp tunnel.
+     *  WARPING skips warp_active verification for that jump (press 's', switch client, 15s safe wait,
+     *  then resume normal navigation) instead of misreading the instant jump as a failed warp. One-shot. */
+    private boolean simplifyNextWarp = false;
+
     /** Scarlet: set when warping to the mission location. On the next landing the bot enters
      *  IN_COMBAT directly — the mission is already started (no first activate_gate to trigger it). */
     private boolean enterCombatOnWarpLand = false;
@@ -207,10 +218,12 @@ public class ClientState {
     /** True after the first re-click of decline in DECLINING — next failure triggers agent double-click. */
     private boolean declineRetried = false;
 
-    /** True once Scarlet has been declined in the current mission-checking session — it may be
-     *  declined only once per session, so the next Scarlet offer in the same session is accepted.
-     *  Reset when a new checking session starts. Independent of standings gating. */
-    private boolean scarletDeclinedThisCheck = false;
+    /** Running count of non-"anomic" missions declined (by OCR title) since the last standings
+     *  re-read. Every 5th such decline schedules a standings check so mission gating stays current. */
+    private int nonAnomicDeclineCount = 0;
+
+    /** Set when nonAnomicDeclineCount reaches the threshold — DECLINING re-reads agent standings. */
+    private boolean standingsCheckDue = false;
 
     /** Number of stargate jumps since undocking — logged on pod death for location context. */
     private int jumpCount = 0;
@@ -385,6 +398,9 @@ public class ClientState {
     public int  getCombatStep()             { return combatStep; }
     public void setCombatStep(int step)     { this.combatStep = step; }
 
+    public String getCombatTargetKey()          { return combatTargetKey; }
+    public void   setCombatTargetKey(String k)  { this.combatTargetKey = k; }
+
     public boolean isCombatFocusClicked()          { return combatFocusClicked; }
     public void    setCombatFocusClicked(boolean b) { this.combatFocusClicked = b; }
 
@@ -466,8 +482,11 @@ public boolean isDockingToStation()             { return dockingToStation; }
     public boolean isDeclineRetried()              { return declineRetried; }
     public void    setDeclineRetried(boolean v)    { this.declineRetried = v; }
 
-    public boolean isScarletDeclinedThisCheck()           { return scarletDeclinedThisCheck; }
-    public void    setScarletDeclinedThisCheck(boolean v) { this.scarletDeclinedThisCheck = v; }
+    public int  getNonAnomicDeclineCount()         { return nonAnomicDeclineCount; }
+    public void setNonAnomicDeclineCount(int v)    { this.nonAnomicDeclineCount = v; }
+
+    public boolean isStandingsCheckDue()           { return standingsCheckDue; }
+    public void    setStandingsCheckDue(boolean v) { this.standingsCheckDue = v; }
 
     public int  getJumpCount()          { return jumpCount; }
     public void incrementJumpCount()    { this.jumpCount++; }
@@ -516,6 +535,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isVerifySetDest()           { return verifySetDest; }
     public void    setVerifySetDest(boolean v) { this.verifySetDest = v; }
+
+    public boolean isSimplifyNextWarp()           { return simplifyNextWarp; }
+    public void    setSimplifyNextWarp(boolean v) { this.simplifyNextWarp = v; }
 
     public LocalDateTime getLastStateChange()  { return lastStateChange;  }
     public LocalDateTime getLastMissionCheck() { return lastMissionCheck; }

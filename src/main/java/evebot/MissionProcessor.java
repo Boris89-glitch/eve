@@ -37,6 +37,17 @@ public class MissionProcessor {
     private static final int REDOCK_CONFIRM_TRIES = 12;
     private static final int REDOCK_CONFIRM_INTERVAL_MS = 2000;
 
+    // Agent-standings ("Character: Information") window close "X", fixed at ~632,208 (1920x1200).
+    // closeStandingsDialog() matches the close_active_window template ONLY inside this box so it
+    // can't hit the hangar / mission-dialog / agent X elsewhere on screen, then falls back to the
+    // fixed location if not matched. Box is tight around the X — nothing else lives here.
+    private static final int STANDINGS_CLOSE_X = 632;
+    private static final int STANDINGS_CLOSE_Y = 208;
+    private static final int STANDINGS_WINDOW_X = 500;
+    private static final int STANDINGS_WINDOW_Y = 140;
+    private static final int STANDINGS_WINDOW_W = 210;
+    private static final int STANDINGS_WINDOW_H = 130;
+
     public MissionProcessor() {
         this.ocrBridge = new OCRBridge();
     }
@@ -190,6 +201,20 @@ public class MissionProcessor {
         log("Double-clicking agent_icon to open agent dialog");
         ocrBridge.doubleClickTemplate("agent_icon");
         sleep(1200);
+    }
+
+    /**
+     * Quit the active mission and request a new one. Opens the agent dialog first (so the
+     * mission's Quit button is on screen), then quit → Yes → Request Mission. Used after a
+     * pod death to abandon the mission we died on and pick a different one.
+     */
+    public boolean quitMission() {
+        log("Quitting current mission (open agent dialog → quit → request new)");
+        doubleClickAgentIcon();
+        boolean quit = ocrBridge.quitMissionAndRequestNew();
+        if (!quit) log("Quit-mission button not found — mission may still be active.");
+        sleep(POST_CLICK_DELAY_MS);
+        return quit;
     }
 
     // -----------------------------------------------------------------------
@@ -822,6 +847,23 @@ public class MissionProcessor {
     public double readAgentStandings() {
         // Exact value intentionally not logged — OCR misreads it; only low-standings warnings are kept.
         return ocrBridge.readStandings(300, 490, 100, 55);
+    }
+
+    /**
+     * Close the agent-standings info window. Matches the close "X" ONLY inside the standings
+     * window's box (so a full-screen match can't kill the hangar / mission dialog / agent
+     * window instead), then falls back to clicking the fixed X location if not matched.
+     */
+    public void closeStandingsDialog() {
+        log("Closing agent standings window (region-scoped close, fixed-location fallback)");
+        boolean closed = ocrBridge.clickTemplateInRegion("close_active_window",
+                STANDINGS_WINDOW_X, STANDINGS_WINDOW_Y,
+                STANDINGS_WINDOW_W, STANDINGS_WINDOW_H);
+        if (!closed) {
+            log("Close 'X' not matched in region — clicking fixed location " + STANDINGS_CLOSE_X + "," + STANDINGS_CLOSE_Y);
+            ocrBridge.clickPos(STANDINGS_CLOSE_X, STANDINGS_CLOSE_Y);
+        }
+        sleep(POST_CLICK_DELAY_MS);
     }
 
     /**

@@ -67,6 +67,8 @@ public class ClientManager {
     private static final int  THUMBNAIL_CLICK_OFFSET_Y = 75;
     /** Scarlet lock-confirm: seconds to wait for 'locked_anire' before re-attempting the ctrl-click. */
     private static final long SCARLET_LOCK_RETRY_SECS  = 2;
+    /** Re-read agent standings after this many non-"anomic" declined missions (keeps gating current). */
+    private static final int  STANDINGS_RECHECK_DECLINES = 5;
     /** Global watchdog: if no client switch has happened for this many seconds and a second
      *  client exists, force a switch so the idle client cannot sit AFK in space (and get podded)
      *  while the foreground client is busy in a long combat. */
@@ -317,9 +319,11 @@ public class ClientManager {
         long remaining = Duration.between(LocalDateTime.now(), cooldownEnd).getSeconds();
         if (remaining <= 0) {
             if (cs.getCurrentMission() != null) {
-                // Podded client — retry the same mission.
-                log(clientId, "POD_COOLDOWN: expired — re-boarding ship for retry.");
-                stateManager.setState(clientId, ClientState.State.REPAIRING);
+                // Died on this mission — quit it and pick a different one rather than flying back in.
+                log(clientId, "POD_COOLDOWN: expired — quitting the mission we died on, picking a different one.");
+                missionProcessor.quitMission();
+                cs.setCurrentMission(null);
+                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
             } else {
                 // Other client — resume normal ops.
                 log(clientId, "POD_COOLDOWN: expired — resuming normal operations.");
@@ -347,7 +351,7 @@ public class ClientManager {
         }
     }
 
-    private static final int POD_CHECK_INTERVAL_MINUTES = 90;
+    private static final int POD_CHECK_INTERVAL_MINUTES = 10;
 
     /**
      * Periodic overview upkeep (WARPING, and IDLE while travelling), throttled to
@@ -403,10 +407,11 @@ public class ClientManager {
         String deathWindow = lastCheck.equals(LocalDateTime.MIN)
                 ? "death window unknown (no prior pod check)"
                 : "died within last " + Duration.between(lastCheck, LocalDateTime.now()).getSeconds() + "s";
-        // Jump category: <=1 (the undock warp = jump 0, plus the first stargate jump = 1)
-        // is the bubble-camp danger zone that pauses all clients (see below); past that
-        // the exact count doesn't matter, so it's logged simply as ">1".
-        String jumpsLabel = jumps <= 1 ? String.valueOf(jumps) : ">1";
+        // Jump category: <=3 is the near-station danger zone that pauses all clients (see
+        // below). The count runs high — the undock warp is counted as a jump and a phantom
+        // jump can be logged after the death — so a kill ~1 system out reads as ~3. Past that
+        // the exact count doesn't matter, so it's logged simply as ">3".
+        String jumpsLabel = jumps <= 3 ? String.valueOf(jumps) : ">3";
         if (inSpace) {
             log(clientId, "*** CAPSULE DETECTED — ship destroyed! Self-destructing...");
             if (!missionProcessor.clickDestruct()) {
@@ -446,25 +451,30 @@ public class ClientManager {
             EventLog.log("POD_DEATH", clientId + " — respawned at station (mission: " + missionName + ", " + phase + ", jumps: " + jumpsLabel + ", " + deathWindow + ")");
         }
 
-        // Pause all clients (global cooldown) for any NON-COMBAT pod death within the
-        // first jump (undock warp = jump 0, or first stargate = jump 1): re-undocking
-        // would warp straight back toward whatever killed us (bubble camp, gate gank),
-        // so wait it out. Combat deaths happen at the mission site and resume at once.
+        // Pause all clients (global cooldown) for any NON-COMBAT pod death near the station
+        // (jumps <= 3 — the count runs high because the undock warp and a phantom post-death
+        // jump inflate it, so a kill ~1 system out reads as ~3): re-undocking would warp
+        // straight back toward whatever killed us (bubble camp, gate gank), so wait it out.
+        // Combat deaths happen at the mission site and resume at once.
         boolean inCombat = stateManager.getStateEnum(clientId) == ClientState.State.IN_COMBAT;
-        if (jumps <= 1 && !inCombat) {
+        if (jumps <= 3 && !inCombat) {
             LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
             stateManager.setPodCooldownEnd(cooldownEnd);
             log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
             stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         } else {
-            log(clientId, "POD_DEATH: " + (inCombat ? "in-combat death" : "jumps>1 (" + jumps + ")")
+            log(clientId, "POD_DEATH: " + (inCombat ? "in-combat death" : "jumps>3 (" + jumps + ")")
                     + " — skipping cooldown, resuming immediately.");
             // Clear the travel phase — we respawned at the station, so the next IDLE
             // tick must not keep reading the station agent_icon as another pod death
             // (TO_MISSION + agent_icon loops back into handlePodDeath forever).
             cs.setTravelPhase(ClientState.TravelPhase.NONE);
             if (cs.getCurrentMission() != null) {
-                stateManager.setState(clientId, ClientState.State.REPAIRING);
+                // Died on this mission — don't re-attempt it (same danger). Quit it and pick a new one.
+                log(clientId, "POD_DEATH: quitting the mission we died on — picking a different one.");
+                missionProcessor.quitMission();
+                cs.setCurrentMission(null);
+                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
             } else {
                 stateManager.setState(clientId, ClientState.State.IDLE);
             }
@@ -583,6 +593,10 @@ public class ClientManager {
                     if (missionProcessor.isSetDestinationVisible()) {
                         log(clientId, "IDLE[TO_MISSION]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
                         missionProcessor.clickTemplate("set_destination");
+                        // Destination set 1 jump late — the route now points back 1 jump, so the next
+                        // gate jump lands on the gate and shows no warp tunnel. Flag WARPING to skip
+                        // warp_active verification for that jump (press 's', switch, 15s safe wait).
+                        cs.setSimplifyNextWarp(true);
                         return;
                     }
                 }
@@ -749,6 +763,10 @@ public class ClientManager {
                     if (missionProcessor.isSetDestinationVisible()) {
                         log(clientId, "IDLE[RETURNING_HOME]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
                         missionProcessor.clickTemplate("set_destination");
+                        // Destination set 1 jump late — the route now points back 1 jump, so the next
+                        // gate jump lands on the gate and shows no warp tunnel. Flag WARPING to skip
+                        // warp_active verification for that jump (press 's', switch, 15s safe wait).
+                        cs.setSimplifyNextWarp(true);
                         return;
                     }
                 }
@@ -941,6 +959,17 @@ public class ClientManager {
             case COMPLETED: {
                 agentRetries.put(clientId, 0);
                 notCompleteRetries.put(clientId, 0);
+                // Before assuming a turn-in is needed, look for the request-mission button. If it's
+                // on screen the agent is ready to hand out a new mission (nothing left to turn in —
+                // the 'completed' template is stale), so request one and proceed via CHECKING_MISSIONS
+                // instead of running the COMPLETING turn-in flow.
+                if (missionProcessor.findTemplate("request_mission") != null) {
+                    log(clientId, "COMPLETED template visible but request-mission is available — requesting a new mission instead of turning in.");
+                    missionProcessor.clickRequestMission();
+                    stateManager.getState(clientId).setCurrentMission(null);
+                    stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                    break;
+                }
                 log(clientId, "Mission completed (completed template visible) — turning in.");
                 stateManager.setState(clientId, ClientState.State.COMPLETING);
                 break;
@@ -1022,8 +1051,6 @@ public class ClientManager {
 
         if (cs.getMissionCheckStartTime().equals(LocalDateTime.MIN)) {
             cs.setMissionCheckStartTime(LocalDateTime.now());
-            // New checking session — Scarlet may be declined once per session; clear the flag.
-            cs.setScarletDeclinedThisCheck(false);
         }
         long cycleElapsed = Duration.between(cs.getMissionCheckStartTime(), LocalDateTime.now()).getSeconds();
         if (cycleElapsed >= 45) {
@@ -1083,11 +1110,11 @@ public class ClientManager {
         }
 
         if (missionTemplate == null) {
-            // No known wanted-mission template visible. Some wanted missions have no
-            // dialog template and are identified by title only (e.g. Scarlet, Pot and
-            // Kettle, accepted only when agent standing < 1). OCR the offer and run it
-            // through the no-template rule set: standings-gated title rules get a chance,
-            // everything else still declines (fast-path behavior preserved).
+            // No known wanted-mission template visible — fall back to OCR. Some wanted
+            // missions have no dialog template (e.g. Scarlet, Pot and Kettle), and template
+            // matching can also miss a frame for missions that normally do match (e.g.
+            // Recon 1). OCR the offer and run it through the full rule set so a recognizable
+            // title is still accepted; unmatched offers still default to decline.
             if (missionProcessor.detectDialog() == MissionProcessor.DialogState.OFFER) {
                 Mission noTplMission = missionProcessor.readMission(getMissionAreaForClient(clientId));
                 if (noTplMission == null) {
@@ -1131,23 +1158,16 @@ public class ClientManager {
             return;
         }
 
-        // Scarlet is decided by the decline-once flag, independent of standings. Its dialog text
-        // OCRs unreliably (the title comes through as "Sc a rlet"), so skip OCR entirely — the
-        // template match already identifies it. Decline the first Scarlet offer per checking
-        // session; if it comes back around in the same session, accept it (can't decline twice).
+        // Scarlet: its dialog text OCRs unreliably (the title comes through as "Sc a rlet"),
+        // so skip OCR — set the title ourselves and run the standings gate. The config rule
+        // (title_contains "scarlet", max_standing 1.0) accepts it only when standing < 1.
         if ("mission_scarlet".equals(missionTemplate)) {
             Mission scarlet = new Mission();
             scarlet.setTitle("scarlet");
             scarlet.setShipTarget("scarlet"); // so IN_COMBAT routes to handleCombatScarlet
             cs.setCurrentMission(scarlet);
-            if (cs.isScarletDeclinedThisCheck()) {
-                log(clientId, "Scarlet template matched — already declined once this check, accepting.");
-                applyDecision(clientId, scarlet, MissionConfig.Decision.ACCEPT);
-            } else {
-                cs.setScarletDeclinedThisCheck(true);
-                log(clientId, "Scarlet template matched — declining (once per check).");
-                applyDecision(clientId, scarlet, MissionConfig.Decision.DECLINE);
-            }
+            log(clientId, "Scarlet template matched — evaluating against standings (accept only if < 1).");
+            applyDecision(clientId, scarlet, missionConfig.evaluate(scarlet, cs.getLastKnownStanding()));
             return;
         }
 
@@ -1183,6 +1203,21 @@ public class ClientManager {
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
         } else {
             System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle());
+            // Count non-"anomic" declines; every Nth one schedules a standings re-read so the
+            // tracked per-client standing (used for mission gating) doesn't drift stale while a
+            // client sits declining offers without ever completing a mission.
+            ClientState cs = stateManager.getState(clientId);
+            String title = mission.getTitle() != null ? mission.getTitle().toLowerCase() : "";
+            if (!title.contains("anomic")) {
+                int n = cs.getNonAnomicDeclineCount() + 1;
+                if (n >= STANDINGS_RECHECK_DECLINES) {
+                    cs.setNonAnomicDeclineCount(0);
+                    cs.setStandingsCheckDue(true);
+                    log(clientId, STANDINGS_RECHECK_DECLINES + " non-anomic declines — standings re-check scheduled.");
+                } else {
+                    cs.setNonAnomicDeclineCount(n);
+                }
+            }
             missionProcessor.clickDeclineButton();
             stateManager.setState(clientId, ClientState.State.DECLINING);
         }
@@ -1221,6 +1256,23 @@ public class ClientManager {
                 cs.setDeclineRetried(true);
             }
             return;
+        }
+
+        // Scheduled standings re-read (every Nth non-anomic decline): the agent dialog is open
+        // now that the offer closed, so read standings, persist, then refocus the agent dialog
+        // before requesting the next mission. NaN OCR misses are ignored by recordStanding.
+        ClientState cs = stateManager.getState(clientId);
+        if (cs.isStandingsCheckDue()) {
+            cs.setStandingsCheckDue(false);
+            log(clientId, "DECLINING: standings re-check due — reading agent standings.");
+            missionProcessor.clickAgentStandings();
+            double standings = missionProcessor.readAgentStandings();
+            if (!Double.isNaN(standings)) {
+                stateManager.recordStanding(clientId, standings);
+                log(clientId, "DECLINING: tracked agent standing updated for mission gating.");
+            }
+            missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X')
+            missionProcessor.doubleClickAgentIcon(); // refocus agent dialog after the standings window
         }
 
         log(clientId, "Dialog closed — requesting new mission.");
@@ -2481,6 +2533,19 @@ public class ClientManager {
      *  10  → WAIT for set_destination/dock; if fight > 60s → Alt+F1 again (once); 180s hardcap (pod check) → step 11
      *  11  → press 'xc' (deactivate modules) + handle dock/returning (RETURNING clicks set_destination coords)
      */
+    /**
+     * Resolve the overview-row template to act on for a combat target. Prefers the
+     * mission-specific template; when it isn't on screen, falls back to the generic
+     * 'alt_target' template (added manually) so the lock/range steps still hit a row
+     * when the primary can't be found. Defaults back to the primary when neither is
+     * visible (e.g. before 'alt_target' has been added — missing templates match nothing).
+     */
+    private String resolveCombatTarget(String primaryKey) {
+        if (missionProcessor.findTemplate(primaryKey) != null) return primaryKey;
+        if (missionProcessor.findTemplate("alt_target") != null) return "alt_target";
+        return primaryKey;
+    }
+
     private void handleCombatSansha(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
 
@@ -2500,9 +2565,11 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Sansha] Step 2: double-click target_sansha (select) + Ctrl+click (lock) + press 'adxc' (activate modules).");
-                missionProcessor.doubleClickTemplate("target_sansha");
-                missionProcessor.ctrlClickTemplate("target_sansha");
+                String tk = resolveCombatTarget("target_sansha");
+                cs.setCombatTargetKey(tk);
+                log(clientId, "COMBAT[Sansha] Step 2: double-click " + tk + " (select) + Ctrl+click (lock) + press 'adxc' (activate modules).");
+                missionProcessor.doubleClickTemplate(tk);
+                missionProcessor.ctrlClickTemplate(tk);
                 missionProcessor.keyPress("adxc");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
@@ -2515,8 +2582,9 @@ public class ClientManager {
                     log(clientId, "COMBAT[Sansha] wait before range: " + elapsed + "s / 4s.");
                     return;
                 }
-                log(clientId, "COMBAT[Sansha] Step 3: right-click target_sansha → click range.");
-                missionProcessor.rightClickTemplate("target_sansha");
+                String rangeKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_sansha";
+                log(clientId, "COMBAT[Sansha] Step 3: right-click " + rangeKey + " → click range.");
+                missionProcessor.rightClickTemplate(rangeKey);
                 missionProcessor.clickTemplate("range");
                 cs.setCombatStep(4);
                 break;
@@ -3111,9 +3179,11 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[Angel] Step 0: double-click target_angel (select) + Ctrl+click (lock).");
-                missionProcessor.doubleClickTemplate("target_angel");
-                missionProcessor.ctrlClickTemplate("target_angel");
+                String tk = resolveCombatTarget("target_angel");
+                cs.setCombatTargetKey(tk);
+                log(clientId, "COMBAT[Angel] Step 0: double-click " + tk + " (select) + Ctrl+click (lock).");
+                missionProcessor.doubleClickTemplate(tk);
+                missionProcessor.ctrlClickTemplate(tk);
                 cs.setCombatStartTime(LocalDateTime.now()); // fight start, for the 40s stop-rep-overload check
                 cs.setAngelRepOverloadStopped(false);
                 cs.setCombatStep(1);
@@ -3126,9 +3196,10 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Angel] Step 2: press 'x', click target_angel.");
+                String clickKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_angel";
+                log(clientId, "COMBAT[Angel] Step 2: press 'x', click " + clickKey + ".");
                 missionProcessor.keyPress("x");
-                missionProcessor.clickTemplate("target_angel");
+                missionProcessor.clickTemplate(clickKey);
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
@@ -3146,8 +3217,9 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                log(clientId, "COMBAT[Angel] Step 4: right-click target_angel → click range.");
-                missionProcessor.rightClickTemplate("target_angel");
+                String rangeKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_angel";
+                log(clientId, "COMBAT[Angel] Step 4: right-click " + rangeKey + " → click range.");
+                missionProcessor.rightClickTemplate(rangeKey);
                 missionProcessor.clickTemplate("range");
                 cs.setCombatStep(5);
                 break;
@@ -3268,8 +3340,10 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Worm] Step 1: double-click target_worm (approach + lock).");
-                missionProcessor.doubleClickTemplate("target_worm");
+                String tk = resolveCombatTarget("target_worm");
+                cs.setCombatTargetKey(tk);
+                log(clientId, "COMBAT[Worm] Step 1: double-click " + tk + " (approach + lock).");
+                missionProcessor.doubleClickTemplate(tk);
                 cs.setCombatStep(2);
                 break;
             }
@@ -3296,8 +3370,9 @@ public class ClientManager {
                 if (missionProcessor.findTemplate("locked_worm") != null) {
                     log(clientId, "COMBAT[Worm] Step 4: locked_worm already present (auto-locked) — skipping ctrl+click.");
                 } else {
-                    log(clientId, "COMBAT[Worm] Step 4: Ctrl+click target_worm (lock target).");
-                    missionProcessor.ctrlClickTemplate("target_worm");
+                    String lockKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_worm";
+                    log(clientId, "COMBAT[Worm] Step 4: Ctrl+click " + lockKey + " (lock target).");
+                    missionProcessor.ctrlClickTemplate(lockKey);
                 }
                 cs.setCombatStep(5);
                 break;
@@ -3328,8 +3403,9 @@ public class ClientManager {
                     log(clientId, "COMBAT[Worm] wait before range: " + elapsed + "s / 4s.");
                     return;
                 }
-                log(clientId, "COMBAT[Worm] Step 7: right-click target_worm → range.");
-                missionProcessor.rightClickTemplate("target_worm");
+                String rangeKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_worm";
+                log(clientId, "COMBAT[Worm] Step 7: right-click " + rangeKey + " → range.");
+                missionProcessor.rightClickTemplate(rangeKey);
                 missionProcessor.clickTemplate("range");
                 cs.setCombatStep(8);
                 break;
@@ -3489,7 +3565,11 @@ public class ClientManager {
             stateManager.recordStanding(clientId, standings);
             log(clientId, "COMPLETING: tracked agent standing updated for mission gating (gate: < 1).");
         }
+        // Turning in a mission boosts standings and we just re-read them here, so the
+        // non-anomic decline counter (which schedules a standings re-check) starts fresh.
+        stateManager.getState(clientId).setNonAnomicDeclineCount(0);
 
+        missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X', fixed-loc fallback)
         missionProcessor.doubleClickAgentIcon(); // refocus agent dialog (standings covers complete_mission)
         missionProcessor.clickCompleteMission();
 
@@ -3964,6 +4044,34 @@ public class ClientManager {
             log(clientId, "WARPING[INFESTED]: no jam after 5s — resuming normal warp.");
         }
 
+        // Late-set-destination back-jump: destination was missed on undock and re-clicked one jump
+        // late, so this jump goes back 1 jump and lands on top of the gate — no warp tunnel, so the
+        // normal warp_active check would misread it as a failed warp and redock. Trust the jump:
+        // press the prop mod ('s'), hand off focus, hold a 15s safe wait, then resume normal nav.
+        if (cs.isSimplifyNextWarp()) {
+            if (elapsed < 1) return; // let the jump issue
+            if (firstCheck) {
+                cs.setLastWarpCheck(LocalDateTime.now());
+                missionProcessor.keyPress("s"); // prop mod — burn off the gate
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "WARPING[LATE-DEST]: back-jump issued — pressed 's', switching focus to " + other.getClientId() + " for a 15s safe wait.");
+                    bringToForeground(other);
+                } else {
+                    log(clientId, "WARPING[LATE-DEST]: back-jump issued — pressed 's', no other client, holding 15s safe wait.");
+                }
+                return;
+            }
+            if (elapsed < UNDOCK_WAIT_SECS) {
+                return; // 15s safe wait — no warp_active verification while the jump settles
+            }
+            cs.setSimplifyNextWarp(false);
+            log(clientId, "WARPING[LATE-DEST]: 15s safe wait done — resuming normal navigation.");
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            cs.setJustExitedWarp(true);
+            return;
+        }
+
         // Post-miss simplified path: once the IDLE[TO_MISSION] safety net has fired
         // (jumpCount >= 6 + set_destination visible), subsequent warps trust the click
         // and skip bubble/warp_active verification. 1s grace, then hand focus off.
@@ -4000,16 +4108,17 @@ public class ClientManager {
             // Fall through to the warp_active landing poll below.
         } else {
             // Normal path: full warp-engagement verification.
-            // Wait for the warp/jump to engage before checking for bubble/warp. Normally 4s,
-            // but on the first jump right after undocking — home station still in front of us —
-            // the warp from a standstill takes a beat longer to engage. Only in that case wait
-            // up to 6s, so we don't prematurely read "warp not active" and trigger an emergency
-            // redock.
+            // Wait for the warp/jump to engage before checking for bubble/warp. Normally 5s:
+            // warp_active (warp entering) can show early, but a warp jam/disruption often lands
+            // a beat later, so we hold off the check to avoid reading a false "warp took" before a
+            // late jam appears. On the first jump right after undocking — home station still in
+            // front of us — the warp from a standstill takes even longer to engage; in that case
+            // wait up to 7s, so we don't prematurely read "warp not active" and redock.
             // Safe-spot evade is the exception: sitting still with an enemy in local is
             // dangerous, and the bookmark click already fired in the previous state (warp_active
             // shows within ~1s if it took), so react fast — 1s grace, no home-station extension —
             // to nudge + re-warp the instant it's clearly stuck.
-            long grace = cs.isSafeSpotWarp() ? 1 : 4;
+            long grace = cs.isSafeSpotWarp() ? 1 : 5;
             if (elapsed < grace) {
                 return;
             }

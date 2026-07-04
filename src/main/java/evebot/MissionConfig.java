@@ -100,36 +100,14 @@ public class MissionConfig {
     }
 
     /**
-     * Evaluate an offer that matched NO dialog template. Decline rules still apply, then
-     * ONLY standings-gated accept rules (those with a max_standing) are consulted — non-gated
-     * accept rules are skipped, preserving the template-first fast path (unmatched offers
-     * decline). {@code standing} is the tracked per-client agent standing (NaN if not yet known).
+     * Evaluate an offer that matched NO dialog template — OCR is the fallback when template
+     * matching fails. The full rule set is consulted (decline → standings-gated → non-gated),
+     * identical to {@link #evaluate}, so a wanted mission that OCRs a recognizable title
+     * (e.g. Recon 1 of 3) is still accepted when its dialog template didn't match this frame.
+     * {@code standing} is the tracked per-client agent standing (NaN if not yet known).
      */
     public Decision evaluateNoTemplate(Mission mission, double standing) {
-        if (mission == null) {
-            System.out.println("[MissionConfig] Mission is null → DECLINE");
-            return Decision.DECLINE;
-        }
-
-        // 1. Decline rules first (too-far / blood / base / etc.) — same priority as evaluate().
-        for (Rule rule : declineRules) {
-            if (rule.matches(mission)) {
-                System.out.printf("[DECISION] DECLINE — %s  (rule: %s)%n",
-                        mission.getTitle(), rule.comment);
-                return Decision.DECLINE;
-            }
-        }
-
-        // 2. Only standings-gated accept rules are honored on the no-template path.
-        for (Rule rule : acceptRules) {
-            if (rule.maxStanding == null) continue;
-            if (rule.matches(mission)) return gatedDecision(mission, rule, standing);
-        }
-
-        // 3. Default: decline (unmatched offers keep the fast-path decline behavior).
-        System.out.printf("[DECISION] DECLINE — %s  (no template, no standings-gated rule)%n",
-                mission.getTitle());
-        return Decision.DECLINE;
+        return evaluate(mission, standing);
     }
 
     /**

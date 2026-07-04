@@ -333,6 +333,26 @@ public class OCRBridge {
     }
 
     /**
+     * Left-click a template, but only match it inside the given screen region
+     * (x, y, width, height). Use when the same template (e.g. a close "X") can appear
+     * in more than one window and only the one inside the box should be clicked.
+     * Returns true if a match was found and clicked within the default timeout.
+     */
+    public boolean clickTemplateInRegion(String key, int x, int y, int width, int height) {
+        dbg("[%s] [" + activeClient + "] clickTemplateInRegion: %s in %d,%d %dx%d%n",
+                ts(), key, x, y, width, height);
+        JsonObject c = cmd("click");
+        c.addProperty("key", key);
+        JsonObject region = new JsonObject();
+        region.addProperty("x", x);
+        region.addProperty("y", y);
+        region.addProperty("w", width);
+        region.addProperty("h", height);
+        c.add("region", region);
+        return sendBool(c);
+    }
+
+    /**
      * Left-click a template, offset offsetY pixels below its centre.
      */
     public void clickTemplateBelow(String key, int offsetY) {
@@ -566,6 +586,15 @@ public class OCRBridge {
             return value.get("dialog_matched").getAsString();
         }
         return "";  // success but no dialog match (OCR fallback was used)
+    }
+
+    /**
+     * Abandon the active mission and request a new one (quit_mission → Yes → request_mission,
+     * done in the daemon). Returns true if the quit button was found and clicked.
+     */
+    public boolean quitMissionAndRequestNew() {
+        dbg("[%s] [" + activeClient + "] quitMissionAndRequestNew%n", ts());
+        return sendBool(cmd("quit_mission"));
     }
 
     /**

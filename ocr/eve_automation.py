@@ -194,6 +194,7 @@ TEMPLATE_FILES = {
     "target_sansha": "target_sansha",    # Sansha burner — overview row
     "target_angel": "target_angel",      # Angel burner — overview row
     "target_worm": "target_worm",        # Worm burner — overview row
+    "alt_target": "alt_target",          # Generic fallback overview row — used when target_{angel,worm,sansha} can't be found
     "target_hive": "target_hive",        # Infested Ruins — overview row
     "target_hive1": "target_hive1",
     "target_hive2": "target_hive2",
@@ -1792,6 +1793,34 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         return {"ok": True, "value": "pong"}
 
     if cmd == "click":
+        # Optional region: confine the search to a screen box so a template that
+        # appears in more than one window (e.g. the close "X") is only matched inside
+        # the intended one. The match is found in the crop, then its centre is offset
+        # back to absolute screen coordinates before clicking.
+        region = msg.get("region")
+        if region:
+            deadline = time.time() + timeout
+            while True:
+                screen = matcher.screenshot_cv()
+                sh, sw = screen.shape[:2]
+                x0 = max(0, min(int(region["x"]), sw))
+                y0 = max(0, min(int(region["y"]), sh))
+                x1 = max(x0, min(int(region["x"]) + int(region["w"]), sw))
+                y1 = max(y0, min(int(region["y"]) + int(region["h"]), sh))
+                match = None
+                if x1 > x0 and y1 > y0:
+                    try:
+                        match = matcher.find(key, screen=screen[y0:y1, x0:x1])
+                    except Exception:
+                        match = None  # crop smaller than template
+                if match:
+                    cx, cy = matcher.center(match)
+                    matcher._do_click(cx + x0, cy + y0 + int(msg.get("offset_y", 0)),
+                                      button="left", delay=DAEMON_CLICK_DELAY)
+                    return {"ok": True, "value": True}
+                if time.time() >= deadline:
+                    return {"ok": True, "value": False}
+                time.sleep(0.2)
         match = matcher.wait_for(key, timeout=timeout)
         if not match:
             return {"ok": True, "value": False}
@@ -2003,6 +2032,11 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         # value is the result dict: ship_not_found / failed / {ship_template[,dialog_matched]}.
         result = repair_ship_flow(matcher, msg.get("title", ""))
         return {"ok": True, "value": result}
+
+    if cmd == "quit_mission":
+        # Abandon the active mission and request a new one (quit_mission -> Yes -> request).
+        # Used after a pod death so we don't re-attempt the mission we died on.
+        return {"ok": True, "value": quit_mission_and_request_new(matcher)}
 
     if cmd == "shutdown":
         return {"ok": True, "value": "bye"}
