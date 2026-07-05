@@ -1214,14 +1214,27 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
         ship_cy,
     )
 
-    # --- Step 2: Right-click the locked coordinates → context menu ---
-    log.info("Step 2: Right-clicking ship icon to open context menu...")
-    matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
-
-    # --- Step 3: Click "Get Repair Quote" ---
-    log.info("Step 3: Clicking 'Get Repair Quote'...")
-    if not matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6):
-        log.error("'Get Repair Quote' not found in context menu")
+    # --- Step 2+3: Right-click the ship icon → click "Get Repair Quote" ---
+    # A single right-click sometimes misses (menu doesn't open, opens on the wrong
+    # entry, or fails to populate). Keep re-issuing the right-click and looking for
+    # 'Get Repair Quote' until it lands on screen, bounded so a station with no
+    # repair option can't spin forever and block the other clients.
+    MAX_QUOTE_ATTEMPTS = 8
+    log.info("Step 2+3: Right-clicking ship icon → 'Get Repair Quote' (retrying)...")
+    quote_clicked = False
+    for attempt in range(1, MAX_QUOTE_ATTEMPTS + 1):
+        matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
+        if matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6):
+            log.info("'Get Repair Quote' clicked (attempt %d).", attempt)
+            quote_clicked = True
+            break
+        log.warning(
+            "'Get Repair Quote' not in context menu (attempt %d/%d) — re-right-clicking...",
+            attempt,
+            MAX_QUOTE_ATTEMPTS,
+        )
+    if not quote_clicked:
+        log.error("'Get Repair Quote' not found after %d attempts", MAX_QUOTE_ATTEMPTS)
         return {"failed": True}
 
     # --- Step 4: Click "Repair" (Repair All) — unless ship is already fully repaired ---
