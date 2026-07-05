@@ -129,6 +129,11 @@ public class ClientState {
      *  reused by later steps (range-keep etc.) so the whole fight acts on the same row. */
     private String combatTargetKey = null;
 
+    /** Set when THIS client was podded and still owes an in-game "add the killer from the kill
+     *  report as a bad contact" once the cooldown ends (we're docked with focus). Only the podded
+     *  client sets it, so the other client sharing the global cooldown doesn't run the add. */
+    private boolean pendingKillReportAdd = false;
+
     /** One-shot: has the focus-away click been done for this combat? Reset on entering IN_COMBAT. */
     private boolean combatFocusClicked = false;
 
@@ -397,6 +402,9 @@ public class ClientState {
 
     public int  getCombatStep()             { return combatStep; }
     public void setCombatStep(int step)     { this.combatStep = step; }
+
+    public boolean isPendingKillReportAdd()         { return pendingKillReportAdd; }
+    public void setPendingKillReportAdd(boolean v)  { this.pendingKillReportAdd = v; }
 
     public String getCombatTargetKey()          { return combatTargetKey; }
     public void   setCombatTargetKey(String k)  { this.combatTargetKey = k; }

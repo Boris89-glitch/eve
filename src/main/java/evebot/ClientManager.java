@@ -318,6 +318,14 @@ public class ClientManager {
         LocalDateTime cooldownEnd = stateManager.getPodCooldownEnd();
         long remaining = Duration.between(LocalDateTime.now(), cooldownEnd).getSeconds();
         if (remaining <= 0) {
+            // We're docked and in the foreground here — safe to drive the UI, and the kill report
+            // is still open (it closes on undock). Add the pilot who podded us as a bad contact.
+            if (cs.isPendingKillReportAdd()) {
+                cs.setPendingKillReportAdd(false);
+                String killer = missionProcessor.addKillerFromKillReport();
+                EventLog.log("POD_KILLER", clientId + " — podded by: "
+                        + (killer != null && !killer.isEmpty() ? killer : "unknown (added from kill report)"));
+            }
             if (cs.getCurrentMission() != null) {
                 // Died on this mission — quit it and pick a different one rather than flying back in.
                 log(clientId, "POD_COOLDOWN: expired — quitting the mission we died on, picking a different one.");
@@ -457,10 +465,19 @@ public class ClientManager {
         // straight back toward whatever killed us (bubble camp, gate gank), so wait it out.
         // Combat deaths happen at the mission site and resume at once.
         boolean inCombat = stateManager.getStateEnum(clientId) == ClientState.State.IN_COMBAT;
+        if (!inCombat) {
+            // Podded while travelling/AFK (bubble camp, gate gank) rather than at a mission site —
+            // the surprising case worth an audible heads-up.
+            log(clientId, "*** ALERT: podded outside of combat — sounding alarm.");
+            soundAlert(POD_ALERT);
+        }
         if (jumps <= 3 && !inCombat) {
             LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
             stateManager.setPodCooldownEnd(cooldownEnd);
             log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
+            // Podded outside combat by a camp — flag this client to add the killer (from the kill
+            // report) as a bad contact once the cooldown ends and we're docked with focus.
+            cs.setPendingKillReportAdd(true);
             stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         } else {
             log(clientId, "POD_DEATH: " + (inCombat ? "in-combat death" : "jumps>3 (" + jumps + ")")
@@ -470,11 +487,10 @@ public class ClientManager {
             // (TO_MISSION + agent_icon loops back into handlePodDeath forever).
             cs.setTravelPhase(ClientState.TravelPhase.NONE);
             if (cs.getCurrentMission() != null) {
-                // Died on this mission — don't re-attempt it (same danger). Quit it and pick a new one.
-                log(clientId, "POD_DEATH: quitting the mission we died on — picking a different one.");
-                missionProcessor.quitMission();
-                cs.setCurrentMission(null);
-                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                // Died on this mission — keep it and go finish it. Re-board the correct ship
+                // (REPAIRING → UNDOCKING → TRAVEL re-flies to the mission location).
+                log(clientId, "POD_DEATH: keeping the mission we died on — re-boarding ship and heading back.");
+                stateManager.setState(clientId, ClientState.State.REPAIRING);
             } else {
                 stateManager.setState(clientId, ClientState.State.IDLE);
             }
@@ -1332,8 +1348,9 @@ public class ClientManager {
             // fast as possible — no switching to the other client during undock.
         } else if (MissionProcessor.UNDOCK_SHIP_NOT_FOUND.equals(result)) {
             String mTitle = mission != null ? mission.getTitle() : "unknown";
-            log(clientId, "Ship not found — mission quit, returning to CHECKING_MISSIONS.");
+            log(clientId, "*** ALERT: no ship for this mission — sounding alarm (may be stuck).");
             EventLog.log("SHIP_NOT_FOUND", clientId + " — mission: " + mTitle);
+            soundAlert(NO_SHIP_ALERT);
             stateManager.getState(clientId).setCurrentMission(null);
             stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
         } else {
@@ -2736,9 +2753,8 @@ public class ClientManager {
             case 1: {
                 String hive1 = missionProcessor.findAnyTemplate("target_hive", "target_hive2");
                 if (hive1 != null) {
-                    log(clientId, "COMBAT[Infested] Step 1: double-click " + hive1 + " (approach), click away to mid.");
-                    missionProcessor.doubleClickTemplate(hive1);
-                    missionProcessor.clickPos(960, 540); // click away in space to clear the menu
+                    log(clientId, "COMBAT[Infested] Step 1: right-click " + hive1 + " → 'approach'.");
+                    missionProcessor.rightClickAndSelect(hive1, "approach");
                     cs.setCombatStep(2);
                 } else if (Duration.between(cs.getLastViewNudge(), LocalDateTime.now()).getSeconds() >= VIEW_NUDGE_THROTTLE_SECS) {
                     // Neither hive template matched — a stale frame may be hiding it. Nudge
@@ -2778,13 +2794,20 @@ public class ClientManager {
             case 5: {
                 log(clientId, "COMBAT[Infested] Step 5: Ctrl+click hive (lock), press 'a', then Ctrl+Space (stop ship) after 1s.");
                 String hive5 = missionProcessor.findAnyTemplate("target_hive", "target_hive2");
-                if (hive5 != null) {
-                    missionProcessor.ctrlClickTemplate(hive5);
-                    missionProcessor.keyPress("a");
-                } else {
-                    log(clientId, "COMBAT[Infested] Step 5: no hive target found — skipping lock.");
-                    missionProcessor.keyPress("a");
+                if (hive5 == null) {
+                    // Don't give up on the lock — a stale frame may be hiding the hive. Nudge the
+                    // camera (throttled) to force a fresh frame and retry next tick until it appears.
+                    if (Duration.between(cs.getLastViewNudge(), LocalDateTime.now()).getSeconds() >= VIEW_NUDGE_THROTTLE_SECS) {
+                        cs.setLastViewNudge(LocalDateTime.now());
+                        log(clientId, "COMBAT[Infested] Step 5: no hive target (target_hive/target_hive2) — nudging view + retrying.");
+                        missionProcessor.nudgeView();
+                    } else {
+                        log(clientId, "COMBAT[Infested] Step 5: no hive target found — retrying.");
+                    }
+                    return;
                 }
+                missionProcessor.ctrlClickTemplate(hive5);
+                missionProcessor.keyPress("a");
                 // Ctrl+Space (stop ship) after a 1s delay — 2s earlier than the old 3s.
                 try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 missionProcessor.ctrlKeyPress("space");
@@ -4083,7 +4106,7 @@ public class ClientManager {
             if (elapsed < 1) return;
             if (firstCheck) {
                 long sinceActive = Duration.between(cs.getLastCombatOrCheck(), LocalDateTime.now()).toMinutes();
-                if (sinceActive >= 5) {
+                if (sinceActive >= 10 && !cs.isDockingToStation()) {   // skip while dock-warping — HUD hidden, false pod reads
                     log(clientId, "WARPING[POST-MISS]: " + sinceActive + "m without combat/mission-check — running warp-entry pod check.");
                     if (missionProcessor.isFlyingPod()) {
                         log(clientId, "WARPING[POST-MISS]: no_ship on warp entry — podded, self-destructing.");
@@ -4226,9 +4249,12 @@ public class ClientManager {
             }
 
             if (firstCheck) {
-                // Warp-entry pod check — only if 5min+ without combat/mission-check.
+                // Warp-entry pod check — only if 10min+ without combat/mission-check, and NOT while
+                // dock-warping: during the docking transition the ship HUD (no_ship sliver) is hidden
+                // as the station UI loads, so isFlyingPod() false-reads it as a pod and loops on a
+                // bogus self-destruct. Real pod deaths near station are caught by the cooldown/agent_icon paths.
                 long sinceActive = Duration.between(cs.getLastCombatOrCheck(), LocalDateTime.now()).toMinutes();
-                if (sinceActive >= 5) {
+                if (sinceActive >= 10 && !cs.isDockingToStation()) {
                     log(clientId, "WARPING: " + sinceActive + "m without combat/mission-check — running warp-entry pod check.");
                     if (missionProcessor.isFlyingPod()) {
                         log(clientId, "WARPING: no_ship on warp entry — podded, self-destructing.");
@@ -4576,5 +4602,54 @@ public class ClientManager {
 
     private void log(String msg) {
         System.out.printf("[%s] %s%n", LocalDateTime.now().format(TS), msg);
+    }
+
+    /**
+     * Audible alert for events that need my attention. Each event gets a distinct tone pattern
+     * (see {@link #POD_ALERT} / {@link #NO_SHIP_ALERT}) so I can tell them apart without looking.
+     * Plays on a daemon thread so it never blocks the tick. Synthesised tones — no sound assets.
+     */
+    private void soundAlert(int[] freqsHz) {
+        Thread t = new Thread(() -> {
+            for (int i = 0; i < 3; i++) {          // repeat the whole pattern 3 times
+                for (int f : freqsHz) {
+                    playTone(f, 220);
+                }
+                try { Thread.sleep(250); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return; }
+            }
+        }, "sound-alert");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    /** Podded outside combat: urgent low two-tone (falling), like an alarm klaxon. */
+    private static final int[] POD_ALERT     = { 440, 330 };
+    /** No ship for the mission (stuck): high rising three-tone chirp — clearly different. */
+    private static final int[] NO_SHIP_ALERT = { 700, 900, 1100 };
+
+    /** Synthesise and play a single sine-wave tone (blocking; called on the alert thread). */
+    private void playTone(int hz, int ms) {
+        try {
+            float sampleRate = 44100f;
+            int samples = (int) (sampleRate * ms / 1000f);
+            byte[] buf = new byte[samples];
+            for (int i = 0; i < samples; i++) {
+                double angle = 2.0 * Math.PI * i * hz / sampleRate;
+                // Fade in/out ~10ms to avoid clicks at tone edges.
+                double env = Math.min(1.0, Math.min(i, samples - i) / (sampleRate * 0.01));
+                buf[i] = (byte) (Math.sin(angle) * 90 * env);
+            }
+            javax.sound.sampled.AudioFormat fmt =
+                    new javax.sound.sampled.AudioFormat(sampleRate, 8, 1, true, false);
+            try (javax.sound.sampled.SourceDataLine line =
+                         javax.sound.sampled.AudioSystem.getSourceDataLine(fmt)) {
+                line.open(fmt);
+                line.start();
+                line.write(buf, 0, buf.length);
+                line.drain();
+            }
+        } catch (Exception e) {
+            java.awt.Toolkit.getDefaultToolkit().beep();   // fall back to system beep if audio unavailable
+        }
     }
 }
