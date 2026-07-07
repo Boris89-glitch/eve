@@ -149,8 +149,11 @@ public class ClientState {
     /** True once the Sansha extra Alt+F1 cap pulse (fight > 35s) has fired this combat. */
     private boolean extraCapPulseDone = false;
 
-    /** True once the Angel "stop overloading rep" (Shift+c at &gt; 40s fight) has fired this combat. */
-    private boolean angelRepOverloadStopped = false;
+    /** Consecutive nudge-retries the current combat target acquisition has spent hunting the
+     *  PRIMARY target row. Only after these are exhausted does acquisition fall back to the
+     *  generic 'alt_target' row. Reset to 0 the moment a target (primary or alt) is found. */
+    private int combatTargetNudges = 0;
+
 
     /** True once the one-shot 20s support-frigate lock re-check has run this combat
      *  (team missions excluding Jaguar). Targets can drift out of lock even after the
@@ -195,6 +198,11 @@ public class ClientState {
 /** True when docking to home station after combat — WARPING should transition to COMPLETING. */
     private boolean dockingToStation = false;
 
+    /** Set when an insta-dock (enemy in local) engaged: instaDock() already slept ~7s and verified
+     *  warp_active before firing Ctrl+S, so the dock warp is confirmed on WARPING entry. WARPING
+     *  skips its grace + re-verification and hands off focus on the first tick. One-shot. */
+    private boolean warpPreVerified = false;
+
     /** True for the Infested escape warp — WARPING watches for a jam (3s) instead of the bubble switch. */
     private boolean jamCheckOnWarp = false;
 
@@ -224,7 +232,7 @@ public class ClientState {
     private boolean declineRetried = false;
 
     /** Running count of non-"anomic" missions declined (by OCR title) since the last standings
-     *  re-read. Every 5th such decline schedules a standings check so mission gating stays current. */
+     *  re-read. Every 4th such decline schedules a standings check so mission gating stays current. */
     private int nonAnomicDeclineCount = 0;
 
     /** Set when nonAnomicDeclineCount reaches the threshold — DECLINING re-reads agent standings. */
@@ -454,8 +462,9 @@ public class ClientState {
     public boolean isExtraCapPulseDone()             { return extraCapPulseDone; }
     public void    setExtraCapPulseDone(boolean v)   { this.extraCapPulseDone = v; }
 
-    public boolean isAngelRepOverloadStopped()           { return angelRepOverloadStopped; }
-    public void    setAngelRepOverloadStopped(boolean v) { this.angelRepOverloadStopped = v; }
+    public int  getCombatTargetNudges()             { return combatTargetNudges; }
+    public void setCombatTargetNudges(int v)        { this.combatTargetNudges = v; }
+
 
     public boolean isFrigateLockRechecked()           { return frigateLockRechecked; }
     public void    setFrigateLockRechecked(boolean v) { this.frigateLockRechecked = v; }
@@ -540,6 +549,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isJamCheckOnWarp()           { return jamCheckOnWarp; }
     public void    setJamCheckOnWarp(boolean v) { this.jamCheckOnWarp = v; }
+
+    public boolean isWarpPreVerified()           { return warpPreVerified; }
+    public void    setWarpPreVerified(boolean v) { this.warpPreVerified = v; }
 
     public boolean isVerifySetDest()           { return verifySetDest; }
     public void    setVerifySetDest(boolean v) { this.verifySetDest = v; }

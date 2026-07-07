@@ -68,7 +68,7 @@ public class ClientManager {
     /** Scarlet lock-confirm: seconds to wait for 'locked_anire' before re-attempting the ctrl-click. */
     private static final long SCARLET_LOCK_RETRY_SECS  = 2;
     /** Re-read agent standings after this many non-"anomic" declined missions (keeps gating current). */
-    private static final int  STANDINGS_RECHECK_DECLINES = 5;
+    private static final int  STANDINGS_RECHECK_DECLINES = 4;
     /** Global watchdog: if no client switch has happened for this many seconds and a second
      *  client exists, force a switch so the idle client cannot sit AFK in space (and get podded)
      *  while the foreground client is busy in a long combat. */
@@ -797,13 +797,16 @@ public class ClientManager {
             if (justLanded) {
                 // Just exited warp — dock first (no stargate false-match during the gate tunnel).
                 if ("dock".equals(found)) {
+                    boolean instaEngaged = false;
                     if (missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
-                        if (missionProcessor.instaDock() == MissionProcessor.InstaDockResult.NOT_ENGAGED
+                        MissionProcessor.InstaDockResult r = missionProcessor.instaDock();
+                        if (r == MissionProcessor.InstaDockResult.NOT_ENGAGED
                                 && !instaDockFallback(clientId, cs)) {
                             return; // still retrying the insta-dock — stay in IDLE, don't commit to WARPING
                         }
                         // ENGAGED, or NOT_ENGAGED past the retry cap (direct dock issued) — commit to WARPING.
+                        instaEngaged = r == MissionProcessor.InstaDockResult.ENGAGED;
                     } else {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking (button, station backup).");
                         missionProcessor.dockWithStationBackup();
@@ -811,6 +814,8 @@ public class ClientManager {
                     cs.setDockingToStation(true);
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
+                    // instaDock() already verified warp_active — skip WARPING's grace (set after setState).
+                    if (instaEngaged) cs.setWarpPreVerified(true);
                     return;
                 }
 
@@ -847,12 +852,15 @@ public class ClientManager {
             cs.setNoTravelUiSince(LocalDateTime.MIN);
             switch (found) {
                 case "dock":
+                    boolean instaEngagedDock = false;
                     if (missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
-                        if (missionProcessor.instaDock() == MissionProcessor.InstaDockResult.NOT_ENGAGED
+                        MissionProcessor.InstaDockResult r = missionProcessor.instaDock();
+                        if (r == MissionProcessor.InstaDockResult.NOT_ENGAGED
                                 && !instaDockFallback(clientId, cs)) {
                             return; // still retrying the insta-dock — stay in IDLE
                         }
+                        instaEngagedDock = r == MissionProcessor.InstaDockResult.ENGAGED;
                     } else {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible — docking (button, station backup).");
                         missionProcessor.dockWithStationBackup();
@@ -860,6 +868,8 @@ public class ClientManager {
                     cs.setDockingToStation(true);
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
+                    // instaDock() already verified warp_active — skip WARPING's grace (set after setState).
+                    if (instaEngagedDock) cs.setWarpPreVerified(true);
                     break;
                 case "stargate":
                     cs.incrementJumpCount();
@@ -1756,8 +1766,10 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Jaguar] Step 2: right-click target_jaguar → click range (range).");
-                missionProcessor.rightClickTemplate("target_jaguar");
+                String tk = awaitCombatTarget(clientId, cs, "target_jaguar");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[Jaguar] Step 2: right-click " + tk + " → click range (range).");
+                missionProcessor.rightClickTemplate(tk);
                 missionProcessor.clickTemplate("range");
                 cs.setCombatStep(3);
                 break;
@@ -1865,8 +1877,10 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[Vengeance] Step 0: right-click target_vengeance → click orbit.");
-                missionProcessor.rightClickTemplate("target_vengeance");
+                String tk = awaitCombatTarget(clientId, cs, "target_vengeance");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[Vengeance] Step 0: right-click " + tk + " → click orbit.");
+                missionProcessor.rightClickTemplate(tk);
                 missionProcessor.clickTemplate("orbit");
                 cs.setCombatStep(1);
                 break;
@@ -2150,8 +2164,10 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Enyo] Step 2: right-click target_enyo → click orbit.");
-                missionProcessor.rightClickTemplate("target_enyo");
+                String tk = awaitCombatTarget(clientId, cs, "target_enyo");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[Enyo] Step 2: right-click " + tk + " → click orbit.");
+                missionProcessor.rightClickTemplate(tk);
                 missionProcessor.clickTemplate("orbit");
                 cs.setCombatStep(3);
                 break;
@@ -2360,8 +2376,10 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                log(clientId, "COMBAT[Hawk] Step 2: right-click target_hawk → click orbit.");
-                missionProcessor.rightClickTemplate("target_hawk");
+                String tk = awaitCombatTarget(clientId, cs, "target_hawk");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[Hawk] Step 2: right-click " + tk + " → click orbit.");
+                missionProcessor.rightClickTemplate(tk);
                 missionProcessor.clickTemplate("orbit");
                 cs.setCombatStep(3);
                 break;
@@ -2550,17 +2568,36 @@ public class ClientManager {
      *  10  → WAIT for set_destination/dock; if fight > 60s → Alt+F1 again (once); 180s hardcap (pod check) → step 11
      *  11  → press 'xc' (deactivate modules) + handle dock/returning (RETURNING clicks set_destination coords)
      */
+    /** Nudge-retries spent hunting the primary combat target before 'alt_target' is accepted. */
+    private static final int COMBAT_TARGET_NUDGE_LIMIT = 5;
+
     /**
-     * Resolve the overview-row template to act on for a combat target. Prefers the
-     * mission-specific template; when it isn't on screen, falls back to the generic
-     * 'alt_target' template (added manually) so the lock/range steps still hit a row
-     * when the primary can't be found. Defaults back to the primary when neither is
-     * visible (e.g. before 'alt_target' has been added — missing templates match nothing).
+     * Resolve — and require — the overview-row template to act on for a combat target.
+     * The mission-specific template is strongly preferred: while it isn't on screen this
+     * nudges the camera (forcing a fresh frame / rotating the view to reveal an off-screen
+     * or occluded target) and returns null so the caller holds the step and retries. Only
+     * after {@link #COMBAT_TARGET_NUDGE_LIMIT} failed primary attempts does it fall back to
+     * the generic 'alt_target' row — so alt is a genuine last resort, not chosen on a single
+     * transient primary miss. Combat never advances until a target row is actually found.
      */
-    private String resolveCombatTarget(String primaryKey) {
-        if (missionProcessor.findTemplate(primaryKey) != null) return primaryKey;
-        if (missionProcessor.findTemplate("alt_target") != null) return "alt_target";
-        return primaryKey;
+    private String awaitCombatTarget(String clientId, ClientState cs, String primaryKey) {
+        if (missionProcessor.findTemplate(primaryKey) != null) {
+            cs.setCombatTargetNudges(0);
+            return primaryKey;
+        }
+        int n = cs.getCombatTargetNudges() + 1;
+        cs.setCombatTargetNudges(n);
+        // Primary still missing but we've exhausted the retries — accept alt_target if present.
+        if (n > COMBAT_TARGET_NUDGE_LIMIT && missionProcessor.findTemplate("alt_target") != null) {
+            log(clientId, "COMBAT: primary '" + primaryKey + "' not found after " + COMBAT_TARGET_NUDGE_LIMIT
+                    + " nudges — falling back to alt_target.");
+            cs.setCombatTargetNudges(0);
+            return "alt_target";
+        }
+        log(clientId, "COMBAT: target '" + primaryKey + "' not on screen — nudging view to reveal it ("
+                + n + "/" + COMBAT_TARGET_NUDGE_LIMIT + ", holding step).");
+        missionProcessor.nudgeView();
+        return null;
     }
 
     private void handleCombatSansha(String clientId, ClientState cs) {
@@ -2582,7 +2619,8 @@ public class ClientManager {
                 break;
             }
             case 2: {
-                String tk = resolveCombatTarget("target_sansha");
+                String tk = awaitCombatTarget(clientId, cs, "target_sansha");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 cs.setCombatTargetKey(tk);
                 log(clientId, "COMBAT[Sansha] Step 2: double-click " + tk + " (select) + Ctrl+click (lock) + press 'adxc' (activate modules).");
                 missionProcessor.doubleClickTemplate(tk);
@@ -3092,6 +3130,14 @@ public class ClientManager {
             }
             case 6: {
                 // Lock first. Dedicating this client until Anire dies — no switching from here.
+                // Don't ctrl-click blind: if 'anire' isn't on screen (off-camera / stale frame),
+                // nudge the view and hold the step until she appears (no alt_target — a generic
+                // overview row would lock the wrong thing in the boss pocket).
+                if (missionProcessor.findTemplate("anire") == null) {
+                    log(clientId, "COMBAT[Scarlet] Step 6: 'anire' not on screen — nudging view to reveal her (holding step).");
+                    missionProcessor.nudgeView();
+                    return;
+                }
                 log(clientId, "COMBAT[Scarlet] Step 6: ctrl-click 'anire' (lock target). No client switching from here.");
                 missionProcessor.ctrlClickTemplate("anire");
                 cs.setCombatWaitStart(LocalDateTime.now()); // anchors the lock-confirm retry timer
@@ -3189,11 +3235,11 @@ public class ClientManager {
      *
      * Steps:
      *   0 → double-click target_angel (select) + Ctrl+click (lock)
-     *   1 → Shift+axc (overload modules)
-     *   2 → press 'x', click target_angel
-     *   3 → WAIT 2s → press 'asdc'
+     *   1 → Shift+ax (overload modules) + press 'c' (rep, un-overloaded)
+     *   2 → press 'x'
+     *   3 → WAIT 2s → press 'asd' → click target_angel
      *   4 → Right-click target_angel + click range (keep at range)
-     *   5 → Proceed (keep_at_range template check removed)
+     *   5 → WAIT 10s → Shift+c (overload rep) + switch to other client
      *   6 → WAIT for set_destination; 60s hardcap (pod check) → step 7
      *   7 → press 'xc' (deactivate modules) → RETURNING (clicks set_destination coords)
      */
@@ -3202,40 +3248,44 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                String tk = resolveCombatTarget("target_angel");
+                String tk = awaitCombatTarget(clientId, cs, "target_angel");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 cs.setCombatTargetKey(tk);
                 log(clientId, "COMBAT[Angel] Step 0: double-click " + tk + " (select) + Ctrl+click (lock).");
                 missionProcessor.doubleClickTemplate(tk);
                 missionProcessor.ctrlClickTemplate(tk);
-                cs.setCombatStartTime(LocalDateTime.now()); // fight start, for the 40s stop-rep-overload check
-                cs.setAngelRepOverloadStopped(false);
+                cs.setCombatStartTime(LocalDateTime.now()); // fight start
                 cs.setCombatStep(1);
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Angel] Step 1: Shift+axc (overload modules).");
-                missionProcessor.shiftKeyPress("axc");
+                // Overload only a and x here; activate the rep 'c' un-overloaded (plain press)
+                // so it isn't overloaded alongside the other modules. It gets overloaded
+                // (Shift+c) in step 5, after the 10s wait and before switching clients.
+                log(clientId, "COMBAT[Angel] Step 1: Shift+ax (overload modules) + press 'c' (rep, no overload).");
+                missionProcessor.shiftKeyPress("ax");
+                missionProcessor.keyPress("c");
                 cs.setCombatStep(2);
                 break;
             }
             case 2: {
-                String clickKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_angel";
-                log(clientId, "COMBAT[Angel] Step 2: press 'x', click " + clickKey + ".");
+                log(clientId, "COMBAT[Angel] Step 2: press 'x'.");
                 missionProcessor.keyPress("x");
-                missionProcessor.clickTemplate(clickKey);
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
             case 3: {
-                // WAIT 2s, then press 'asdc'
+                // WAIT 2s, then press 'asd' and click the target
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 2) {
-                    log(clientId, "COMBAT[Angel] wait before 'asdc': " + elapsed + "s / 2s.");
+                    log(clientId, "COMBAT[Angel] wait before 'asd': " + elapsed + "s / 2s.");
                     return;
                 }
-                log(clientId, "COMBAT[Angel] Step 3: press 'asdc'.");
-                missionProcessor.keyPress("asdc");
+                String clickKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_angel";
+                log(clientId, "COMBAT[Angel] Step 3: press 'asd', click " + clickKey + ".");
+                missionProcessor.keyPress("asd");
+                missionProcessor.clickTemplate(clickKey);
                 cs.setCombatStep(4);
                 break;
             }
@@ -3244,19 +3294,27 @@ public class ClientManager {
                 log(clientId, "COMBAT[Angel] Step 4: right-click " + rangeKey + " → click range.");
                 missionProcessor.rightClickTemplate(rangeKey);
                 missionProcessor.clickTemplate("range");
+                cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
             }
             case 5: {
-                // Range settle (keep_at_range template check removed). Modules are running and
-                // keep-at-range is set, so the fight runs unattended — switch to the other client
-                // once here, as we start waiting for mission end. Focus returns via the
-                // force-switch watchdog / other client yielding, and step 6 then polls completion.
+                // WAIT 10s after keep-at-range is set, then overload the rep (Shift+c) and
+                // switch to the other client. Modules are running and keep-at-range is set, so
+                // the fight runs unattended; focus returns via the force-switch watchdog / other
+                // client yielding, and step 6 then polls completion.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Angel] wait before Shift+c: " + elapsed + "s / 10s.");
+                    return;
+                }
+                log(clientId, "COMBAT[Angel] Step 5: Shift+c (overload rep) + switch to other client.");
+                missionProcessor.shiftKeyPress("c");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(6);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Angel] range set — waiting for mission end, switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Angel] switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
@@ -3268,14 +3326,6 @@ public class ClientManager {
                     log(clientId, "COMBAT[Angel] " + completed + " detected — deactivating modules.");
                     cs.setCombatStep(7);
                     break;
-                }
-
-                // Fight running long: stop overloading the rep once past 40s (Shift+c).
-                if (!cs.isAngelRepOverloadStopped()
-                        && Duration.between(cs.getCombatStartTime(), LocalDateTime.now()).getSeconds() >= 40) {
-                    log(clientId, "COMBAT[Angel] fight > 40s — Shift+c (stop overloading rep).");
-                    missionProcessor.shiftKeyPress("c");
-                    cs.setAngelRepOverloadStopped(true);
                 }
 
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
@@ -3363,7 +3413,8 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                String tk = resolveCombatTarget("target_worm");
+                String tk = awaitCombatTarget(clientId, cs, "target_worm");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 cs.setCombatTargetKey(tk);
                 log(clientId, "COMBAT[Worm] Step 1: double-click " + tk + " (approach + lock).");
                 missionProcessor.doubleClickTemplate(tk);
@@ -3632,9 +3683,10 @@ public class ClientManager {
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
-    /** Take-all standings threshold is normally 0.0, but is raised to 1.0 (this client grabs
-     *  the standings for itself more eagerly) when either: the fleet partner grabbed a mission
-     *  in the last 2 minutes, or the partner's standing is more than 1.5 above ours. */
+    /** Take-all standings threshold is normally 0.0. It is raised to 1.0 (this client grabs the
+     *  standings for itself more eagerly) when the fleet partner grabbed a mission in the last 2
+     *  minutes, and forced take-all (regardless of our own standing) when the partner's standing
+     *  is more than 1.5 above ours, so the lagging client catches up. */
     private static final double TAKE_ALL_THRESHOLD_HIGH = 1.0;
     private static final long   PARTNER_GRAB_WINDOW_MIN  = 2;
     private static final double PARTNER_STANDING_GAP     = 1.5;
@@ -3660,7 +3712,8 @@ public class ClientManager {
             }
             missionProcessor.clickFleetNo();
         } else if (standings < threshold) {
-            log(clientId, String.format("COMPLETING: standings low (< %.1f) — fleet NO.", threshold));
+            String bar = Double.isInfinite(threshold) ? "take-all forced" : String.format("< %.1f", threshold);
+            log(clientId, "COMPLETING: standings below bar (" + bar + ") — fleet NO.");
             missionProcessor.clickFleetNo();
         } else {
             log(clientId, "COMPLETING: standings healthy — fleet YES.");
@@ -3678,17 +3731,19 @@ public class ClientManager {
         ClientState partner = stateManager.getOtherState(clientId);
         if (partner == null) return 0.0;
 
-        LocalDateTime grab = partner.getLastMissionGrab();
-        if (grab.isAfter(LocalDateTime.now().minusMinutes(PARTNER_GRAB_WINDOW_MIN))) {
-            log(clientId, "COMPLETING: partner grabbed a mission recently — take-all threshold raised to "
-                    + TAKE_ALL_THRESHOLD_HIGH + ".");
-            return TAKE_ALL_THRESHOLD_HIGH;
-        }
-
+        // Partner well ahead of us in standing: take all unconditionally to catch up,
+        // even when our own standing already looks healthy (checked before the grab window).
         double partnerStanding = partner.getLastKnownStanding();
         if (!Double.isNaN(standings) && !Double.isNaN(partnerStanding)
                 && partnerStanding - standings > PARTNER_STANDING_GAP) {
-            log(clientId, "COMPLETING: partner standing well ahead of ours — take-all threshold raised to "
+            log(clientId, "COMPLETING: partner standing >" + PARTNER_STANDING_GAP
+                    + " above ours — taking all.");
+            return Double.POSITIVE_INFINITY;
+        }
+
+        LocalDateTime grab = partner.getLastMissionGrab();
+        if (grab.isAfter(LocalDateTime.now().minusMinutes(PARTNER_GRAB_WINDOW_MIN))) {
+            log(clientId, "COMPLETING: partner grabbed a mission recently — take-all threshold raised to "
                     + TAKE_ALL_THRESHOLD_HIGH + ".");
             return TAKE_ALL_THRESHOLD_HIGH;
         }
@@ -4095,6 +4150,30 @@ public class ClientManager {
             return;
         }
 
+        // Insta-dock (enemy in local) pre-verified path: instaDock() already slept ~7s and
+        // verified warp_active before firing Ctrl+S autopilot, so the dock warp is confirmed on
+        // entry. Skip the WARPING grace + re-verification and hand focus off on the first tick;
+        // the warp_active landing poll (→ COMPLETING) still runs when focus returns.
+        if (cs.isWarpPreVerified()) {
+            if (firstCheck) {
+                cs.setWarpPreVerified(false);
+                cs.setLastWarpCheck(LocalDateTime.now());
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    if (holdWarpFocus(other)) {
+                        log(clientId, "WARPING: insta-dock warp pre-verified — other client also warping, holding focus.");
+                        return;
+                    }
+                    log(clientId, "WARPING: insta-dock warp pre-verified — switching focus to: " + other.getClientId());
+                    bringToForeground(other);
+                } else {
+                    log(clientId, "WARPING: insta-dock warp pre-verified — no other clients to switch to.");
+                }
+                return;
+            }
+            // Fall through to the warp_active landing poll below on later ticks.
+        }
+
         // Post-miss simplified path: once the IDLE[TO_MISSION] safety net has fired
         // (jumpCount >= 6 + set_destination visible), subsequent warps trust the click
         // and skip bubble/warp_active verification. 1s grace, then hand focus off.
@@ -4171,18 +4250,23 @@ public class ClientManager {
                     case 1: {
                         int attempts = cs.getBubbleEscapeAttempts() + 1;
                         if (attempts > 2) {
-                            // Don't spin on the escape — after 2 tries, pod-check then proceed normally.
-                            log(clientId, "WARPING[BUBBLE]: escape failed after 2 attempts — pod check, then resuming normal warp handling.");
+                            // Don't spin on the escape — after 2 tries, pod-check then resume travel.
+                            log(clientId, "WARPING[BUBBLE]: escape failed after 2 attempts — pod check, then resuming travel.");
                             cs.setBubbleEscapeStep(0);
                             if (missionProcessor.isFlyingPod()) {
                                 log(clientId, "WARPING[BUBBLE]: no_ship — podded, self-destructing.");
                                 handlePodDeath(clientId, true);
                                 return;
                             }
-                            // Not podded — hand back to the standard warp-start verification.
+                            // Not podded, but we never warped — don't stay in WARPING assuming we did.
+                            // Hand back to IDLE so it re-drives the leg we were on (TO_MISSION /
+                            // RETURNING_HOME) per the current TravelPhase, re-finding the stargate /
+                            // dock and continuing the route instead of polling for a phantom warp.
                             cs.setWarpRetryCount(0);
-                            cs.setWarpStartTime(LocalDateTime.now());
-                            cs.setLastWarpCheck(LocalDateTime.MIN);
+                            cs.setJustExitedWarp(true);
+                            log(clientId, "WARPING[BUBBLE]: not podded — returning to IDLE to resume "
+                                    + cs.getTravelPhase() + " navigation.");
+                            stateManager.setState(clientId, ClientState.State.IDLE);
                             return;
                         }
                         cs.setBubbleEscapeAttempts(attempts);

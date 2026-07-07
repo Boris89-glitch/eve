@@ -1222,6 +1222,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
     MAX_QUOTE_ATTEMPTS = 8
     log.info("Step 2+3: Right-clicking ship icon → 'Get Repair Quote' (retrying)...")
     quote_clicked = False
+    hangar_recovered = False
     for attempt in range(1, MAX_QUOTE_ATTEMPTS + 1):
         matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
         if matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6):
@@ -1233,6 +1234,23 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
             attempt,
             MAX_QUOTE_ATTEMPTS,
         )
+        # Dismiss the stale context menu (left-click empty space, never Escape) so the
+        # next right-click lands on the ship icon and not on the menu already covering it.
+        matcher._do_click(960, 540, button="left", delay=0.3)
+        # No repair menu means the right-click isn't hitting a real ship — most likely the
+        # Ship Hangar is closed and step 0's match was a false positive (there is no ship at
+        # those coords). Open the hangar (once) and re-locate the ship before retrying.
+        if not hangar_recovered:
+            hangar_recovered = True
+            log.warning("No repair menu — opening Ship Hangar and re-locating ship (was it even open?).")
+            if not matcher.wait_and_click("ship_hangar", timeout=1.0, delay=1.0):
+                matcher._do_click(*HANGAR_FALLBACK_XY, delay=1.0)
+            new_match = matcher.wait_for(ship_template, timeout=2.0)
+            if new_match:
+                ship_cx, ship_cy = matcher.center(new_match)
+                log.info("Ship re-located at (%d,%d) after opening hangar.", ship_cx, ship_cy)
+            else:
+                log.warning("Ship still not found after opening hangar — continuing retries at last coords.")
     if not quote_clicked:
         log.error("'Get Repair Quote' not found after %d attempts", MAX_QUOTE_ATTEMPTS)
         return {"failed": True}
@@ -1265,6 +1283,8 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
             attempt,
             MAX_REPAIR_ATTEMPTS,
         )
+        # Clear any stale context menu first so the right-click hits the ship icon.
+        matcher._do_click(960, 540, button="left", delay=0.3)
         matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
         matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6)
 
