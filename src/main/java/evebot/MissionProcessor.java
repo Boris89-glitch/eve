@@ -976,25 +976,42 @@ public class MissionProcessor {
         return ocrBridge.isFlyingPod();
     }
 
+    /** Max times to re-fire the self-destruct sequence while waiting for the timer to start. */
+    private static final int MAX_DESTRUCT_ATTEMPTS = 5;
+
     /**
-     * Self-destructs the capsule: right-click capsule → click destruct → click yes.
-     * Returns false (without clicking anything) if no capsule is actually on screen,
-     * so a false pod detection can't blindly fire the destruct sequence.
+     * Self-destructs the capsule: right-click capsule → click destruct → click yes, then
+     * verify the "Your Capsule will self-destruct" message ('destruct_confirm') appears — that
+     * is the only signal the timer actually started (and we'll be teleported to the station).
+     * A missed right-click or a swallowed dialog can drop the sequence, so repeat it until the
+     * confirmation shows (up to {@link #MAX_DESTRUCT_ATTEMPTS}).
+     *
+     * Returns false (without clicking anything) if no capsule is actually on screen, so a false
+     * pod detection can't blindly fire the destruct sequence.
      */
     public boolean clickDestruct() {
         if (ocrBridge.findAnyTemplate("capsule") == null) {
             log("Self-destruct aborted — no capsule on screen (not actually podded).");
             return false;
         }
-        log("Self-destruct: right-click capsule → destruct → yes_destruct");
-        rightClickAndSelect("capsule", "destruct");
-        sleep(POST_CLICK_DELAY_MS);
-        // The self-destruct confirmation dialog takes a moment to render — wait for
-        // the 'yes_destruct' button instead of an immediate (and usually-too-early) click.
-        if (!ocrBridge.waitAndClickTemplate("yes_destruct", 3)) {
-            log("Self-destruct: 'yes_destruct' confirm button not found within 3s.");
+        for (int attempt = 1; attempt <= MAX_DESTRUCT_ATTEMPTS; attempt++) {
+            log("Self-destruct attempt " + attempt + "/" + MAX_DESTRUCT_ATTEMPTS
+                    + ": right-click capsule → destruct → yes_destruct");
+            rightClickAndSelect("capsule", "destruct");
+            sleep(POST_CLICK_DELAY_MS);
+            // The confirmation dialog takes a moment to render — wait for the 'yes_destruct'
+            // button instead of an immediate (and usually-too-early) click.
+            if (!ocrBridge.waitAndClickTemplate("yes_destruct", 3)) {
+                log("Self-destruct: 'yes_destruct' confirm button not found within 3s.");
+            }
+            // Confirm the timer started: the "Your Capsule will self-destruct" message must show.
+            if (ocrBridge.waitForTemplate("destruct_confirm", 3)) {
+                log("Self-destruct confirmed — 'Your Capsule will self-destruct' visible, timer running.");
+                return true;
+            }
+            log("Self-destruct not confirmed (destruct_confirm not visible) — re-firing the sequence.");
         }
-        sleep(POST_CLICK_DELAY_MS);
+        log("Self-destruct: never confirmed after " + MAX_DESTRUCT_ATTEMPTS + " attempts — proceeding anyway.");
         return true;
     }
 
@@ -1204,10 +1221,10 @@ public class MissionProcessor {
         if (lower.contains("sansha") || lower.contains("sansa"))   return "sansha";
         // ship_angel
         if (lower.contains("angel") || lower.contains("dramiel"))  return "angel";
-        // ship_sk
+        // ship_infested
         if (lower.contains("infested") || lower.contains("ruins")) return "infested";
         if (lower.contains("recon"))                         return "recon1";
-        // Dread Pirate Scarlet (boss "Anire") — also flies ship_sk.
+        // Dread Pirate Scarlet (boss "Anire") — also flies ship_infested.
         if (lower.contains("scarlet") || lower.contains("anire"))  return "scarlet";
         return null;
     }

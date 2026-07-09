@@ -19,8 +19,16 @@ public final class SessionStats {
 
     private static final AtomicInteger missions   = new AtomicInteger(0);
     private static final AtomicLong    totalValue = new AtomicLong(0);
+    /** Wall-clock start of the session, for the end-of-session runtime. Defaults to class-load
+     *  time; call {@link #markStart()} at startup to anchor it to the actual bot launch. */
+    private static final AtomicLong    startMillis = new AtomicLong(System.currentTimeMillis());
 
     private SessionStats() {}
+
+    /** Anchor the session clock to now — call once at startup. */
+    public static void markStart() {
+        startMillis.set(System.currentTimeMillis());
+    }
 
     /**
      * Approximate total ISK value for a completed mission, classified by ship
@@ -46,14 +54,20 @@ public final class SessionStats {
         return totalValue.get();
     }
 
+    /** Human-readable session runtime, e.g. "3h 07m". */
+    private static String ranFor() {
+        long totalMin = Math.max(0, System.currentTimeMillis() - startMillis.get()) / 60_000;
+        return String.format("%dh %02dm", totalMin / 60, totalMin % 60);
+    }
+
     /** Append the session totals to the event log — call on shutdown. */
     public static void logSummary() {
         int n = missions.get();
         if (n == 0) {
-            EventLog.log("SESSION_SUMMARY", "no missions completed this session");
+            EventLog.log("SESSION_SUMMARY", "no missions completed this session — ran " + ranFor());
             return;
         }
         EventLog.log("SESSION_SUMMARY", String.format(
-                "%d missions — ~%,d ISK total value", n, totalValue.get()));
+                "%d missions — ~%,d ISK total value — ran %s", n, totalValue.get(), ranFor()));
     }
 }

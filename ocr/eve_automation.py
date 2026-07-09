@@ -120,6 +120,7 @@ TEMPLATE_FILES = {
     "capsule": "capsule",
     "destruct": "destruct",
     "yes_destruct": "yes_destruct",  # self-destruct confirmation "Yes" button
+    "destruct_confirm": "destruct_confirm",  # "Your Capsule will self-destruct" — confirms the timer started
     "eject": "eject",  # "Eject" right-click menu item — only offered in a ship, absent in a pod
     "no_ship": "no_ship",  # tiny module sliver — visible in a ship, missing in a pod (cheap pod pre-check)
     "no_ship2": "no_ship2",  # second module sliver variant — checked alongside no_ship
@@ -157,8 +158,8 @@ TEMPLATE_FILES = {
     "mission_worm": "mission_worm",  # → ship_worm
     "mission_sansha": "mission_sansha",  # → ship_sansha
     "mission_angel": "mission_angel",  # → ship_angel
-    "mission_infested": "mission_infested",  # → ship_sk  (Infested Ruins)
-    "mission_scarlet": "mission_scarlet",  # → ship_sk  (Dread Pirate Scarlet, boss Anire)
+    "mission_infested": "mission_infested",  # → ship_infested  (Infested Ruins)
+    "mission_scarlet": "mission_scarlet",  # → ship_infested  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
     "mission_evolution": "evolution",  # evolution.png → never run: leave for manual handling, lock faction agent
     # Ship templates — one per ship icon in your hangar
@@ -166,7 +167,7 @@ TEMPLATE_FILES = {
     "ship_worm": "ship_worm",
     "ship_sansha": "ship_sansha",
     "ship_angel": "ship_angel",
-    "ship_sk": "ship_sk",
+    "ship_infested": "ship_infested",
     # EVE-O Preview thumbnails — clicked to switch client focus
     "gravitar": "gravitar",
     "meeshayl_lancer": "meeshayl_lancer",
@@ -245,8 +246,8 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_worm",      "ship_worm",   None),
     ("mission_sansha",    "ship_sansha",  None),
     ("mission_angel",     "ship_angel",   None),
-    ("mission_infested",  "ship_sk",     ["infested", "hive", "ruins"]),
-    ("mission_scarlet",   "ship_sk",     None),
+    ("mission_infested",  "ship_infested", ["infested", "hive", "ruins"]),
+    ("mission_scarlet",   "ship_infested", None),
 ]
 
 # -----------------------------------------------------------------------------
@@ -263,6 +264,13 @@ def load_ship_mission_map() -> dict:
     return {"ship_missions": [], "default_ship_template": "ship_garmur"}
 
 
+def _norm_ocr(s: str) -> str:
+    """Lowercase and strip ALL whitespace. OCR routinely splits words — 'Team' comes
+    back as 'Te a m', 'Anomic Team' as 'anomic te a m' — so keyword substring checks
+    must ignore spacing or they miss. 'anomic team' and 'anomic te a m' both -> 'anomicteam'."""
+    return "".join((s or "").lower().split())
+
+
 def resolve_ship_via_dialog_templates(
     matcher: "TemplateMatcher", mission_title: str = ""
 ) -> tuple[Optional[str], Optional[str]]:
@@ -275,14 +283,14 @@ def resolve_ship_via_dialog_templates(
     one keyword (substring, case-insensitive) for the match to be accepted.
     """
     screen = matcher.screenshot_cv()
-    title_lower = mission_title.lower() if mission_title else ""
+    title_norm = _norm_ocr(mission_title)
     for dialog_key, ship_key, ocr_keywords in MISSION_TEMPLATE_TO_SHIP:
         if dialog_key not in matcher.templates:
             continue  # template image not provided yet — skip silently
         match = matcher.find(dialog_key, screen=screen)
         if match:
-            if ocr_keywords and title_lower:
-                if not any(kw in title_lower for kw in ocr_keywords):
+            if ocr_keywords and title_norm:
+                if not any(_norm_ocr(kw) in title_norm for kw in ocr_keywords):
                     log.warning(
                         "Dialog template '%s' matched visually but OCR text '%s' "
                         "contains none of %s — skipping",
@@ -303,10 +311,10 @@ def resolve_ship_template(mission_target: str, ship_map: dict):
     NOT fall back to a default ship — leaving station in a random ship for an
     unrecognised mission is wrong; the caller must quit the mission instead.
     """
-    target_lower = mission_target.lower() if mission_target else ""
+    target_norm = _norm_ocr(mission_target)
     for entry in ship_map.get("ship_missions", []):
         for pattern in entry.get("title_contains", []):
-            if pattern.lower() in target_lower:
+            if _norm_ocr(pattern) in target_norm:
                 log.info(
                     "Ship resolved via OCR fallback: '%s' → template '%s' (matched '%s')",
                     mission_target,

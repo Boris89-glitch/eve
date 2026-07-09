@@ -231,6 +231,15 @@ public class ClientState {
     /** True after the first re-click of decline in DECLINING — next failure triggers agent double-click. */
     private boolean declineRetried = false;
 
+    /** True only when CHECKING_MISSIONS was entered as a cold inspection of the agent dialog
+     *  (startup / IDLE opened the agent itself), where a NOT_COMPLETE reading may be a mission
+     *  accepted before the bot took control and should be recovered + flown. In the normal
+     *  request/decline cycle the dialog is a FRESH offer, so a flaky accept/decline miss can make
+     *  detectDialog read the offer's objectives text as NOT_COMPLETE — flying it would undock an
+     *  unwanted mission with a mismatched ship. Default false (the safe direction: evaluate, don't
+     *  fly). Set true only at the IDLE cold-check entries; cleared on leaving CHECKING_MISSIONS. */
+    private boolean allowNotCompleteRecovery = false;
+
     /** Running count of non-"anomic" missions declined (by OCR title) since the last standings
      *  re-read. Every 4th such decline schedules a standings check so mission gating stays current. */
     private int nonAnomicDeclineCount = 0;
@@ -328,6 +337,10 @@ public class ClientState {
         }
         if (state != State.CHECKING_MISSIONS && state != State.DECLINING) {
             this.missionCheckStartTime = LocalDateTime.MIN;
+        }
+        if (state != State.CHECKING_MISSIONS) {
+            // Cold-check recovery is only valid for the CHECKING pass it was set for.
+            this.allowNotCompleteRecovery = false;
         }
         if (state == State.TRAVEL || state == State.RETURNING) {
             this.destinationSet   = false;
@@ -498,6 +511,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isDeclineRetried()              { return declineRetried; }
     public void    setDeclineRetried(boolean v)    { this.declineRetried = v; }
+
+    public boolean isAllowNotCompleteRecovery()           { return allowNotCompleteRecovery; }
+    public void    setAllowNotCompleteRecovery(boolean v) { this.allowNotCompleteRecovery = v; }
 
     public int  getNonAnomicDeclineCount()         { return nonAnomicDeclineCount; }
     public void setNonAnomicDeclineCount(int v)    { this.nonAnomicDeclineCount = v; }

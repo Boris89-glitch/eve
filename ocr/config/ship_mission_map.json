@@ -27,14 +27,14 @@
       "comment": "Angel target solo burner"
     },
     {
-      "ship_template": "ship_sk",
-      "ship_display": "ship_sk (Daredevil hull)",
+      "ship_template": "ship_infested",
+      "ship_display": "ship_infested (Daredevil hull)",
       "title_contains": ["infested", "ruins", "recon (1 of", "recon 1 of"],
       "comment": "SK template for Infested Ruins and Recon part 1 , later maybe anni"
     },
     {
-      "ship_template": "ship_sk",
-      "ship_display": "ship_sk (Daredevil hull)",
+      "ship_template": "ship_infested",
+      "ship_display": "ship_infested (Daredevil hull)",
       "title_contains": ["scarlet", "anire"],
       "comment": "Dread Pirate Scarlet (boss Anire) — uses the same hull as Infested"
     }

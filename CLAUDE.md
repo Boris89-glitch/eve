@@ -2,7 +2,6 @@
 
 EVE Online mission automation. Java drives bot logic + window management; Python does OpenCV template matching and OCR. They talk over a long-lived stdin/stdout JSON daemon.
 
-# Personal preferences
 ## Output style
 - **Be concise.** Explain in a few lines max. Skip the trailing wind-downs — the "one flag worth noting…", "a couple things to keep in mind…", option-survey closers. State what was done or found, then stop.
 - Still call out the genuinely important: risky/irreversible actions, real bugs, and decisions that need my input. Trim filler, keep substance.

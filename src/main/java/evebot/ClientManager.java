@@ -32,6 +32,14 @@ public class ClientManager {
      *  no mission on record. Survives the bounce (unlike agentRetries, which CHECKING resets) so
      *  we can double-click the agent to reset the dialog after a few cycles. */
     private final Map<String, Integer>          notCompleteRetries = new ConcurrentHashMap<>();
+    /** Clients whose agent dialog has been evaluated at least once this run. A COMPLETED dialog
+     *  with no mission on record is only trusted as a real turn-in on the FIRST such check (a
+     *  genuine leftover from a previous session); after that it's a stale/false signal. In-memory
+     *  only — resets each process start, which is exactly "this session". */
+    private final java.util.Set<String>         agentDialogChecked = ConcurrentHashMap.newKeySet();
+    /** Counts agent-refresh attempts for a stale COMPLETED dialog with no mission on record (past
+     *  the first check). Bounds the double-click-agent refresh so it can't spin forever. */
+    private final Map<String, Integer>          staleCompletedRetries = new ConcurrentHashMap<>();
 
     /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
     private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
@@ -459,42 +467,47 @@ public class ClientManager {
             EventLog.log("POD_DEATH", clientId + " — respawned at station (mission: " + missionName + ", " + phase + ", jumps: " + jumpsLabel + ", " + deathWindow + ")");
         }
 
-        // Pause all clients (global cooldown) for any NON-COMBAT pod death near the station
-        // (jumps <= 3 — the count runs high because the undock warp and a phantom post-death
-        // jump inflate it, so a kill ~1 system out reads as ~3): re-undocking would warp
-        // straight back toward whatever killed us (bubble camp, gate gank), so wait it out.
-        // Combat deaths happen at the mission site and resume at once.
+        // The one thing that decides keep-vs-quit is WHERE we died. Only an in-combat death
+        // (killed at the mission site by the mission NPCs) keeps the mission and flies back in.
+        // Any death OUTSIDE combat — bubble camp, gate gank, AFK in space while travelling — must
+        // NOT return to whatever killed us: quit the mission, add the killer as a bad contact, and
+        // pick a different one. jumps only decides whether we wait out the camp first.
         boolean inCombat = stateManager.getStateEnum(clientId) == ClientState.State.IN_COMBAT;
-        if (!inCombat) {
-            // Podded while travelling/AFK (bubble camp, gate gank) rather than at a mission site —
-            // the surprising case worth an audible heads-up.
-            log(clientId, "*** ALERT: podded outside of combat — sounding alarm.");
-            soundAlert(POD_ALERT);
+        if (inCombat) {
+            // Died in the mission fight itself — keep the mission and go finish it. Resume at once.
+            // Clear the travel phase so the next IDLE tick doesn't re-read the station agent_icon
+            // as another pod death (TO_MISSION + agent_icon loops back into handlePodDeath forever).
+            cs.setTravelPhase(ClientState.TravelPhase.NONE);
+            if (cs.getCurrentMission() != null) {
+                // Re-board the correct ship (REPAIRING → UNDOCKING → TRAVEL re-flies to the site).
+                log(clientId, "POD_DEATH: in-combat death — keeping the mission, re-boarding and heading back.");
+                stateManager.setState(clientId, ClientState.State.REPAIRING);
+            } else {
+                log(clientId, "POD_DEATH: in-combat death, no active mission — resuming idle.");
+                stateManager.setState(clientId, ClientState.State.IDLE);
+            }
+            return true;
         }
-        if (jumps <= 3 && !inCombat) {
+
+        // Podded OUTSIDE combat — the surprising case worth an audible heads-up.
+        log(clientId, "*** ALERT: podded outside of combat — sounding alarm.");
+        soundAlert(POD_ALERT);
+        // Flag this client to add the killer (from the still-open kill report) as a bad contact,
+        // then route through POD_COOLDOWN: its expiry quits the mission we died on and picks a new
+        // one (so we go somewhere else, never back into the camp). Near the station (jumps <= 3 —
+        // the count runs high because the undock warp and a phantom post-death jump inflate it, so
+        // a kill ~1 system out reads as ~3) we wait out the full cooldown before doing so; deeper
+        // out we set a zero cooldown so the very next tick expires and quits/re-picks immediately.
+        cs.setPendingKillReportAdd(true);
+        if (jumps <= 3) {
             LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
             stateManager.setPodCooldownEnd(cooldownEnd);
             log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
-            // Podded outside combat by a camp — flag this client to add the killer (from the kill
-            // report) as a bad contact once the cooldown ends and we're docked with focus.
-            cs.setPendingKillReportAdd(true);
-            stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         } else {
-            log(clientId, "POD_DEATH: " + (inCombat ? "in-combat death" : "jumps>3 (" + jumps + ")")
-                    + " — skipping cooldown, resuming immediately.");
-            // Clear the travel phase — we respawned at the station, so the next IDLE
-            // tick must not keep reading the station agent_icon as another pod death
-            // (TO_MISSION + agent_icon loops back into handlePodDeath forever).
-            cs.setTravelPhase(ClientState.TravelPhase.NONE);
-            if (cs.getCurrentMission() != null) {
-                // Died on this mission — keep it and go finish it. Re-board the correct ship
-                // (REPAIRING → UNDOCKING → TRAVEL re-flies to the mission location).
-                log(clientId, "POD_DEATH: keeping the mission we died on — re-boarding ship and heading back.");
-                stateManager.setState(clientId, ClientState.State.REPAIRING);
-            } else {
-                stateManager.setState(clientId, ClientState.State.IDLE);
-            }
+            stateManager.setPodCooldownEnd(LocalDateTime.now());
+            log(clientId, "POD_DEATH: non-combat death, jumps>3 (" + jumps + ") — no cooldown, but quitting the mission and adding bad standings.");
         }
+        stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         return true;
     }
 
@@ -959,6 +972,10 @@ public class ClientManager {
         // Standard mission dialog logic.
         MissionProcessor.DialogState dialogState = missionProcessor.detectDialog();
 
+        // First agent-dialog evaluation of this run? Only then is a COMPLETED dialog with no
+        // accepted mission trusted as a real leftover to turn in (see the COMPLETED case).
+        boolean firstDialogCheck = agentDialogChecked.add(clientId);
+
         switch (dialogState) {
             case NONE: {
                 int attempt = agentRetries.merge(clientId, 1, Integer::sum);
@@ -973,6 +990,9 @@ public class ClientManager {
                 missionProcessor.doubleClickAgentIcon();
                 stateManager.getState(clientId).setCurrentMission(null);
                 stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                // Cold inspection: we opened the agent ourselves — a NOT_COMPLETE here may be a
+                // pre-accepted in-progress mission to recover, not a fresh offer.
+                stateManager.getState(clientId).setAllowNotCompleteRecovery(true);
                 break;
             }
             case ALREADY_ACCEPTED: {
@@ -996,6 +1016,26 @@ public class ClientManager {
                     stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
                     break;
                 }
+                // Don't turn in a mission we never accepted this session. The only time a COMPLETED
+                // dialog with no mission on record is real is the FIRST agent check of the run — a
+                // leftover from a previous session. Any later one is stale art (we already turned in
+                // and cleared, or a misread), so refresh the conversation (double-click the agent)
+                // and re-check instead of running the turn-in flow. Bounded so it can't spin.
+                if (stateManager.getState(clientId).getCurrentMission() == null && !firstDialogCheck) {
+                    int attempt = staleCompletedRetries.merge(clientId, 1, Integer::sum);
+                    if (attempt > MAX_NOT_COMPLETE_RETRIES) {
+                        log(clientId, "COMPLETED with no accepted mission persisted " + MAX_NOT_COMPLETE_RETRIES
+                                + " refreshes — waiting instead of turning in.");
+                        staleCompletedRetries.put(clientId, 0);
+                        break;
+                    }
+                    log(clientId, "COMPLETED dialog but no accepted mission on record and not the first check — stale, double-clicking agent to refresh, re-checking (attempt "
+                            + attempt + "/" + MAX_NOT_COMPLETE_RETRIES + ").");
+                    missionProcessor.doubleClickAgentIcon();
+                    stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                    break;
+                }
+                staleCompletedRetries.put(clientId, 0);
                 log(clientId, "Mission completed (completed template visible) — turning in.");
                 stateManager.setState(clientId, ClientState.State.COMPLETING);
                 break;
@@ -1018,10 +1058,12 @@ public class ClientManager {
                         notCompleteRetries.put(clientId, 0);
                         missionProcessor.doubleClickAgentIcon();
                         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                        stateManager.getState(clientId).setAllowNotCompleteRecovery(true);
                         break;
                     }
                     log(clientId, "NOT_COMPLETE template visible but no accepted mission on record — treating as unaccepted, re-checking via CHECKING_MISSIONS (bounce " + attempt + "/" + MAX_NOT_COMPLETE_RETRIES + ").");
                     stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                    stateManager.getState(clientId).setAllowNotCompleteRecovery(true);
                     break;
                 }
                 notCompleteRetries.put(clientId, 0);
@@ -1173,15 +1215,54 @@ public class ClientManager {
             return;
         }
 
-        // A wanted template matched — but template matching also fires on the
-        // just-completed mission still shown in the agent window right after
-        // turn-in (e.g. mission_worm). Confirm a live OFFER dialog (accept/decline
-        // present) before acting; otherwise the on-screen dialog is stale, so
-        // request a fresh mission and retry next tick (45s cycle is the backstop).
-        if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
-            log(clientId, "Template '" + missionTemplate + "' matched but no live OFFER dialog — stale completed mission, requesting new mission.");
-            missionProcessor.clickRequestMission();
-            return;
+        // A wanted template matched — but the same dialog art also shows on a
+        // mission that's already accepted/in-progress or just turned in. Only a
+        // live OFFER (accept/decline present) is a fresh offer to evaluate; route
+        // every other dialog state to the handler for that state instead of
+        // treating it as stale and re-requesting (which loops forever when the
+        // mission is actually accepted and in progress).
+        MissionProcessor.DialogState tplDialog = missionProcessor.detectDialog();
+        switch (tplDialog) {
+            case NOT_COMPLETE: {
+                // A wanted template + NOT_COMPLETE normally means a mission accepted earlier and
+                // still in progress. But the same 'not_complete' art (the offer's "must be completed
+                // to finish the mission" objectives text) also shows on a FRESH offer, so a flaky
+                // accept/decline miss can make detectDialog read a brand-new offer as NOT_COMPLETE.
+                // Only honour it as an accepted mission on a cold/startup inspection of the agent
+                // dialog (allowNotCompleteRecovery). In the normal request/decline cycle it's a fresh
+                // offer — fall through and evaluate it (declining if unwanted) instead of blindly
+                // flying + undocking it with a mismatched ship.
+                if (!cs.isAllowNotCompleteRecovery()) {
+                    log(clientId, "Template '" + missionTemplate + "' matched with NOT_COMPLETE, but this is a fresh offer (not a startup recovery) — evaluating as an offer instead of flying it.");
+                    break; // exit switch → OCR + rule evaluation below
+                }
+                // Mission accepted and in progress but no currentMission on record
+                // (e.g. bot restarted mid-mission). OCR the title and fly it.
+                log(clientId, "Template '" + missionTemplate + "' matched with NOT_COMPLETE dialog — accepted mission in progress (startup recovery), reading via OCR and flying it.");
+                Mission accepted = missionProcessor.readMission(getMissionAreaForClient(clientId));
+                cs.setCurrentMission(accepted);
+                stateManager.setState(clientId, ClientState.State.ACCEPTED);
+                return;
+            }
+            case ALREADY_ACCEPTED: {
+                log(clientId, "Template '" + missionTemplate + "' matched with complete_mission visible — skipping to COMPLETING.");
+                stateManager.setState(clientId, ClientState.State.COMPLETING);
+                return;
+            }
+            case COMPLETED: {
+                log(clientId, "Template '" + missionTemplate + "' matched with COMPLETED dialog — turning in via COMPLETING.");
+                stateManager.setState(clientId, ClientState.State.COMPLETING);
+                return;
+            }
+            case NONE: {
+                // No dialog at all — the template art is stale (e.g. just-completed
+                // mission still shown after turn-in). Request a fresh mission.
+                log(clientId, "Template '" + missionTemplate + "' matched but no dialog on screen — stale, requesting new mission.");
+                missionProcessor.clickRequestMission();
+                return;
+            }
+            default: // OFFER — fall through to evaluate the fresh offer.
+                break;
         }
 
         // Scarlet: its dialog text OCRs unreliably (the title comes through as "Sc a rlet"),
@@ -1519,6 +1600,23 @@ public class ClientManager {
                 cs.setCombatWarpLanded(true);
                 cs.setLastPodCheck(LocalDateTime.now());
                 return;
+            }
+
+            // Before another blind re-click, run the periodic no_ship check. The landed-combat
+            // pod check further down is unreachable while we're stuck here (this whole warp-
+            // verification block returns every tick until warp lands), so a pod death at the gate
+            // would otherwise loop forever — exactly the "231 attempts, no pod check" wedge. The
+            // ship is sitting still at the gate, so the HUD is stable and isFlyingPod is accurate.
+            if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 2) {
+                log(clientId, "IN_COMBAT: gate not firing — running 2-minute no_ship check.");
+                if (missionProcessor.isFlyingPod()) {
+                    log(clientId, "IN_COMBAT: no_ship while stuck at gate — podded, self-destructing.");
+                    if (handlePodDeath(clientId, true)) {
+                        return; // real pod death — handled (self-destruct/respawn), overrides the loop
+                    }
+                    log(clientId, "IN_COMBAT: pod check false positive — resuming gate retries.");
+                }
+                cs.setLastPodCheck(LocalDateTime.now()); // re-arm the 2-min throttle
             }
 
             // Gate still present but never fired (grayed on session change / out of range). Right-click
@@ -2556,7 +2654,7 @@ public class ClientManager {
      *
      * Steps:
      *   0  → Shift+asdx (overload modules)
-     *   1  → Ctrl+click 'target_sansha' (lock) + double-click (select) + press 's'
+     *   1  → Ctrl+click 'target_sansha' (lock) + right-click → 'approach' + press 's'
      *   2  → press 'adxc' (activate modules)
      *   3  → WAIT 4s → right-click target_sansha → click range (keep at range)
      *   4  → Proceed (keep_at_range template check removed)
@@ -2622,8 +2720,8 @@ public class ClientManager {
                 String tk = awaitCombatTarget(clientId, cs, "target_sansha");
                 if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 cs.setCombatTargetKey(tk);
-                log(clientId, "COMBAT[Sansha] Step 2: double-click " + tk + " (select) + Ctrl+click (lock) + press 'adxc' (activate modules).");
-                missionProcessor.doubleClickTemplate(tk);
+                log(clientId, "COMBAT[Sansha] Step 2: right-click " + tk + " → 'approach' + Ctrl+click (lock) + press 'adxc' (activate modules).");
+                missionProcessor.rightClickAndSelect(tk, "approach");
                 missionProcessor.ctrlClickTemplate(tk);
                 missionProcessor.keyPress("adxc");
                 cs.setCombatWaitStart(LocalDateTime.now());
@@ -3388,7 +3486,7 @@ public class ClientManager {
      *
      * Steps:
      *   0 → Shift+asdx (overload modules + web)
-     *   1 → double-click target_worm (approach + lock)
+     *   1 → right-click target_worm → 'approach'
      *   2 → press 's' (activate web)
      *   3 → WAIT 13s → press 'x'
      *   4 → locked_worm present? skip lock : Ctrl+click target_worm (lock target)
@@ -3416,8 +3514,8 @@ public class ClientManager {
                 String tk = awaitCombatTarget(clientId, cs, "target_worm");
                 if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 cs.setCombatTargetKey(tk);
-                log(clientId, "COMBAT[Worm] Step 1: double-click " + tk + " (approach + lock).");
-                missionProcessor.doubleClickTemplate(tk);
+                log(clientId, "COMBAT[Worm] Step 1: right-click " + tk + " → 'approach'.");
+                missionProcessor.rightClickAndSelect(tk, "approach");
                 cs.setCombatStep(2);
                 break;
             }
@@ -3952,7 +4050,29 @@ public class ClientManager {
             return;
         }
 
-        // Window elapsed and agent_icon gone — we're out in space.
+        // Window elapsed and agent_icon gone — we're out in space. Before heading to the
+        // mission, confirm we actually undocked in a SHIP. If boarding silently failed (e.g.
+        // 'Board Ship' never landed because the mission's ship ran out), we'd be flying a
+        // capsule — which then wedges forever at the frigate-only mission gate. The pod check
+        // is reliable in space (no_ship module slivers + eject probe), so catch it here:
+        // redock, quit the mission we have no ship for, and pick another.
+        if (missionProcessor.isFlyingPod()) {
+            String mTitle = cs.getCurrentMission() != null ? cs.getCurrentMission().getTitle() : "unknown";
+            log(clientId, "*** ALERT: undocked in a POD — no ship for this mission. Redocking to quit + re-pick.");
+            EventLog.log("SHIP_NOT_FOUND", clientId + " — undocked in pod (mission: " + mTitle + ")");
+            soundAlert(NO_SHIP_ALERT);
+            if (missionProcessor.emergencyRedock()) {
+                log(clientId, "UNDOCKING: redocked — quitting the mission we have no ship for, picking another.");
+                missionProcessor.quitMission();
+                cs.setCurrentMission(null);
+                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+            } else {
+                // Couldn't get back into the hangar — don't fly the pod to the gate. Stop here.
+                parkClient(clientId, "undocked in pod, redock failed — no ship for mission");
+            }
+            return;
+        }
+
         log(clientId, "UNDOCKING: agent_icon gone after " + elapsed + "s — undocked, proceeding to TRAVEL.");
         stateManager.setState(clientId, ClientState.State.TRAVEL);
     }

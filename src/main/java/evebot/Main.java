@@ -38,6 +38,9 @@ public class Main {
         System.out.println("║   Ctrl+Shift+R : end session (park)      ║");
         System.out.println("╚══════════════════════════════════════════╝");
 
+        // Anchor the session clock so the end-of-session summary reports true runtime.
+        SessionStats.markStart();
+
         // 1. State manager (also registers hotkey)
         this.stateManager = new StateManager();
 

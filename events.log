@@ -132,3 +132,149 @@
 [2026-07-07 12:52:24] [MISSION_COMPLETE] eve_Gravitar —  — ~58,000,000 ISK value [session: 25, ~1,404,000,000 ISK value]
 [2026-07-07 12:52:24] [SESSION_END] eve_Gravitar — mission turned in
 [2026-07-07 12:53:33] [SESSION_END] eve_Lit_HiB_Hilanen — docked at agent, not requesting new missions
+[2026-07-07 15:36:05] [SESSION_SUMMARY] 25 missions — ~1,404,000,000 ISK total value
+[2026-07-07 16:06:33] [FACTION_DECLINE] eve_Meeshayl_Lancer — declined faction mission: Shipy a rd Theft
+[2026-07-07 16:15:39] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-07 16:17:08] [MISSION_COMPLETE] eve_Gravitar —  — ~58,000,000 ISK value [session: 2, ~116,000,000 ISK value]
+[2026-07-07 16:21:19] [POD_DEATH] eve_Gravitar — respawned at station (mission: Anomic Agent, to mission, jumps: >3, died within last 502s)
+[2026-07-07 16:22:09] [SESSION_SUMMARY] 2 missions — ~116,000,000 ISK total value
+[2026-07-07 17:41:28] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-07 17:49:21] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 2, ~116,000,000 ISK value]
+[2026-07-07 17:57:12] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 3, ~174,000,000 ISK value]
+[2026-07-07 17:57:12] [SESSION_END] eve_Meeshayl_Lancer — mission turned in
+[2026-07-07 17:57:32] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 4, ~232,000,000 ISK value]
+[2026-07-07 17:57:32] [SESSION_END] eve_Gravitar — mission turned in
+[2026-07-07 19:53:06] [SESSION_SUMMARY] 4 missions — ~232,000,000 ISK total value
+[2026-07-08 07:26:46] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-08 07:28:41] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 2, ~116,000,000 ISK value]
+[2026-07-08 07:37:28] [MISSION_COMPLETE] eve_Meeshayl_Lancer — The Infested Ru in s — ~35,000,000 ISK value [session: 3, ~151,000,000 ISK value]
+[2026-07-08 07:37:44] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 4, ~209,000,000 ISK value]
+[2026-07-08 07:43:41] [STANDINGS_LOW] eve_Meeshayl_Lancer — low standings warning
+[2026-07-08 07:43:43] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Recon1of3 — ~12,000,000 ISK value [session: 5, ~221,000,000 ISK value]
+[2026-07-08 07:46:56] [MISSION_COMPLETE] eve_Gravitar — The Infested Ru in s — ~35,000,000 ISK value [session: 6, ~256,000,000 ISK value]
+[2026-07-08 07:50:29] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-08 07:50:34] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 7, ~314,000,000 ISK value]
+[2026-07-08 07:58:03] [POD_DEATH] eve_Gravitar — ship destroyed in space, self-destructing (mission: Anomic Agent, to mission, jumps: >3, died within last 123s)
+[2026-07-08 07:58:20] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 8, ~372,000,000 ISK value]
+[2026-07-08 07:58:53] [SHIP_NOT_FOUND] eve_Meeshayl_Lancer — mission: The Infested Ru in s
+[2026-07-08 08:00:18] [SHIP_NOT_FOUND] eve_Gravitar — mission: Anomic Agent
+[2026-07-08 08:13:32] [STANDINGS_LOW] eve_Meeshayl_Lancer — low standings warning
+[2026-07-08 08:13:34] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 9, ~430,000,000 ISK value]
+[2026-07-08 08:35:27] [STANDINGS_LOW] eve_Meeshayl_Lancer — low standings warning
+[2026-07-08 08:35:29] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 10, ~488,000,000 ISK value]
+[2026-07-08 08:52:32] [MISSION_COMPLETE] eve_Meeshayl_Lancer — The Infested Ru in s — ~35,000,000 ISK value [session: 11, ~523,000,000 ISK value]
+[2026-07-08 09:21:01] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 12, ~581,000,000 ISK value]
+[2026-07-08 09:46:55] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 13, ~639,000,000 ISK value]
+[2026-07-08 10:10:32] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 14, ~697,000,000 ISK value]
+[2026-07-08 10:15:33] [FACTION_DECLINE] eve_Meeshayl_Lancer — declined faction mission: Soothe the  Salv a ge Be a st
+[2026-07-08 10:48:39] [STANDINGS_LOW] eve_Meeshayl_Lancer — low standings warning
+[2026-07-08 10:48:41] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 15, ~755,000,000 ISK value]
+[2026-07-08 11:17:15] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 16, ~813,000,000 ISK value]
+[2026-07-08 11:36:33] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 17, ~871,000,000 ISK value]
+[2026-07-08 12:08:27] [SESSION_SUMMARY] 17 missions — ~871,000,000 ISK total value
+[2026-07-08 13:21:57] [SESSION_SUMMARY] no missions completed this session
+[2026-07-08 13:27:33] [SESSION_SUMMARY] no missions completed this session
+[2026-07-08 13:38:32] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-08 13:38:32] [SESSION_END] eve_Gravitar — mission turned in
+[2026-07-08 13:42:59] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 2, ~116,000,000 ISK value]
+[2026-07-08 13:42:59] [SESSION_END] eve_Meeshayl_Lancer — mission turned in
+[2026-07-08 13:51:10] [SESSION_SUMMARY] 2 missions — ~116,000,000 ISK total value
+[2026-07-08 13:52:18] [FACTION_KERNITE] eve_Gravitar — kernite (Resources for War) offered, heading to SOE to accept + complete
+[2026-07-08 13:53:32] [FACTION_COMPLETE] eve_Gravitar — kernite (Resources for War) turned in
+[2026-07-08 13:55:04] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-08 14:01:37] [MISSION_COMPLETE] eve_Meeshayl_Lancer — The Infested Ru in s — ~35,000,000 ISK value [session: 2, ~93,000,000 ISK value]
+[2026-07-08 14:04:59] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 3, ~151,000,000 ISK value]
+[2026-07-08 14:09:43] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 4, ~209,000,000 ISK value]
+[2026-07-08 14:17:35] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 5, ~267,000,000 ISK value]
+[2026-07-08 14:20:10] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 6, ~325,000,000 ISK value]
+[2026-07-08 14:28:32] [MISSION_COMPLETE] eve_Gravitar — The Infested Ru in s — ~35,000,000 ISK value [session: 7, ~360,000,000 ISK value]
+[2026-07-08 14:40:31] [SESSION_SUMMARY] 7 missions — ~360,000,000 ISK total value
+[2026-07-08 14:45:37] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-08 14:55:16] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 2, ~116,000,000 ISK value]
+[2026-07-08 14:57:19] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 3, ~174,000,000 ISK value]
+[2026-07-08 15:04:35] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 4, ~232,000,000 ISK value]
+[2026-07-08 15:08:09] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 5, ~290,000,000 ISK value]
+[2026-07-08 15:15:31] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 6, ~348,000,000 ISK value]
+[2026-07-08 15:19:20] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 7, ~406,000,000 ISK value]
+[2026-07-08 15:21:39] [SHIP_NOT_FOUND] eve_Gravitar — mission: Anomic Te a m
+[2026-07-08 15:25:59] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 8, ~464,000,000 ISK value]
+[2026-07-08 15:34:59] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 9, ~522,000,000 ISK value]
+[2026-07-08 15:36:07] [STANDINGS_LOW] eve_Meeshayl_Lancer — low standings warning
+[2026-07-08 15:36:09] [MISSION_COMPLETE] eve_Meeshayl_Lancer — scarlet — ~35,000,000 ISK value [session: 10, ~557,000,000 ISK value]
+[2026-07-08 15:44:45] [STANDINGS_LOW] eve_Meeshayl_Lancer — low standings warning
+[2026-07-08 15:44:46] [MISSION_COMPLETE] eve_Meeshayl_Lancer — scarlet — ~35,000,000 ISK value [session: 11, ~592,000,000 ISK value]
+[2026-07-08 15:50:20] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-08 15:50:22] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 12, ~650,000,000 ISK value]
+[2026-07-08 15:57:08] [STANDINGS_LOW] eve_Meeshayl_Lancer — low standings warning
+[2026-07-08 15:57:09] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 13, ~708,000,000 ISK value]
+[2026-07-08 15:57:21] [SESSION_END] eve_Meeshayl_Lancer — docked at agent, not requesting new missions
+[2026-07-08 15:58:30] [PARKED] eve_Gravitar — emergency redock not confirmed — not in station
+[2026-07-08 15:59:43] [SESSION_SUMMARY] 13 missions — ~708,000,000 ISK total value
+[2026-07-09 08:35:55] [SESSION_SUMMARY] no missions completed this session
+[2026-07-09 08:40:50] [SESSION_SUMMARY] no missions completed this session
+[2026-07-09 08:41:15] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-09 08:51:32] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 08:51:33] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 2, ~116,000,000 ISK value]
+[2026-07-09 08:56:20] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 3, ~174,000,000 ISK value]
+[2026-07-09 08:57:00] [MISSION_COMPLETE] eve_Meeshayl_Lancer — mission — ~58,000,000 ISK value [session: 4, ~232,000,000 ISK value]
+[2026-07-09 09:01:40] [MISSION_COMPLETE] eve_Gravitar — The Infested Ru in s — ~35,000,000 ISK value [session: 5, ~267,000,000 ISK value]
+[2026-07-09 09:05:14] [MISSION_COMPLETE] eve_Gravitar — Recon1of3 — ~12,000,000 ISK value [session: 6, ~279,000,000 ISK value]
+[2026-07-09 09:07:31] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 7, ~337,000,000 ISK value]
+[2026-07-09 09:18:38] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 8, ~395,000,000 ISK value]
+[2026-07-09 09:19:04] [MISSION_COMPLETE] eve_Meeshayl_Lancer — mission — ~58,000,000 ISK value [session: 9, ~453,000,000 ISK value]
+[2026-07-09 09:19:18] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 10, ~511,000,000 ISK value]
+[2026-07-09 09:27:33] [MISSION_COMPLETE] eve_Meeshayl_Lancer — The Infested Ru in s — ~35,000,000 ISK value [session: 11, ~546,000,000 ISK value]
+[2026-07-09 09:27:58] [MISSION_COMPLETE] eve_Meeshayl_Lancer — mission — ~58,000,000 ISK value [session: 12, ~604,000,000 ISK value]
+[2026-07-09 09:35:43] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 13, ~662,000,000 ISK value]
+[2026-07-09 09:39:17] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 14, ~720,000,000 ISK value]
+[2026-07-09 09:39:48] [MISSION_COMPLETE] eve_Meeshayl_Lancer — mission — ~58,000,000 ISK value [session: 15, ~778,000,000 ISK value]
+[2026-07-09 09:45:37] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 16, ~836,000,000 ISK value]
+[2026-07-09 09:46:43] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 17, ~894,000,000 ISK value]
+[2026-07-09 09:52:01] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 18, ~952,000,000 ISK value]
+[2026-07-09 09:53:07] [MISSION_COMPLETE] eve_Meeshayl_Lancer — mission — ~58,000,000 ISK value [session: 19, ~1,010,000,000 ISK value]
+[2026-07-09 09:53:23] [SHIP_NOT_FOUND] eve_Meeshayl_Lancer — mission: Anomic Te a m
+[2026-07-09 10:11:02] [SESSION_SUMMARY] 19 missions — ~1,010,000,000 ISK total value
+[2026-07-09 10:21:35] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 1, ~58,000,000 ISK value]
+[2026-07-09 10:21:51] [MISSION_COMPLETE] eve_Gravitar — The Infested Ru in s — ~35,000,000 ISK value [session: 2, ~93,000,000 ISK value]
+[2026-07-09 10:22:13] [MISSION_COMPLETE] eve_Meeshayl_Lancer — mission — ~58,000,000 ISK value [session: 3, ~151,000,000 ISK value]
+[2026-07-09 10:31:55] [MISSION_COMPLETE] eve_Meeshayl_Lancer — The Infested Ru in s — ~35,000,000 ISK value [session: 4, ~186,000,000 ISK value]
+[2026-07-09 10:38:10] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 5, ~244,000,000 ISK value]
+[2026-07-09 10:48:33] [MISSION_COMPLETE] eve_Gravitar — Anomic Agent — ~58,000,000 ISK value [session: 6, ~302,000,000 ISK value]
+[2026-07-09 10:49:14] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 7, ~360,000,000 ISK value]
+[2026-07-09 10:51:13] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Te a m — ~58,000,000 ISK value [session: 8, ~418,000,000 ISK value]
+[2026-07-09 10:56:35] [MISSION_COMPLETE] eve_Gravitar — The Infested Ru in s — ~35,000,000 ISK value [session: 9, ~453,000,000 ISK value]
+[2026-07-09 11:02:45] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 10, ~511,000,000 ISK value]
+[2026-07-09 11:11:58] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 11, ~569,000,000 ISK value]
+[2026-07-09 11:13:10] [MISSION_COMPLETE] eve_Gravitar — Anomic Te a m — ~58,000,000 ISK value [session: 12, ~627,000,000 ISK value]
+[2026-07-09 11:13:33] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 13, ~685,000,000 ISK value]
+[2026-07-09 11:16:53] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:16:56] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 14, ~743,000,000 ISK value]
+[2026-07-09 11:17:51] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:17:55] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 15, ~801,000,000 ISK value]
+[2026-07-09 11:18:14] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:18:17] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 16, ~859,000,000 ISK value]
+[2026-07-09 11:18:51] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:18:54] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 17, ~917,000,000 ISK value]
+[2026-07-09 11:19:15] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:19:18] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 18, ~975,000,000 ISK value]
+[2026-07-09 11:19:36] [MISSION_COMPLETE] eve_Meeshayl_Lancer — Anomic Agent — ~58,000,000 ISK value [session: 19, ~1,033,000,000 ISK value]
+[2026-07-09 11:19:54] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:19:57] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 20, ~1,091,000,000 ISK value]
+[2026-07-09 11:20:19] [MISSION_COMPLETE] eve_Meeshayl_Lancer — mission — ~58,000,000 ISK value [session: 21, ~1,149,000,000 ISK value]
+[2026-07-09 11:20:38] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:20:42] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 22, ~1,207,000,000 ISK value]
+[2026-07-09 11:22:03] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:22:06] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 23, ~1,265,000,000 ISK value]
+[2026-07-09 11:22:24] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:22:28] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 24, ~1,323,000,000 ISK value]
+[2026-07-09 11:23:00] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:23:03] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 25, ~1,381,000,000 ISK value]
+[2026-07-09 11:23:21] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:23:25] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 26, ~1,439,000,000 ISK value]
+[2026-07-09 11:24:38] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:24:42] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 27, ~1,497,000,000 ISK value]
+[2026-07-09 11:25:21] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:25:24] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 28, ~1,555,000,000 ISK value]
+[2026-07-09 11:25:43] [STANDINGS_LOW] eve_Gravitar — low standings warning
+[2026-07-09 11:25:47] [MISSION_COMPLETE] eve_Gravitar — mission — ~58,000,000 ISK value [session: 29, ~1,613,000,000 ISK value]
+[2026-07-09 11:33:25] [SESSION_SUMMARY] 29 missions — ~1,613,000,000 ISK total value
