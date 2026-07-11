@@ -764,6 +764,10 @@ public class MissionProcessor {
      * @return true if a safe spot was found and clicked, false otherwise
      */
     public boolean warpToSafeSpot() {
+        // kly/jcv safe-spot detection disabled for now — skip it, fall back to generic safe spot.
+        log("SAFE-SPOT: kly/jcv detection disabled — skipping.");
+        return false;
+        /*
         String spot;
         if (ocrBridge.findAnyTemplate("jcv_next") != null) {
             spot = "jcv_spot";
@@ -782,6 +786,7 @@ public class MissionProcessor {
         ocrBridge.clickTemplate(spot);        // click the safe spot bookmark
         sleep(POST_CLICK_DELAY_MS);
         return true;
+        */
     }
 
     /**
@@ -1023,15 +1028,17 @@ public class MissionProcessor {
     // Kill Report layout (1920×1200, window locked in a fixed spot). The "Final Blow" pilot name
     // link sits at a stable location; we right-click it to open the pilot context menu. Tune these
     // if your window is positioned differently.
-    private static final int KILLER_CLICK_X = 1128;  // right-click target on the name
-    private static final int KILLER_CLICK_Y = 318;
-    private static final int MENU_DISMISS_X = 1500;  // empty spot in the kill report to dismiss a menu (never Escape)
-    private static final int MENU_DISMISS_Y = 650;
-    /** Fallback: pixels below the contacts search field to the first result row (backup add). */
-    private static final int CONTACT_RESULT_OFFSET_Y = 150;
-    /** Final-blow name in "Copy Kill Information" text: "Name: <pilot> (laid the final blow)". */
-    private static final java.util.regex.Pattern FINAL_BLOW =
-            java.util.regex.Pattern.compile("Name:\\s*(.+?)\\s*\\(laid the final blow\\)");
+    private static final int KILLER_CLICK_X = 777;   // right-click target on the Final Blow name
+    private static final int KILLER_CLICK_Y = 559;
+    // Kill-report window close 'X' (~1390,262). The match is region-scoped to a tight box around it
+    // so it can't land on the agent-conversation dialog's X above or the inventory/cargo window's X
+    // below. Fixed coords are the fallback when the template isn't matched inside the box.
+    private static final int KILL_REPORT_CLOSE_X = 1390;
+    private static final int KILL_REPORT_CLOSE_Y = 262;
+    private static final int KILL_REPORT_CLOSE_BOX_X = 1350;
+    private static final int KILL_REPORT_CLOSE_BOX_Y = 244;
+    private static final int KILL_REPORT_CLOSE_BOX_W = 90;
+    private static final int KILL_REPORT_CLOSE_BOX_H = 40;
 
     /**
      * Open the latest Kill Report from the feed and add its Final Blow pilot (the one who podded
@@ -1039,12 +1046,10 @@ public class MissionProcessor {
      * automation — no API. Best-effort: any missing template makes its click a silent no-op.
      * MUST run while docked and in the foreground (the kill report closes on undock).
      *
-     * Primary: right-click the Final Blow name (fixed coords) → add_corporate_contact → standing_bad
-     * → add_contact_confirm. Backup, ONLY if that right-click offers no Add-Contact option: three-dot
-     * → Copy Kill Information → parse the exact name off the clipboard → add via the contacts search.
+     * Right-click the Final Blow name (fixed coords) → add_corporate_contact → standing_bad →
+     * add_contact_confirm → close the kill report.
      *
-     * @return the killer name if the backup ran (clipboard-exact), or null on the primary path
-     *         (which adds by clicking the name, without reading it).
+     * @return always null (the pilot is added by clicking the name, not read).
      */
     public String addKillerFromKillReport() {
         log("Opening kill report to add the killer as a bad (orange) corporate contact.");
@@ -1055,34 +1060,19 @@ public class MissionProcessor {
             return null;
         }
 
-        // 2. PRIMARY: right-click the Final Blow name. If the pilot menu offers Add Corporate
-        //    Contact, use it — no name lookup needed, we just click the pilot.
+        // 2. Right-click the Final Blow name. If the pilot menu offers Add Corporate Contact, use it.
         rightClickPos(KILLER_CLICK_X, KILLER_CLICK_Y);
         sleep(500);
         if (findTemplate("add_corporate_contact") != null) {
             ocrBridge.clickTemplate("add_corporate_contact");
             sleep(700);
-            ocrBridge.clickTemplate("standing_bad");
-            sleep(300);
-            ocrBridge.clickTemplate("add_contact_confirm");
-            sleep(500);
+            confirmBadContactStanding();
+            closeKillReport(); // close the kill report on its X (~1390,262), scoped away from the other windows
             log("Kill-report bad-contact added via name right-click.");
-            return null; // name isn't read on the primary path
-        }
-
-        // 3. BACKUP: the right-click gave no Add-Contact option. Dismiss the menu (left-click in
-        //    empty space — never Escape), then Copy Kill Information → parse the exact name → add it
-        //    through the contacts search.
-        log("No Add-Contact option on the name right-click — using the Copy Kill Information backup.");
-        clickPos(MENU_DISMISS_X, MENU_DISMISS_Y);
-        sleep(300);
-        String killer = copyKillInfoParseName();
-        if (killer != null && !killer.isEmpty()) {
-            addViaContactsSearch(killer);
         } else {
-            log("Backup: could not determine the killer name — no contact added.");
+            log("No Add-Contact option on the name right-click — no contact added.");
         }
-        return killer;
+        return null;
     }
 
     /**
@@ -1113,80 +1103,39 @@ public class MissionProcessor {
     }
 
     /**
-     * Three-dot menu → Copy Kill Information → read the clipboard → parse the final-blow pilot name.
-     * Returns the exact name, or null if the menu/clipboard/parse fails.
+     * Finish adding a Bad (orange) corporate contact once the pilot's "Add Corporate Contact" has
+     * been clicked. If the pilot is already a contact, "Edit Contact" (edit_contact) shows instead —
+     * there's nothing to add, so just click it (the caller closes the window afterward). Otherwise
+     * pick the orange "Bad" standing via a color-aware click (so it can't grab the adjacent red
+     * "Terrible" square) and confirm.
      */
-    public String copyKillInfoParseName() {
-        // Clear the clipboard first so a stale value (a previous kill, or unrelated copy) can't
-        // masquerade as a successful copy when the menu/template is missing.
-        final String SENTINEL = "<no-kill-info>";
-        setClipboard(SENTINEL);
-        ocrBridge.clickTemplate("kill_report_menu"); // three-dot at the top of the kill report window
-        sleep(500);
-        ocrBridge.clickTemplate("copy_kill_info");
-        sleep(400); // let the clipboard populate
-        String text = readClipboard();
-        if (text == null || text.equals(SENTINEL)) {
-            log("Copy Kill Information: clipboard unchanged — three-dot/copy template likely missing.");
-            return null;
+    private void confirmBadContactStanding() {
+        if (findTemplate("edit_contact") != null) {
+            log("edit_contact present — pilot already a contact; clicking edit (no re-add).");
+            ocrBridge.clickTemplate("edit_contact");
+            sleep(500);
+            return;
         }
-        java.util.regex.Matcher m = FINAL_BLOW.matcher(text);
-        if (m.find()) {
-            String name = m.group(1).trim();
-            log("Copy Kill Information → final blow: " + name);
-            return name;
+        if (!ocrBridge.clickColor("standing_bad")) {
+            log("standing_bad (orange) not matched — standing left at default.");
         }
-        log("Copy Kill Information: couldn't parse the final-blow name from the clipboard.");
-        return null;
-    }
-
-    /** Add {@code pilotName} as a Bad (orange) corporate contact through the contacts search. */
-    public boolean addViaContactsSearch(String pilotName) {
-        log("Backup: adding '" + pilotName + "' via contacts search.");
-        ocrBridge.clickTemplate("contacts");
-        sleep(800);
-        int[] search = ocrBridge.findTemplatePos("contacts_search");
-        if (search == null) {
-            log("contacts_search not visible — aborting backup add.");
-            return false;
-        }
-        ocrBridge.clickPos(search[0], search[1]);
-        sleep(300);
-        setClipboard(pilotName);
-        ocrBridge.ctrlKeyPress("v");
-        sleep(200);
-        ocrBridge.keyPress("\r"); // Enter — execute the search
-        sleep(1200);
-        // Exact name search — right-click the first result below the search field.
-        rightClickPos(search[0], search[1] + CONTACT_RESULT_OFFSET_Y);
-        sleep(500);
-        ocrBridge.clickTemplate("add_corporate_contact");
-        sleep(700);
-        ocrBridge.clickTemplate("standing_bad");
         sleep(300);
         ocrBridge.clickTemplate("add_contact_confirm");
         sleep(500);
-        ocrBridge.clickTemplate("contacts_close");
-        log("Backup contacts-search add complete for: " + pilotName);
-        return true;
     }
 
-    private void setClipboard(String text) {
-        try {
-            java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-                    .setContents(new java.awt.datatransfer.StringSelection(text), null);
-        } catch (Exception e) {
-            log("clipboard set failed: " + e.getMessage());
-        }
-    }
-
-    private String readClipboard() {
-        try {
-            return (String) java.awt.Toolkit.getDefaultToolkit().getSystemClipboard()
-                    .getData(java.awt.datatransfer.DataFlavor.stringFlavor);
-        } catch (Exception e) {
-            log("clipboard read failed: " + e.getMessage());
-            return null;
+    /**
+     * Close the kill report window on its X (~1390,262). Matches the close template ONLY inside a
+     * tight box around that X so it can't hit the agent-conversation dialog's X above it or the
+     * inventory/cargo window's X below it. Falls back to the fixed coordinate on a template miss.
+     */
+    private void closeKillReport() {
+        if (ocrBridge.clickTemplateInRegion("close_active_window",
+                KILL_REPORT_CLOSE_BOX_X, KILL_REPORT_CLOSE_BOX_Y, KILL_REPORT_CLOSE_BOX_W, KILL_REPORT_CLOSE_BOX_H)) {
+            log("Kill report closed (close 'X' matched in region).");
+        } else {
+            log("Kill-report close 'X' not matched in region — clicking fixed (" + KILL_REPORT_CLOSE_X + "," + KILL_REPORT_CLOSE_Y + ").");
+            clickPos(KILL_REPORT_CLOSE_X, KILL_REPORT_CLOSE_Y);
         }
     }
 

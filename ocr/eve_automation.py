@@ -173,6 +173,7 @@ TEMPLATE_FILES = {
     "meeshayl_lancer": "meeshayl_lancer",
     # Combat templates
     "launcher": "launcher",
+    "shooting_luncher": "shooting_luncher",  # launcher in active/cycling (shooting) state
     "kin_damage": "kin_damage",
     "exp_damage": "exp_damage",
     "inf_damage": "inf_damage",
@@ -218,9 +219,8 @@ TEMPLATE_FILES = {
     # Kill report → bad-contact flow (ContactTest / addKillerFromKillReport)
     "feed_icon": "feed_icon",                       # feed icon bottom-right — opens the notifications feed
     "kill_report": "kill_report",                   # latest kill report entry in the feed
-    "kill_report_menu": "kill_report_menu",         # three-dot menu at the top of the kill report window
-    "copy_kill_info": "copy_kill_info",             # 'Copy Kill Information' menu item
     "add_corporate_contact": "add_corporate_contact",  # 'Add Corporate Contact' item on the pilot right-click
+    "edit_contact": "edit_contact",                 # 'Edit Contact' — shown instead when pilot is already a contact
     "add_contact_confirm": "add_contact_confirm",   # confirm button in the add-contact dialog
     "standing_bad": "standing_bad",                 # bad (orange) standing option in the add-contact dialog
     "contacts": "contacts",                         # contacts window/button — backup add path
@@ -1878,6 +1878,39 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         cx, cy = matcher.center(match)
         cy += int(msg.get("offset_y", 0))
         matcher._do_click(cx, cy, button="left", delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+
+    if cmd == "click_color":
+        # Color-disambiguated click. Some templates (the standing buttons: orange "Bad" vs red
+        # "Terrible") are the same shape/glyph and differ only in hue. matchTemplate uses
+        # TM_CCOEFF_NORMED, which is mean-normalized, so a uniform hue shift barely changes the
+        # score — the wrong-colored square can win and we'd click "Terrible" instead of "Bad".
+        # Fix: gather ALL same-shape candidates at a lower threshold, then click the one whose
+        # region mean-color is closest to the template's own mean color.
+        template = matcher.templates.get(key)
+        if template is None:
+            return {"ok": True, "value": False}
+        screen = matcher.screenshot_cv()
+        cand_th = min(0.6, matcher.threshold)
+        cands = matcher.find_all(key, screen=screen, threshold=cand_th)
+        if not cands:
+            return {"ok": True, "value": False}
+        tmpl_mean = template.reshape(-1, template.shape[2]).mean(axis=0)
+        best = None
+        best_dist = None
+        for (x, y, w, h) in cands:
+            patch = screen[y:y + h, x:x + w]
+            if patch.size == 0:
+                continue
+            dist = float(np.linalg.norm(patch.reshape(-1, patch.shape[2]).mean(axis=0) - tmpl_mean))
+            if best_dist is None or dist < best_dist:
+                best_dist, best = dist, (x, y, w, h)
+        if best is None:
+            return {"ok": True, "value": False}
+        cx, cy = matcher.center(best)
+        matcher._do_click(cx, cy, button="left", delay=DAEMON_CLICK_DELAY)
+        log.info("click_color '%s': %d candidate(s), chose (%d,%d) color-dist=%.1f",
+                 key, len(cands), cx, cy, best_dist)
         return {"ok": True, "value": True}
 
     if cmd == "click_pos":

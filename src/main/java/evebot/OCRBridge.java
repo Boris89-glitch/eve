@@ -333,6 +333,19 @@ public class OCRBridge {
     }
 
     /**
+     * Color-disambiguated click: among all same-shape candidates for {@code key}, click the one
+     * whose on-screen color best matches the template. Use for buttons that differ only by hue
+     * (the orange "Bad" vs red "Terrible" standing squares), where mean-normalized template
+     * matching can otherwise pick the wrong color. Returns true if a candidate was clicked.
+     */
+    public boolean clickColor(String key) {
+        dbg("[%s] [" + activeClient + "] clickColor: %s%n", ts(), key);
+        JsonObject c = cmd("click_color");
+        c.addProperty("key", key);
+        return sendBool(c);
+    }
+
+    /**
      * Left-click a template, but only match it inside the given screen region
      * (x, y, width, height). Use when the same template (e.g. a close "X") can appear
      * in more than one window and only the one inside the box should be clicked.

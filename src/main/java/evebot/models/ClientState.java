@@ -206,6 +206,9 @@ public class ClientState {
     /** True for the Infested escape warp — WARPING watches for a jam (3s) instead of the bubble switch. */
     private boolean jamCheckOnWarp = false;
 
+    /** True once the prop mod ('s') has been pressed during an Infested jam — press it once only (every other press toggles it off). */
+    private boolean jamPropPressed = false;
+
     /** True after set_destination was clicked — verify it's gone after the first jump (else re-click). */
     private boolean verifySetDest = false;
 
@@ -565,6 +568,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isJamCheckOnWarp()           { return jamCheckOnWarp; }
     public void    setJamCheckOnWarp(boolean v) { this.jamCheckOnWarp = v; }
+
+    public boolean isJamPropPressed()           { return jamPropPressed; }
+    public void    setJamPropPressed(boolean v) { this.jamPropPressed = v; }
 
     public boolean isWarpPreVerified()           { return warpPreVerified; }
     public void    setWarpPreVerified(boolean v) { this.warpPreVerified = v; }

@@ -88,6 +88,12 @@ public class ClientManager {
     /** Minimum seconds between view-nudges (camera drag to refresh a stale frame) while
      *  waiting on a detection — keeps the nudge from firing every poll tick. */
     private static final long VIEW_NUDGE_THROTTLE_SECS  = 10;
+    /** Team combats (not Jaguar): once we've shot a target and waited this long with it
+     *  still locked, verify the launcher is actually firing ('shooting_luncher') and re-fire
+     *  if it isn't — a target can stop taking damage without the fight ever progressing. */
+    private static final long TEAM_REFIRE_AFTER_SECS    = 120;
+    /** Minimum seconds between those shooting_luncher re-fire checks. */
+    private static final long TEAM_REFIRE_THROTTLE_SECS = 15;
     /** How often to check the faction agent for an offer (the kernite/Evolution run). */
     private static final long FACTION_CHECK_HOURS       = 2;
     /** Faction missions may be declined at most once per this many hours (EVE decline cooldown). */
@@ -299,7 +305,7 @@ public class ClientManager {
     // POD_COOLDOWN — wait for global 10-minute cooldown after a pod death.
     // -----------------------------------------------------------------------
 
-    private static final int POD_COOLDOWN_MINUTES = 12;
+    private static final int POD_COOLDOWN_MINUTES = 7;
 
     /** Insta-dock attempts (dock warp never engaging) before we stop retrying and dock directly
      *  (DOCK button / right-click station → Dock). */
@@ -323,19 +329,38 @@ public class ClientManager {
             }
         }
 
+        // Add the pilot who podded us as a bad contact shortly after we're back in station — we're
+        // docked and in the foreground here with the kill report still open (it closes on undock).
+        // Do it now rather than waiting out the cooldown, so the flagging happens even on a long (or
+        // zero) cooldown. Give the station UI ~10s to load first (the feed/report aren't
+        // interactable on the first tick), holding focus on this client during the wait.
+        if (cs.isPendingKillReportAdd()) {
+            if (Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds() < 10) {
+                return; // station still loading — wait, keep this client in the foreground
+            }
+            cs.setPendingKillReportAdd(false);
+            String killer = missionProcessor.addKillerFromKillReport();
+            EventLog.log("POD_KILLER", clientId + " — podded by: "
+                    + (killer != null && !killer.isEmpty() ? killer : "unknown (added from kill report)"));
+        }
+
         LocalDateTime cooldownEnd = stateManager.getPodCooldownEnd();
         long remaining = Duration.between(LocalDateTime.now(), cooldownEnd).getSeconds();
         if (remaining <= 0) {
-            // We're docked and in the foreground here — safe to drive the UI, and the kill report
-            // is still open (it closes on undock). Add the pilot who podded us as a bad contact.
-            if (cs.isPendingKillReportAdd()) {
-                cs.setPendingKillReportAdd(false);
-                String killer = missionProcessor.addKillerFromKillReport();
-                EventLog.log("POD_KILLER", clientId + " — podded by: "
-                        + (killer != null && !killer.isEmpty() ? killer : "unknown (added from kill report)"));
-            }
             if (cs.getCurrentMission() != null) {
-                // Died on this mission — quit it and pick a different one rather than flying back in.
+                // Before quitting, check whether the mission is actually already complete — e.g. we
+                // killed the burner and only got podded on the way back. If we respawned/redocked at
+                // the agent (agent_icon visible) and its dialog reads COMPLETED, turn it in via
+                // COMPLETING rather than throwing away a finished mission. Otherwise quit and re-pick.
+                if (missionProcessor.detectCompletingUI() != null) {
+                    missionProcessor.doubleClickAgentIcon();
+                    if (missionProcessor.detectDialog() == MissionProcessor.DialogState.COMPLETED) {
+                        log(clientId, "POD_COOLDOWN: expired — mission reads COMPLETED (target down before we were podded), turning it in.");
+                        stateManager.setState(clientId, ClientState.State.COMPLETING);
+                        return;
+                    }
+                }
+                // Died on this mission and it isn't complete — quit it and pick a different one rather than flying back in.
                 log(clientId, "POD_COOLDOWN: expired — quitting the mission we died on, picking a different one.");
                 missionProcessor.quitMission();
                 cs.setCurrentMission(null);
@@ -367,7 +392,7 @@ public class ClientManager {
         }
     }
 
-    private static final int POD_CHECK_INTERVAL_MINUTES = 10;
+    private static final int POD_CHECK_INTERVAL_MINUTES = 5;
 
     /**
      * Periodic overview upkeep (WARPING, and IDLE while travelling), throttled to
@@ -423,11 +448,11 @@ public class ClientManager {
         String deathWindow = lastCheck.equals(LocalDateTime.MIN)
                 ? "death window unknown (no prior pod check)"
                 : "died within last " + Duration.between(lastCheck, LocalDateTime.now()).getSeconds() + "s";
-        // Jump category: <=3 is the near-station danger zone that pauses all clients (see
+        // Jump category: <=2 is the near-station danger zone that pauses all clients (see
         // below). The count runs high — the undock warp is counted as a jump and a phantom
-        // jump can be logged after the death — so a kill ~1 system out reads as ~3. Past that
-        // the exact count doesn't matter, so it's logged simply as ">3".
-        String jumpsLabel = jumps <= 3 ? String.valueOf(jumps) : ">3";
+        // jump can be logged after the death — so a kill right by the station reads as ~2. Past
+        // that the exact count doesn't matter, so it's logged simply as ">2".
+        String jumpsLabel = jumps <= 2 ? String.valueOf(jumps) : ">2";
         if (inSpace) {
             log(clientId, "*** CAPSULE DETECTED — ship destroyed! Self-destructing...");
             if (!missionProcessor.clickDestruct()) {
@@ -494,18 +519,18 @@ public class ClientManager {
         soundAlert(POD_ALERT);
         // Flag this client to add the killer (from the still-open kill report) as a bad contact,
         // then route through POD_COOLDOWN: its expiry quits the mission we died on and picks a new
-        // one (so we go somewhere else, never back into the camp). Near the station (jumps <= 3 —
+        // one (so we go somewhere else, never back into the camp). Near the station (jumps <= 2 —
         // the count runs high because the undock warp and a phantom post-death jump inflate it, so
-        // a kill ~1 system out reads as ~3) we wait out the full cooldown before doing so; deeper
-        // out we set a zero cooldown so the very next tick expires and quits/re-picks immediately.
+        // a kill right by the station reads as ~2) we wait out the full cooldown before doing so;
+        // deeper out we set a zero cooldown so the very next tick expires and quits/re-picks now.
         cs.setPendingKillReportAdd(true);
-        if (jumps <= 3) {
+        if (jumps <= 2) {
             LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
             stateManager.setPodCooldownEnd(cooldownEnd);
             log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
         } else {
             stateManager.setPodCooldownEnd(LocalDateTime.now());
-            log(clientId, "POD_DEATH: non-combat death, jumps>3 (" + jumps + ") — no cooldown, but quitting the mission and adding bad standings.");
+            log(clientId, "POD_DEATH: non-combat death, jumps>2 (" + jumps + ") — no cooldown, but quitting the mission and adding bad standings.");
         }
         stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         return true;
@@ -515,18 +540,55 @@ public class ClientManager {
     // IDLE
     // -----------------------------------------------------------------------
 
+    /** Hardcoded launcher position — fallback when the 'launcher' template can't be located. */
+    private static final int LAUNCHER_X = 1093;
+    private static final int LAUNCHER_Y = 1028;
+
     /**
-     * Right-click the launcher module. Tries template matching first;
-     * falls back to hardcoded position (1093, 1028) if not found.
+     * Locate and right-click the launcher module to open its context menu. Tries the 'launcher'
+     * template once, falling back to the hardcoded position if it isn't matched.
      */
     private void rightClickLauncher(String clientId) {
         int[] pos = missionProcessor.findTemplatePos("launcher");
         if (pos != null) {
             missionProcessor.rightClickPos(pos[0], pos[1]);
         } else {
-            log(clientId, "launcher template not found — using hardcoded pos (1093,1028).");
-            missionProcessor.rightClickPos(1093, 1028);
+            log(clientId, "launcher template not found — using hardcoded pos (" + LAUNCHER_X + "," + LAUNCHER_Y + ").");
+            missionProcessor.rightClickPos(LAUNCHER_X, LAUNCHER_Y);
         }
+    }
+
+    /**
+     * Verified ammo switch: right-click the launcher and load the given ammo, confirming the menu
+     * actually opened instead of firing blind. A missed right-click would otherwise silently leave
+     * the wrong ammo loaded, so this re-opens the menu and re-checks the ammo template once more
+     * (2 quick attempts, re-searching the launcher each time), clicking only once the ammo item is
+     * on screen. Kept lean — this runs inline on the poll tick, so it must not stall for seconds.
+     * A miss after both attempts is usually just the correct ammo already being loaded (the item
+     * isn't offered), so it's treated as benign — no alarm.
+     *
+     * @return true if the ammo item was found and clicked, false if it never appeared.
+     */
+    private boolean switchAmmo(String clientId, String ammoKey) {
+        final int MENU_ATTEMPTS = 2;
+        for (int attempt = 1; attempt <= MENU_ATTEMPTS; attempt++) {
+            rightClickLauncher(clientId);
+            // Confirm the menu opened: the ammo item is only on screen once the launcher menu is up.
+            if (missionProcessor.findTemplate(ammoKey) != null) {
+                missionProcessor.clickTemplate(ammoKey);
+                log(clientId, "switchAmmo: loaded '" + ammoKey + "' (attempt " + attempt + "/" + MENU_ATTEMPTS + ").");
+                return true;
+            }
+            if (attempt < MENU_ATTEMPTS) {
+                log(clientId, "switchAmmo: '" + ammoKey + "' not visible after right-click (attempt "
+                        + attempt + "/" + MENU_ATTEMPTS + ") — right-click may have missed; clearing menu, retrying once.");
+                missionProcessor.clickPos(960, 540); // dismiss any stale menu in empty space (never Escape)
+            }
+        }
+        // Not necessarily an error: if the correct ammo is already loaded the item won't
+        // show as a selectable option, so a miss here is expected — carry on, no alarm.
+        log(clientId, "switchAmmo: '" + ammoKey + "' not found — likely already loaded, continuing.");
+        return false;
     }
 
     /**
@@ -541,9 +603,7 @@ public class ClientManager {
         if (target == null || !target.equalsIgnoreCase("vengeance")) return;
 
         log(clientId, "PRE-GATE: loading explosive rockets for Vengeance.");
-        rightClickLauncher(clientId);
-        try { Thread.sleep(1000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-        missionProcessor.clickTemplate("exp_damage");
+        switchAmmo(clientId, "exp_damage");
         try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
@@ -662,7 +722,9 @@ public class ClientManager {
                 }
             }
 
-            // After first jump, check for hostiles once — warp to safe spot if enemy found.
+            // Each system after the first jump, check for hostiles once — warp to safe spot if
+            // enemy found. klyChecked latches per system and is reset on every gate jump below,
+            // so this re-evaluates in each new system (same as RETURNING_HOME), not just once.
             if (cs.getJumpCount() >= 1 && !cs.isKlyChecked()) {
                 cs.setKlyChecked(true);
                 if (missionProcessor.isEnemyInLocal()) {
@@ -755,6 +817,7 @@ public class ClientManager {
                         }
                     }
                     cs.incrementJumpCount();
+                    cs.setKlyChecked(false); // new system next landing — re-arm the enemy-in-local evade check
                     log(clientId, "IDLE[TO_MISSION]: stargate — right-click → jump. (jump #" + cs.getJumpCount() + ")");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
@@ -1240,6 +1303,12 @@ public class ClientManager {
                 // (e.g. bot restarted mid-mission). OCR the title and fly it.
                 log(clientId, "Template '" + missionTemplate + "' matched with NOT_COMPLETE dialog — accepted mission in progress (startup recovery), reading via OCR and flying it.");
                 Mission accepted = missionProcessor.readMission(getMissionAreaForClient(clientId));
+                // Set the combat target from the template here too — this recovery path skips the
+                // normal template-target set below, so without this it would depend solely on the
+                // flaky repair-time dialog re-match (and could loop on shipTarget='unknown').
+                if (accepted != null && missionTemplate.startsWith("mission_")) {
+                    accepted.setShipTarget(missionTemplate.substring("mission_".length()));
+                }
                 cs.setCurrentMission(accepted);
                 stateManager.setState(clientId, ClientState.State.ACCEPTED);
                 return;
@@ -1289,6 +1358,16 @@ public class ClientManager {
             return;
         }
         cs.setCurrentMission(mission);
+
+        // The matched wanted template already identifies the combat ship type, so set it as the
+        // combat target now. The repair-time dialog re-match (performUndockStart) still overrides
+        // this if it succeeds; but when that re-match misses (flaky), this keeps IN_COMBAT from
+        // falling back to the OCR'd "Unknown" target and looping forever on shipTarget='unknown'.
+        if (missionTemplate.startsWith("mission_")) {
+            String combatTarget = missionTemplate.substring("mission_".length());
+            mission.setShipTarget(combatTarget);
+            log(clientId, "Combat target set from template: '" + combatTarget + "'.");
+        }
 
         // The template match only told us this is a *candidate* wanted type — it
         // can be a false positive (e.g. mission_enyo matching "Smash the Supplier").
@@ -1730,7 +1809,11 @@ public class ClientManager {
                 handleCombatWorm(clientId, cs);
                 break;
             default:
-                // Unknown target — fall back to completion polling.
+                // Unresolved target — we have no combat sequence to run for it. Poll for completion
+                // in case the mission ends on its own, but never spin here forever: a recognised
+                // target always routes to its handler above, so landing here means the target is
+                // genuinely unknown. After a bounded wait with no dock/set_destination, alert + park
+                // so a mis-resolved target surfaces instead of looping silently ('unknown' forever).
                 String fallback = missionProcessor.detectCombatComplete();
                 if ("dock".equals(fallback)) {
                     log(clientId, "IN_COMBAT: dock detected — same system, docking.");
@@ -1742,6 +1825,10 @@ public class ClientManager {
                 } else if (fallback != null) {
                     log(clientId, "IN_COMBAT: set_destination detected — mission complete.");
                     stateManager.setState(clientId, ClientState.State.RETURNING);
+                } else if (Duration.between(cs.getLastStateChange(), LocalDateTime.now()).getSeconds() >= 120) {
+                    log(clientId, "*** ALERT: IN_COMBAT stuck 120s with unresolved target '" + target + "' — parking client.");
+                    soundAlert(NO_SHIP_ALERT);
+                    parkClient(clientId, "IN_COMBAT unresolved target '" + target + "'");
                 }
                 break;
         }
@@ -1787,6 +1874,33 @@ public class ClientManager {
         }
 
         long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+
+        // Team combats (not Jaguar): if the completion wait drags on past 120s with the main
+        // still locked but the launcher not firing ('shooting_luncher' absent), the main isn't
+        // taking damage — re-run the kill sequence (select the locked main, overload:
+        // shift+a, a, d) and reset the completion timer so the backstop doesn't give up early.
+        String lockedMain = "Vengeance".equals(combatLabel) ? "locked_vengeance"
+                          : "Enyo".equals(combatLabel)      ? "locked_enyo"
+                          : "Hawk".equals(combatLabel)      ? "locked_hawk"
+                          : null;
+        if (lockedMain != null && elapsed >= TEAM_REFIRE_AFTER_SECS
+                && Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds() >= TEAM_REFIRE_THROTTLE_SECS) {
+            cs.setCombatPollStart(LocalDateTime.now());
+            // Only re-fire if the main is still locked AND the launcher is confirmed idle across
+            // several scans — 'a'/'d' are toggles, so acting on a single missed 'shooting_luncher'
+            // frame would switch a firing launcher OFF.
+            if (missionProcessor.findTemplate(lockedMain) != null
+                    && missionProcessor.confirmTemplateGone("shooting_luncher", 3, 300)) {
+                log(clientId, "COMBAT[" + combatLabel + "] launcher not shooting after " + elapsed + "s, main still locked — re-firing (click + overload: shift+a, 3s, a, d).");
+                missionProcessor.clickTemplate(lockedMain);
+                missionProcessor.shiftKeyPress("a");
+                try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                missionProcessor.keyPress("a");
+                missionProcessor.keyPress("d");
+                cs.setCombatWaitStart(LocalDateTime.now()); // extend the backstop after a re-fire
+                return;
+            }
+        }
 
         // Backstop with no completion signal. Jaguar fights run longer, so they get
         // 300s; every other combat uses 120s. The eject-menu pod check is invasive
@@ -1852,14 +1966,14 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[Jaguar] Step 0: right-click launcher (ammo menu).");
-                rightClickLauncher(clientId);
+                log(clientId, "COMBAT[Jaguar] Step 0: switch ammo → kin_damage (verified).");
+                switchAmmo(clientId, "kin_damage");
                 cs.setCombatStep(1);
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Jaguar] Step 1: click kin_damage (load kinetic).");
-                missionProcessor.clickTemplate("kin_damage");
+                // Ammo loaded+verified in step 0 — this tick just lets the selection settle.
+                log(clientId, "COMBAT[Jaguar] Step 1: kinetic loaded — settling.");
                 cs.setCombatStep(2);
                 break;
             }
@@ -2149,6 +2263,17 @@ public class ClientManager {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 60) {
                     log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 60s.");
+                    // Second inquisitor still locked but launcher confirmed idle → re-fire (select + 'ad').
+                    if (Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds() >= TEAM_REFIRE_THROTTLE_SECS) {
+                        cs.setCombatPollStart(LocalDateTime.now());
+                        if (missionProcessor.findTemplate("locked_inquisitor") != null
+                                && missionProcessor.confirmTemplateGone("shooting_luncher", 3, 300)) {
+                            log(clientId, "COMBAT[Vengeance] Step 10: launcher not shooting, second inquisitor still locked — re-firing (click + 'ad').");
+                            missionProcessor.clickTemplate("locked_inquisitor");
+                            missionProcessor.keyPress("ad");
+                            return;
+                        }
+                    }
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
@@ -2160,14 +2285,14 @@ public class ClientManager {
                 break;
             }
             case 11: {
-                log(clientId, "COMBAT[Vengeance] Step 11: right-click launcher (ammo switch).");
-                rightClickLauncher(clientId);
+                log(clientId, "COMBAT[Vengeance] Step 11: switch ammo → inf_damage (verified).");
+                switchAmmo(clientId, "inf_damage");
                 cs.setCombatStep(12);
                 break;
             }
             case 12: {
-                log(clientId, "COMBAT[Vengeance] Step 12: click inf_damage (load infernal).");
-                missionProcessor.clickTemplate("inf_damage");
+                // Ammo loaded+verified in step 11 — arm the load safe-wait.
+                log(clientId, "COMBAT[Vengeance] Step 12: infernal loaded — starting load wait.");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(13);
                 break;
@@ -2250,14 +2375,14 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[Enyo] Step 0: right-click launcher (ammo menu).");
-                rightClickLauncher(clientId);
+                log(clientId, "COMBAT[Enyo] Step 0: switch ammo → exp_damage (verified).");
+                switchAmmo(clientId, "exp_damage");
                 cs.setCombatStep(1);
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Enyo] Step 1: click exp_damage (load explosive).");
-                missionProcessor.clickTemplate("exp_damage");
+                // Ammo loaded+verified in step 0 — this tick just lets the selection settle.
+                log(clientId, "COMBAT[Enyo] Step 1: explosive loaded — settling.");
                 cs.setCombatStep(2);
                 break;
             }
@@ -2462,14 +2587,14 @@ public class ClientManager {
 
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[Hawk] Step 0: right-click launcher (ammo menu).");
-                rightClickLauncher(clientId);
+                log(clientId, "COMBAT[Hawk] Step 0: switch ammo → em_damage (verified).");
+                switchAmmo(clientId, "em_damage");
                 cs.setCombatStep(1);
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Hawk] Step 1: click em_damage (load EM).");
-                missionProcessor.clickTemplate("em_damage");
+                // Ammo loaded+verified in step 0 — this tick just lets the selection settle.
+                log(clientId, "COMBAT[Hawk] Step 1: EM loaded — settling.");
                 cs.setCombatStep(2);
                 break;
             }
@@ -2979,6 +3104,7 @@ public class ClientManager {
                     missionProcessor.clickTemplate("dock");
                     cs.setDockingToStation(true);
                     cs.setJamCheckOnWarp(true); // escape warp may be jammed
+                    cs.setJamPropPressed(false); // fresh escape — prop mod not yet pressed
                     cs.setTravelPhase(ClientState.TravelPhase.NONE);
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
@@ -2987,6 +3113,7 @@ public class ClientManager {
                 if (completed != null) { // set_destination
                     log(clientId, "COMBAT[Infested] set_destination detected — mission complete, returning.");
                     cs.setJamCheckOnWarp(true); // escape warp may be jammed
+                    cs.setJamPropPressed(false); // fresh escape — prop mod not yet pressed
                     cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
                     stateManager.setState(clientId, ClientState.State.RETURNING);
                     return;
@@ -2998,6 +3125,7 @@ public class ClientManager {
                 String revealed = nudgeForCompletion(clientId, cs, "Infested", elapsed7, 60);
                 if (revealed != null) {
                     cs.setJamCheckOnWarp(true); // escape warp may be jammed
+                    cs.setJamPropPressed(false); // fresh escape — prop mod not yet pressed
                     if ("dock".equals(revealed)) {
                         log(clientId, "COMBAT[Infested] dock revealed after nudge — same system, docking.");
                         missionProcessor.clickTemplate("dock");
@@ -3024,6 +3152,7 @@ public class ClientManager {
                     }
                     log(clientId, "COMBAT[Infested] no set_destination after 120s — returning (set_destination will be clicked).");
                     cs.setJamCheckOnWarp(true); // escape warp may be jammed
+                    cs.setJamPropPressed(false); // fresh escape — prop mod not yet pressed
                     cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
                     stateManager.setState(clientId, ClientState.State.RETURNING);
                     return;
@@ -4056,7 +4185,18 @@ public class ClientManager {
         // capsule — which then wedges forever at the frigate-only mission gate. The pod check
         // is reliable in space (no_ship module slivers + eject probe), so catch it here:
         // redock, quit the mission we have no ship for, and pick another.
+        // Guard against a transient false positive: right after undock the ship HUD (module
+        // slivers) can still be rendering, so stage 1 misses and the eject probe reads PODDED
+        // even though a ship was boarded fine. Confirm with a second read after a short settle
+        // before committing to the redock-and-requit flow.
         if (missionProcessor.isFlyingPod()) {
+            log(clientId, "UNDOCKING: pod suspected — re-checking after HUD settle before redocking.");
+            try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            if (!missionProcessor.isFlyingPod()) {
+                log(clientId, "UNDOCKING: second pod check clear — HUD was still loading, in a ship. Proceeding to TRAVEL.");
+                stateManager.setState(clientId, ClientState.State.TRAVEL);
+                return;
+            }
             String mTitle = cs.getCurrentMission() != null ? cs.getCurrentMission().getTitle() : "unknown";
             log(clientId, "*** ALERT: undocked in a POD — no ship for this mission. Redocking to quit + re-pick.");
             EventLog.log("SHIP_NOT_FOUND", clientId + " — undocked in pod (mission: " + mTitle + ")");
@@ -4227,9 +4367,14 @@ public class ClientManager {
         // jammed, burn away (double-click stargate + 's') and retry the jump.
         if (cs.isJamCheckOnWarp()) {
             if (missionProcessor.findTemplate("jamed") != null) {
-                log(clientId, "WARPING[INFESTED]: JAMED — burn away (double-click stargate + 's') + retry jump.");
+                boolean pressProp = !cs.isJamPropPressed();
+                log(clientId, "WARPING[INFESTED]: JAMED — burn away (double-click stargate"
+                        + (pressProp ? " + 's'" : ", prop already on") + ") + retry jump.");
                 missionProcessor.doubleClickTemplate("stargate");
-                missionProcessor.keyPress("s");
+                if (pressProp) {
+                    missionProcessor.keyPress("s"); // prop mod — press once only; every other press toggles it off
+                    cs.setJamPropPressed(true);
+                }
                 try { Thread.sleep(5000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                 new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
                 cs.setWarpStartTime(LocalDateTime.now()); // restart warp + jam window
@@ -4513,21 +4658,6 @@ public class ClientManager {
 
                     redockOrBubbleEscape(clientId, cs, false, "warp_active not showing after retry");
                     return;
-                }
-
-                // Safe-spot evade warps react fast (1s grace), but when a station is right in
-                // front of us the warp is initiated from a standstill and warp_active can flash
-                // on for a frame before the warp actually engages. Don't hand off focus on that
-                // first flash — wait a few seconds and re-confirm warp_active. If it's gone, the
-                // warp never took; redock (station is right here) instead of switching away.
-                if (cs.isSafeSpotWarp() && missionProcessor.findTemplate("home_station") != null) {
-                    log(clientId, "WARPING: warp_active seen but station in front — waiting 3s to confirm the warp took before switching.");
-                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                    if (!missionProcessor.isWarpActive()) {
-                        redockOrBubbleEscape(clientId, cs, false, "warp not confirmed in front of station");
-                        return;
-                    }
-                    log(clientId, "WARPING: warp still active after 3s confirm — the warp took, proceeding.");
                 }
 
                 cs.setSafeSpotWarp(false); // warp engaged — clear the evade-retry flag
