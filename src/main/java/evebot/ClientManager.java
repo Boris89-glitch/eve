@@ -1214,7 +1214,20 @@ public class ClientManager {
         // A 'mission_reject_*' template matched: decline immediately, no OCR.
         // Confirm a live OFFER dialog first so a stale match can't mis-click.
         if (missionTemplate != null && missionTemplate.startsWith("reject:")) {
-            if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
+            MissionProcessor.DialogState rejectDialog = missionProcessor.detectDialog();
+            if (rejectDialog != MissionProcessor.DialogState.OFFER) {
+                // Reject template on an ACCEPTED (not yet complete) mission: an unwanted
+                // offer was accepted by mistake. Quit it and re-pick — clicking Request
+                // Mission does nothing while a mission is active, so that path just loops
+                // until the 45s bailout.
+                if (rejectDialog == MissionProcessor.DialogState.NOT_COMPLETE
+                        || rejectDialog == MissionProcessor.DialogState.ALREADY_ACCEPTED) {
+                    log(clientId, "Auto-reject template '" + missionTemplate.substring(7)
+                            + "' matched on an accepted mission — quitting it and requesting a new one.");
+                    cs.setCurrentMission(null);
+                    missionProcessor.quitMission();
+                    return;
+                }
                 log(clientId, "Auto-reject template '" + missionTemplate.substring(7)
                         + "' matched but no live OFFER dialog — requesting new mission.");
                 missionProcessor.clickRequestMission();
