@@ -346,6 +346,25 @@ public class OCRBridge {
     }
 
     /**
+     * Color-disambiguated click confined to a screen region. The low-threshold candidate hunt
+     * of {@link #clickColor} matches all over a full screen (it once clicked the orange UNDOCK
+     * button); scoping it to the box where the target must live prevents that.
+     */
+    public boolean clickColorInRegion(String key, int x, int y, int width, int height) {
+        dbg("[%s] [" + activeClient + "] clickColorInRegion: %s in %d,%d %dx%d%n",
+                ts(), key, x, y, width, height);
+        JsonObject c = cmd("click_color");
+        c.addProperty("key", key);
+        JsonObject region = new JsonObject();
+        region.addProperty("x", x);
+        region.addProperty("y", y);
+        region.addProperty("w", width);
+        region.addProperty("h", height);
+        c.add("region", region);
+        return sendBool(c);
+    }
+
+    /**
      * Left-click a template, but only match it inside the given screen region
      * (x, y, width, height). Use when the same template (e.g. a close "X") can appear
      * in more than one window and only the one inside the box should be clicked.

@@ -387,8 +387,8 @@ public class MissionProcessor {
         }
         sleep(500);
 
-        // Python's repair_ship already clicks Board Ship (or falls back to Undock),
-        // so no need to click undock here — just transition to UNDOCKING.
+        // Python's repair_ship already clicks Board Ship (it never clicks Undock —
+        // the caller does that), so just transition to UNDOCKING.
         log("=== Repair done — entering UNDOCKING state ===");
         return UNDOCK_OK;
     }
@@ -1060,18 +1060,30 @@ public class MissionProcessor {
             return null;
         }
 
-        // 2. Right-click the Final Blow name. If the pilot menu offers Add Corporate Contact, use it.
+        // 2. Right-click the Final Blow name. If the menu shows Edit Corporate Contact the pilot
+        //    is already added — skip. Otherwise, if it offers Add Corporate Contact, use it.
         rightClickPos(KILLER_CLICK_X, KILLER_CLICK_Y);
         sleep(500);
-        if (findTemplate("add_corporate_contact") != null) {
-            ocrBridge.clickTemplate("add_corporate_contact");
+        if (findTemplate("edit_corp_contact") != null) {
+            log("edit_corp_contact on the name right-click — already a corporate contact, skipping add.");
+            EventLog.log("CONTACT_ADD_SKIPPED", "edit_corp_contact on kill-report right-click — already a corporate contact");
+            clickPos(960, 540); // dismiss the menu (left-click empty space, never Escape)
+            sleep(300);
+        } else if (ocrBridge.waitAndClickTemplate("add_corporate_contact", 2)) {
+            log("add_corporate_contact clicked — waiting for the New-Contact dialog.");
             sleep(700);
             confirmBadContactStanding();
-            closeKillReport(); // close the kill report on its X (~1390,262), scoped away from the other windows
-            log("Kill-report bad-contact added via name right-click.");
         } else {
-            log("No Add-Contact option on the name right-click — no contact added.");
+            // No Add-Contact option on the menu — the pilot is most likely already a contact.
+            // Just record it and proceed to close the report.
+            log("add_corporate_contact missing from the name right-click — likely already added, proceeding.");
+            EventLog.log("CONTACT_ADD_SKIPPED", "add_corporate_contact missing on kill-report right-click — likely already a contact");
+            // The context menu may still be open — dismiss it (left-click empty space, never
+            // Escape) so the close-X click below hits the report instead of the menu.
+            clickPos(960, 540);
+            sleep(300);
         }
+        closeKillReport(); // close the kill report on its X (~1390,262), scoped away from the other windows
         return null;
     }
 
@@ -1116,11 +1128,25 @@ public class MissionProcessor {
             sleep(500);
             return;
         }
-        if (!ocrBridge.clickColor("standing_bad")) {
-            log("standing_bad (orange) not matched — standing left at default.");
+        // Anchor on the dialog's Add Contact button BEFORE any standing click. If it isn't there,
+        // the dialog never opened — do NOT hunt for the orange square across the whole screen
+        // (the low-threshold color scan once matched the orange UNDOCK button and undocked a pod).
+        int[] confirm = ocrBridge.findTemplatePos("add_contact_confirm");
+        if (confirm == null) {
+            log("add_contact_confirm not found — New-Contact dialog did not open; skipping standing clicks, contact NOT saved.");
+            return;
+        }
+        // The standing squares sit above the Add Contact button inside the same dialog — scope
+        // the color click to that box so it can't grab similarly-colored UI elsewhere.
+        if (ocrBridge.clickColorInRegion("standing_bad",
+                confirm[0] - 250, confirm[1] - 330, 500, 310)) {
+            log("standing_bad (orange) clicked.");
+        } else {
+            log("standing_bad (orange) not matched in the dialog — standing left at default.");
         }
         sleep(300);
-        ocrBridge.clickTemplate("add_contact_confirm");
+        ocrBridge.clickPos(confirm[0], confirm[1]);
+        log("add_contact_confirm clicked — bad contact saved.");
         sleep(500);
     }
 

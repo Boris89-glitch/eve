@@ -4301,6 +4301,45 @@ public class ClientManager {
     }
 
     /**
+     * Route a finished dock to its next state — shared by the normal warp-gone dock completion
+     * and the docked-detected-while-verifying path (agent_icon in station, no pod_station).
+     * Faction kernite legs route to their own states; normal mission docks go to COMPLETING.
+     */
+    private void finishDockArrival(String clientId, ClientState cs, String how) {
+        cs.setDockingToStation(false);
+        // Faction kernite run docks route differently than normal mission docks.
+        if (cs.getFactionLeg() == ClientState.FactionLeg.TO_SOE) {
+            log(clientId, "WARPING[FACTION]: docked at SOE station (" + how + ") — transitioning to FACTION_COMPLETING.");
+            stateManager.setState(clientId, ClientState.State.FACTION_COMPLETING);
+            return;
+        }
+        if (cs.getFactionLeg() == ClientState.FactionLeg.TO_HOME) {
+            log(clientId, "WARPING[FACTION]: warp home complete (" + how + ") — waiting for dock confirmation before resuming.");
+            cs.setFactionLeg(ClientState.FactionLeg.NONE);
+            cs.setTravelPhase(ClientState.TravelPhase.NONE);
+            cs.setFactionResumePending(true); // IDLE waits for agent_icon, skips travel-resume meanwhile
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            return;
+        }
+        log(clientId, "WARPING: dock complete (" + how + ") — transitioning to COMPLETING.");
+        stateManager.setState(clientId, ClientState.State.COMPLETING);
+        // Check once for the agent icon before yielding — we may already be in station with
+        // the icon loaded, in which case keep focus and let COMPLETING run next tick.
+        if (missionProcessor.detectCompletingUI() != null) {
+            log(clientId, "COMPLETING: agent icon already visible — holding focus to complete now.");
+            return;
+        }
+        // The agent icon can take a while to appear after docking (station UI load).
+        // Hand the foreground to the other client meanwhile rather than spinning on the
+        // wait — the watchdog brings focus back here once it's time to complete.
+        ClientWindowInfo docked = findOtherClient(clientId);
+        if (docked != null) {
+            log(clientId, "COMPLETING: docked — switching focus to " + docked.getClientId() + " while the agent icon loads.");
+            bringToForeground(docked);
+        }
+    }
+
+    /**
      * Terminal warp-start failure handling. If a station is in reach, dock back (direct redock).
      * While deliberately docking we NEVER bubble-escape — that jumps a gate and leaves the system;
      * instead we re-issue the dock and, if a bubble camp pods us, route to pod-death and wait out
@@ -4335,8 +4374,20 @@ public class ClientManager {
         // (respawn/self-destruct → cooldown); otherwise re-issue the dock and wait it out.
         if (cs.isDockingToStation()) {
             if (missionProcessor.findTemplate("agent_icon") != null) {
-                log(clientId, "WARPING: " + why + " while docking — agent_icon visible, podded/respawned at station.");
-                handlePodDeath(clientId, false);
+                // agent_icon means we're in station — but a SUCCESSFUL dock looks exactly the
+                // same. Only a capsule in the hangar (pod_station / capsule) means we were
+                // podded; without it the dock simply landed (e.g. a short-range dock whose warp
+                // templates never showed) — proceed as a normal dock arrival, not a pod death.
+                // NOTE: pod_station.png is currently missing from templates/ (silently skipped),
+                // so capsule is the effective check until it's added.
+                if (missionProcessor.findTemplate("pod_station") != null
+                        || missionProcessor.findTemplate("capsule") != null) {
+                    log(clientId, "WARPING: " + why + " while docking — agent_icon + capsule in hangar, podded/respawned at station.");
+                    handlePodDeath(clientId, false);
+                    return;
+                }
+                log(clientId, "WARPING: " + why + " while docking — agent_icon with no pod_station: docked normally, proceeding.");
+                finishDockArrival(clientId, cs, "agent_icon in station, no pod");
                 return;
             }
             if (missionProcessor.isFlyingPod()) {
@@ -4626,8 +4677,8 @@ public class ClientManager {
 
                     // Safe-spot evade warp that never engaged (the bookmark click likely missed):
                     // nudge the camera to refresh the frame and re-issue the safe-spot warp, up to
-                    // twice. If it still won't engage, abandon the evade and jump the gate normally
-                    // (drop to IDLE in the current travel phase) instead of redocking.
+                    // twice. If it still won't engage, treat it like any other stuck warp —
+                    // redock if a station is in reach, otherwise bubble-escape.
                     if (cs.isSafeSpotWarp()) {
                         if (cs.getWarpRetryCount() < 2) {
                             cs.setWarpRetryCount(cs.getWarpRetryCount() + 1);
@@ -4637,14 +4688,12 @@ public class ClientManager {
                             cs.setWarpStartTime(LocalDateTime.now()); // restart the wait, stay in first-check
                             return;
                         }
-                        // Give up on the safe spot but still leave the system: issue the normal
-                        // gate jump and stay in WARPING so the standard warp-start verification
-                        // (retry once, then redock / bubble-escape) still runs as a safety net.
-                        log(clientId, "WARPING: safe-spot warp failed after 2 retries — abandoning evade, jumping normally.");
+                        // Warp still won't engage after 2 retries — treat it like any other stuck
+                        // warp: redock if a station is in reach, otherwise bubble-escape out.
+                        log(clientId, "WARPING: safe-spot warp failed after 2 retries — redock / bubble escape.");
                         cs.setSafeSpotWarp(false);
-                        cs.setWarpRetryCount(0); // fresh warp-start verification for the normal jump
-                        reissueWarp(clientId, cs);
-                        cs.setWarpStartTime(LocalDateTime.now());
+                        cs.setWarpRetryCount(0);
+                        redockOrBubbleEscape(clientId, cs, false, "safe-spot warp not engaging after 2 retries");
                         return;
                     }
 
@@ -4703,37 +4752,7 @@ public class ClientManager {
 
         if (warpGone) {
             if (cs.isDockingToStation()) {
-                cs.setDockingToStation(false);
-                // Faction kernite run docks route differently than normal mission docks.
-                if (cs.getFactionLeg() == ClientState.FactionLeg.TO_SOE) {
-                    log(clientId, "WARPING[FACTION]: docked at SOE station after " + elapsed + "s — transitioning to FACTION_COMPLETING.");
-                    stateManager.setState(clientId, ClientState.State.FACTION_COMPLETING);
-                    return;
-                }
-                if (cs.getFactionLeg() == ClientState.FactionLeg.TO_HOME) {
-                    log(clientId, "WARPING[FACTION]: warp home complete after " + elapsed + "s — waiting for dock confirmation before resuming.");
-                    cs.setFactionLeg(ClientState.FactionLeg.NONE);
-                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
-                    cs.setFactionResumePending(true); // IDLE waits for agent_icon, skips travel-resume meanwhile
-                    stateManager.setState(clientId, ClientState.State.IDLE);
-                    return;
-                }
-                log(clientId, "WARPING: dock warp complete after " + elapsed + "s — transitioning to COMPLETING.");
-                stateManager.setState(clientId, ClientState.State.COMPLETING);
-                // Check once for the agent icon before yielding — we may already be in station with
-                // the icon loaded, in which case keep focus and let COMPLETING run next tick.
-                if (missionProcessor.detectCompletingUI() != null) {
-                    log(clientId, "COMPLETING: agent icon already visible — holding focus to complete now.");
-                    return;
-                }
-                // The agent icon can take a while to appear after docking (station UI load).
-                // Hand the foreground to the other client meanwhile rather than spinning on the
-                // wait — the watchdog brings focus back here once it's time to complete.
-                ClientWindowInfo docked = findOtherClient(clientId);
-                if (docked != null) {
-                    log(clientId, "COMPLETING: docked — switching focus to " + docked.getClientId() + " while the agent icon loads.");
-                    bringToForeground(docked);
-                }
+                finishDockArrival(clientId, cs, "warp complete after " + elapsed + "s");
                 return;
             }
             log(clientId, "WARPING: warp_active gone after " + elapsed + "s — transitioning to IDLE.");

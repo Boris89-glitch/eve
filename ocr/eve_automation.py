@@ -220,6 +220,7 @@ TEMPLATE_FILES = {
     "feed_icon": "feed_icon",                       # feed icon bottom-right — opens the notifications feed
     "kill_report": "kill_report",                   # latest kill report entry in the feed
     "add_corporate_contact": "add_corporate_contact",  # 'Add Corporate Contact' item on the pilot right-click
+    "edit_corp_contact": "edit_corp_contact",       # 'Edit Corporate Contact' on the pilot right-click — already added, skip
     "edit_contact": "edit_contact",                 # 'Edit Contact' — shown instead when pilot is already a contact
     "add_contact_confirm": "add_contact_confirm",   # confirm button in the add-contact dialog
     "standing_bad": "standing_bad",                 # bad (orange) standing option in the add-contact dialog
@@ -1887,12 +1888,33 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         # score — the wrong-colored square can win and we'd click "Terrible" instead of "Bad".
         # Fix: gather ALL same-shape candidates at a lower threshold, then click the one whose
         # region mean-color is closest to the template's own mean color.
+        #
+        # Optional region (x/y/w/h): confine the low-threshold candidate hunt to a screen box.
+        # The 0.6 threshold on a small near-uniform template matches all over a full screen, and
+        # the color pick then grabs ANY similarly-colored UI element (this once clicked the orange
+        # UNDOCK button when the standing dialog wasn't open). Callers that know where the target
+        # lives MUST pass the region.
         template = matcher.templates.get(key)
         if template is None:
             return {"ok": True, "value": False}
         screen = matcher.screenshot_cv()
+        off_x = off_y = 0
+        region = msg.get("region")
+        if region:
+            sh, sw = screen.shape[:2]
+            x0 = max(0, min(int(region["x"]), sw))
+            y0 = max(0, min(int(region["y"]), sh))
+            x1 = max(x0, min(int(region["x"]) + int(region["w"]), sw))
+            y1 = max(y0, min(int(region["y"]) + int(region["h"]), sh))
+            if x1 <= x0 or y1 <= y0:
+                return {"ok": True, "value": False}
+            screen = screen[y0:y1, x0:x1]
+            off_x, off_y = x0, y0
         cand_th = min(0.6, matcher.threshold)
-        cands = matcher.find_all(key, screen=screen, threshold=cand_th)
+        try:
+            cands = matcher.find_all(key, screen=screen, threshold=cand_th)
+        except Exception:
+            cands = []  # crop smaller than template
         if not cands:
             return {"ok": True, "value": False}
         tmpl_mean = template.reshape(-1, template.shape[2]).mean(axis=0)
@@ -1908,9 +1930,10 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         if best is None:
             return {"ok": True, "value": False}
         cx, cy = matcher.center(best)
-        matcher._do_click(cx, cy, button="left", delay=DAEMON_CLICK_DELAY)
-        log.info("click_color '%s': %d candidate(s), chose (%d,%d) color-dist=%.1f",
-                 key, len(cands), cx, cy, best_dist)
+        matcher._do_click(cx + off_x, cy + off_y, button="left", delay=DAEMON_CLICK_DELAY)
+        log.info("click_color '%s': %d candidate(s), chose (%d,%d) color-dist=%.1f%s",
+                 key, len(cands), cx + off_x, cy + off_y, best_dist,
+                 " (region-scoped)" if region else "")
         return {"ok": True, "value": True}
 
     if cmd == "click_pos":
