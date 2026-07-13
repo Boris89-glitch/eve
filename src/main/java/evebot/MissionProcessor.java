@@ -37,12 +37,12 @@ public class MissionProcessor {
     private static final int REDOCK_CONFIRM_TRIES = 12;
     private static final int REDOCK_CONFIRM_INTERVAL_MS = 2000;
 
-    // Agent-standings ("Character: Information") window close "X", fixed at ~638,128 (1600x1000 laptop).
+    // Agent-standings ("Character: Information") window close "X", fixed at ~636,113 (1600x1000 laptop).
     // closeStandingsDialog() matches the close_active_window template ONLY inside this box so it
     // can't hit the hangar / mission-dialog / agent X elsewhere on screen, then falls back to the
     // fixed location if not matched. Box is tight around the X — nothing else lives here.
-    private static final int STANDINGS_CLOSE_X = 638;
-    private static final int STANDINGS_CLOSE_Y = 128;
+    private static final int STANDINGS_CLOSE_X = 636;
+    private static final int STANDINGS_CLOSE_Y = 113;
     private static final int STANDINGS_WINDOW_X = 505;
     private static final int STANDINGS_WINDOW_Y = 60;
     private static final int STANDINGS_WINDOW_W = 210;
@@ -851,7 +851,9 @@ public class MissionProcessor {
     /** OCR-read agent standings from the standings info window. */
     public double readAgentStandings() {
         // Exact value intentionally not logged — OCR misreads it; only low-standings warnings are kept.
-        return ocrBridge.readStandings(300, 410, 100, 55);
+        // Region covers ONLY the first (agent) row of the standings list — a taller box also
+        // catches the corp-standing row below it, and psm 7 single-line OCR fails on two lines.
+        return ocrBridge.readStandings(330, 405, 90, 30);
     }
 
     /**
@@ -1025,18 +1027,18 @@ public class MissionProcessor {
         ocrBridge.clickTemplate(key);
     }
 
-    // Kill Report layout (1920×1200, window locked in a fixed spot). The "Final Blow" pilot name
+    // Kill Report layout (1600x1000 laptop, window locked in a fixed spot). The "Final Blow" pilot name
     // link sits at a stable location; we right-click it to open the pilot context menu. Tune these
     // if your window is positioned differently.
-    private static final int KILLER_CLICK_X = 777;   // right-click target on the Final Blow name
-    private static final int KILLER_CLICK_Y = 559;
-    // Kill-report window close 'X' (~1390,262). The match is region-scoped to a tight box around it
+    private static final int KILLER_CLICK_X = 627;   // right-click target on the Final Blow name
+    private static final int KILLER_CLICK_Y = 319;
+    // Kill-report window close 'X' (~1240,22). The match is region-scoped to a tight box around it
     // so it can't land on the agent-conversation dialog's X above or the inventory/cargo window's X
     // below. Fixed coords are the fallback when the template isn't matched inside the box.
-    private static final int KILL_REPORT_CLOSE_X = 1390;
-    private static final int KILL_REPORT_CLOSE_Y = 262;
-    private static final int KILL_REPORT_CLOSE_BOX_X = 1350;
-    private static final int KILL_REPORT_CLOSE_BOX_Y = 244;
+    private static final int KILL_REPORT_CLOSE_X = 1240;
+    private static final int KILL_REPORT_CLOSE_Y = 22;
+    private static final int KILL_REPORT_CLOSE_BOX_X = 1200;
+    private static final int KILL_REPORT_CLOSE_BOX_Y = 4;
     private static final int KILL_REPORT_CLOSE_BOX_W = 90;
     private static final int KILL_REPORT_CLOSE_BOX_H = 40;
 
@@ -1083,7 +1085,7 @@ public class MissionProcessor {
             clickPos(800, 450);
             sleep(300);
         }
-        closeKillReport(); // close the kill report on its X (~1390,262), scoped away from the other windows
+        closeKillReport(); // close the kill report on its X (~1240,22), scoped away from the other windows
         return null;
     }
 
@@ -1151,7 +1153,7 @@ public class MissionProcessor {
     }
 
     /**
-     * Close the kill report window on its X (~1390,262). Matches the close template ONLY inside a
+     * Close the kill report window on its X (~1240,22). Matches the close template ONLY inside a
      * tight box around that X so it can't hit the agent-conversation dialog's X above it or the
      * inventory/cargo window's X below it. Falls back to the fixed coordinate on a template miss.
      */

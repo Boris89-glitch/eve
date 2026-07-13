@@ -294,6 +294,11 @@ def main():
             # Re-invert to get black text on white background for Tesseract
             img_cv = cv2.bitwise_not(img_cv)
             processed = Image.fromarray(img_cv)
+            # Debug dumps: keep the last capture around so a bad region/threshold can be tuned
+            debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
+            os.makedirs(debug_dir, exist_ok=True)
+            image.save(os.path.join(debug_dir, "standings_capture.png"))
+            processed.save(os.path.join(debug_dir, "standings_processed.png"))
             config = r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789.-"
             raw = pytesseract.image_to_string(processed, config=config).strip()
             # Parse the first float-like value from OCR output
@@ -301,6 +306,8 @@ def main():
             if match:
                 print(json.dumps({"standings": float(match.group()), "raw": raw}))
             else:
+                # Full screenshot on failure — shows whether the standings window was open at all
+                pyautogui.screenshot().save(os.path.join(debug_dir, "standings_fullscreen.png"))
                 print(json.dumps({"error": f"Could not parse standings from: {raw}"}))
         except Exception as e:
             print(json.dumps({"error": str(e)}))
