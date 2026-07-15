@@ -1148,6 +1148,17 @@ def find_ship_with_scroll(
     if match:
         return match
 
+    # The hangar list must have focus for the mouse wheel to scroll it. Click any
+    # ship icon that's on screen (any ship_* template) to put the list in focus.
+    for key in matcher.templates:
+        if key.startswith("ship_") and key != "ship_hangar":
+            any_ship = matcher.find(key)
+            if any_ship:
+                acx, acy = matcher.center(any_ship)
+                log.info("Clicking ship icon '%s' at (%d,%d) to focus hangar list before scrolling.", key, acx, acy)
+                matcher._do_click(acx, acy, button="left", delay=0.3)
+                break
+
     sx, sy = HANGAR_SCROLL_XY
     scrolled = 0
     MAX_SCROLL_STEPS = 2  # a bit down to check below the first row
