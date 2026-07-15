@@ -40,6 +40,11 @@ public class ClientManager {
     /** Counts agent-refresh attempts for a stale COMPLETED dialog with no mission on record (past
      *  the first check). Bounds the double-click-agent refresh so it can't spin forever. */
     private final Map<String, Integer>          staleCompletedRetries = new ConcurrentHashMap<>();
+    /** Counts DECLINING ticks where the request for a new mission produced no offer. After a couple
+     *  of these we probe the dialog for an accidentally-accepted mission (the decline click landed on
+     *  accept) and quit it — otherwise Request Mission is a no-op while a mission is active and this
+     *  loops forever. */
+    private final Map<String, Integer>          declineNoOfferRetries = new ConcurrentHashMap<>();
 
     /** Prevents concurrent monitorClients executions when the thread pool queues up ticks. */
     private final AtomicBoolean monitorRunning = new AtomicBoolean(false);
@@ -79,8 +84,9 @@ public class ClientManager {
     private static final int  STANDINGS_RECHECK_DECLINES = 4;
     /** Global watchdog: if no client switch has happened for this many seconds and a second
      *  client exists, force a switch so the idle client cannot sit AFK in space (and get podded)
-     *  while the foreground client is busy in a long combat. */
-    private static final long FORCE_SWITCH_SECS         = 120;
+     *  while the foreground client is busy in a long combat. 130s (not 120s) so a full pod /
+     *  self-destruct death+respawn animation completes before the watchdog can interrupt it. */
+    private static final long FORCE_SWITCH_SECS         = 130;
     /** When the foreground client is warping and the OTHER client is ALSO warping, hold focus
      *  on the current one for this many seconds before switching, instead of ping-ponging every
      *  poll. Neither has anything to do mid-warp, so a longer hold just looks more natural. */
@@ -173,7 +179,15 @@ public class ClientManager {
             // (e.g. a long combat that never yields), force a switch so the idle client gets a
             // tick and cannot sit AFK in space until podded. bringToForeground resets the timer.
             long sinceSwitch = Duration.between(lastClientSwitch, LocalDateTime.now()).getSeconds();
-            if (sinceSwitch >= FORCE_SWITCH_SECS) {
+            if (sinceSwitch >= FORCE_SWITCH_SECS
+                    && stateManager.getStateEnum(fg.getClientId()) == ClientState.State.UNDOCKING) {
+                // Never yank focus mid-undock. Switching away leaves the undock animation to finish
+                // in the background; when focus returns the ship HUD is still rendering, isFlyingPod()
+                // false-positives, and we redock + quit a mission we actually have a ship for. Let the
+                // undock complete on this client — reset the timer so the watchdog re-arms afterwards.
+                log("[ClientManager] Force-switch watchdog held: " + fg.getClientId() + " is UNDOCKING — not interrupting the undock animation.");
+                lastClientSwitch = LocalDateTime.now();
+            } else if (sinceSwitch >= FORCE_SWITCH_SECS) {
                 ClientWindowInfo other = findOtherClient(fg.getClientId());
                 if (other != null) {
                     log("[ClientManager] Force-switch watchdog: " + sinceSwitch + "s without a switch — handing foreground to " + other.getClientId() + ".");
@@ -524,6 +538,9 @@ public class ClientManager {
         // a kill right by the station reads as ~2) we wait out the full cooldown before doing so;
         // deeper out we set a zero cooldown so the very next tick expires and quits/re-picks now.
         cs.setPendingKillReportAdd(true);
+        // Clear the travel phase (same reason as the in-combat branch): we're docked now, so a later
+        // IDLE tick with TO_MISSION + agent_icon would read the station agent as another pod death.
+        cs.setTravelPhase(ClientState.TravelPhase.NONE);
         if (jumps <= 2) {
             LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
             stateManager.setPodCooldownEnd(cooldownEnd);
@@ -1035,9 +1052,14 @@ public class ClientManager {
         // Standard mission dialog logic.
         MissionProcessor.DialogState dialogState = missionProcessor.detectDialog();
 
-        // First agent-dialog evaluation of this run? Only then is a COMPLETED dialog with no
-        // accepted mission trusted as a real leftover to turn in (see the COMPLETED case).
-        boolean firstDialogCheck = agentDialogChecked.add(clientId);
+        // First time this run we actually SEE an agent mission dialog? Only then is a COMPLETED /
+        // NOT_COMPLETE dialog with no accepted mission on record trusted as a real leftover from a
+        // previous session (turn it in / recover it). Consume the flag only on a non-NONE state —
+        // a NONE tick means the agent conversation isn't open yet (typical on the very first tick
+        // after a restart), and burning "first" there leaves the real leftover mission — which
+        // appears a tick or two later — mis-classified as stale and stuck.
+        boolean firstDialogCheck = dialogState != MissionProcessor.DialogState.NONE
+                && agentDialogChecked.add(clientId);
 
         switch (dialogState) {
             case NONE: {
@@ -1111,6 +1133,18 @@ public class ClientManager {
                 // weren't detected this tick) — don't assume it's accepted. Hand to
                 // CHECKING_MISSIONS, which re-scans/classifies the offer (or returns to IDLE).
                 if (stateManager.getState(clientId).getCurrentMission() == null) {
+                    // First agent-dialog sighting of the run with NOT_COMPLETE and no mission on
+                    // record: this is a genuine in-progress mission left over from a previous session
+                    // (bot restarted mid-mission), not a flaky fresh-offer misread. Hand to CHECKING_
+                    // MISSIONS in recovery mode so it OCRs the title and flies it, rather than bouncing
+                    // it as "unaccepted".
+                    if (firstDialogCheck) {
+                        log(clientId, "NOT_COMPLETE on the first agent-dialog check with no mission on record — treating as a leftover in-progress mission from a previous session, recovering via CHECKING_MISSIONS.");
+                        notCompleteRetries.put(clientId, 0);
+                        stateManager.getState(clientId).setAllowNotCompleteRecovery(true);
+                        stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                        break;
+                    }
                     // This can wedge into an IDLE<->CHECKING_MISSIONS loop when the agent window
                     // is showing a stale 'not_complete' that CHECKING can't classify. After a few
                     // bounces, double-click the agent icon to reset the conversation/dialog.
@@ -1428,8 +1462,12 @@ public class ClientManager {
      * was offered, and lock the faction agent for the rest of the session.
      */
     private void parkEvolution(String clientId, ClientState cs, String where) {
-        log(clientId, where + ": 'Evolution' offered — never decline, leaving it for manual handling, closing dialog and locking faction agent for the session.");
+        log(clientId, where + ": 'Evolution' offered — never decline, pressing Delay to defer it (leaves it intact for manual handling), closing dialog and locking faction agent for the session.");
         EventLog.log("FACTION_EVOLUTION", clientId + " — Evolution offered, faction agent locked for session");
+        // Press 'Delay' first: it clears the offer out of the agent dialog without declining,
+        // so IDLE's next detectDialog() no longer re-sees OFFER and bounces us straight back
+        // into CHECKING_MISSIONS -> parkEvolution forever. Then close the (now offer-less) window.
+        missionProcessor.clickTemplate("delay");
         missionProcessor.clickTemplate("close");
         cs.setFactionLocked(true);
         stateManager.setState(clientId, ClientState.State.IDLE);
@@ -1482,9 +1520,29 @@ public class ClientManager {
             // low. Check here too: otherwise this request/retry loop spins forever
             // without ever re-entering CHECKING_MISSIONS where the other check lives.
             if (parkIfStandingsRefused(clientId, stateManager.getState(clientId), "DECLINING")) return;
+
+            // Accidental accept: the "decline" click can land on Accept, so the mission we meant to
+            // reject is now active. Request Mission is a no-op while a mission is in progress, hence
+            // no new offer ever appears. Probe the dialog after a couple of dry retries — if it shows
+            // an accepted (NOT_COMPLETE / ALREADY_ACCEPTED) mission, quit it and re-check. Bounded so
+            // a genuinely slow agent (offer just late) isn't treated as an accidental accept.
+            int noOffer = declineNoOfferRetries.merge(clientId, 1, Integer::sum);
+            if (noOffer >= 2) {
+                MissionProcessor.DialogState ds = missionProcessor.detectDialog();
+                if (ds == MissionProcessor.DialogState.NOT_COMPLETE
+                        || ds == MissionProcessor.DialogState.ALREADY_ACCEPTED) {
+                    log(clientId, "DECLINING: no new offer and dialog shows an accepted mission — decline likely landed on Accept; quitting the wrong mission and re-checking.");
+                    declineNoOfferRetries.put(clientId, 0);
+                    cs.setCurrentMission(null);
+                    missionProcessor.quitMission();
+                    stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                    return;
+                }
+            }
             log(clientId, "New offer not visible yet — will retry next tick.");
             return;
         }
+        declineNoOfferRetries.put(clientId, 0);
 
         // Leave currentMission null so CHECKING_MISSIONS classifies the new offer
         // via template matching first (OCR only runs if a wanted type matches).
