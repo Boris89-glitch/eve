@@ -558,8 +558,8 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     /** Hardcoded launcher position — fallback when the 'launcher' template can't be located. */
-    private static final int LAUNCHER_X = 902;
-    private static final int LAUNCHER_Y = 820;
+    private static final int LAUNCHER_X = 860;
+    private static final int LAUNCHER_Y = 816;
 
     /**
      * Locate and right-click the launcher module to open its context menu. Tries the 'launcher'
