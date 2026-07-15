@@ -82,6 +82,7 @@ TEMPLATE_FILES = {
     "untrack": "untrack",  # visible when mission is already tracked
     "close_active_window": "close_active_window",
     "close": "close",  # generic close button — clicked once after declining a faction mission
+    "delay": "delay",  # 'Delay' button on a mission offer — defers it without declining (Evolution park)
     "complete_mission": "complete_mission",
     "not_complete": "not_complete",  # mission accepted but not yet completable
     "completed": "completed",  # mission done, ready to turn in
@@ -2050,6 +2051,17 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         match = matcher.find(key)
         if match:
             cx, cy = matcher.center(match)
+            return {"ok": True, "value": "%d,%d" % (cx, cy)}
+        return {"ok": True, "value": None}
+
+    if cmd == "find_pos_top":
+        # Highest match on screen (smallest y), not the best-scoring one: the feed lists
+        # newest first, so with several kill reports stacked the top entry is the latest.
+        matches = matcher.find_all(key)
+        if matches:
+            top = min(matches, key=lambda m: m[1])
+            cx, cy = matcher.center(top)
+            log.info("find_pos_top('%s'): %d matches, picking topmost at (%d,%d)", key, len(matches), cx, cy)
             return {"ok": True, "value": "%d,%d" % (cx, cy)}
         return {"ok": True, "value": None}
 

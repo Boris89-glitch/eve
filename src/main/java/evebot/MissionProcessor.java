@@ -98,32 +98,38 @@ public class MissionProcessor {
         // Check accept/decline first so an offer dialog is never mistaken for ALREADY_ACCEPTED.
         String found = ocrBridge.findAnyTemplate("accept", "decline", "complete_mission");
         if (found == null) {
-            // No dialog buttons — check for completed/not_complete status indicators.
-            String status = ocrBridge.findAnyTemplate("completed", "not_complete");
-            if ("completed".equals(status)) {
-                log("Dialog state: COMPLETED (completed template visible)");
-                return DialogState.COMPLETED;
-            }
+            // No dialog buttons — check status indicators. not_complete FIRST: the tiny 'completed'
+            // checkmark false-matches easily, so if both are 'found' (an in-progress mission whose
+            // objective dot is on screen) we must trust not_complete and never read it as done.
+            String status = ocrBridge.findAnyTemplate("not_complete", "completed");
             if ("not_complete".equals(status)) {
                 log("Dialog state: NOT_COMPLETE (not_complete template visible)");
                 return DialogState.NOT_COMPLETE;
+            }
+            if ("completed".equals(status)) {
+                log("Dialog state: COMPLETED (completed template visible)");
+                return DialogState.COMPLETED;
             }
             log("Dialog state: NONE");
             return DialogState.NONE;
         }
         if ("complete_mission".equals(found)) {
             // complete_mission button visible — check if mission is actually done or still in progress.
-            String status = ocrBridge.findAnyTemplate("completed", "not_complete");
-            if ("completed".equals(status)) {
-                log("Dialog state: COMPLETED (complete_mission + completed visible)");
-                return DialogState.COMPLETED;
-            }
+            // not_complete FIRST so a false 'completed' match can't turn in an unfinished mission.
+            String status = ocrBridge.findAnyTemplate("not_complete", "completed");
             if ("not_complete".equals(status)) {
                 log("Dialog state: NOT_COMPLETE (complete_mission + not_complete visible)");
                 return DialogState.NOT_COMPLETE;
             }
-            log("Dialog state: ALREADY_ACCEPTED (complete_mission only)");
-            return DialogState.ALREADY_ACCEPTED;
+            if ("completed".equals(status)) {
+                log("Dialog state: COMPLETED (complete_mission + completed visible)");
+                return DialogState.COMPLETED;
+            }
+            // complete_mission button visible but neither status icon matched. Never assume "done"
+            // here — a missed 'completed' icon would wrongly turn in an unfinished mission. Only an
+            // actual 'completed' match (above) turns in; treat the ambiguous case as in-progress.
+            log("Dialog state: NOT_COMPLETE (complete_mission only, no status icon matched — not assuming done)");
+            return DialogState.NOT_COMPLETE;
         }
         log("Dialog state: OFFER (" + found + ")");
         return DialogState.OFFER;
@@ -1032,16 +1038,6 @@ public class MissionProcessor {
     // if your window is positioned differently.
     private static final int KILLER_CLICK_X = 627;   // right-click target on the Final Blow name
     private static final int KILLER_CLICK_Y = 319;
-    // Kill-report window close 'X' (~1240,22). The match is region-scoped to a tight box around it
-    // so it can't land on the agent-conversation dialog's X above or the inventory/cargo window's X
-    // below. Fixed coords are the fallback when the template isn't matched inside the box.
-    private static final int KILL_REPORT_CLOSE_X = 1240;
-    private static final int KILL_REPORT_CLOSE_Y = 22;
-    private static final int KILL_REPORT_CLOSE_BOX_X = 1200;
-    private static final int KILL_REPORT_CLOSE_BOX_Y = 4;
-    private static final int KILL_REPORT_CLOSE_BOX_W = 90;
-    private static final int KILL_REPORT_CLOSE_BOX_H = 40;
-
     /**
      * Open the latest Kill Report from the feed and add its Final Blow pilot (the one who podded
      * us) as a Bad (orange) CORPORATE contact, so they show flagged next time. Pure screen
@@ -1105,12 +1101,14 @@ public class MissionProcessor {
         ocrBridge.clickPos(feed[0], feed[1]);
         sleep(700);
 
-        int[] report = ocrBridge.findTemplatePos("kill_report");
+        // The feed lists newest first, so when several kill reports are stacked take the
+        // topmost match — the best-scoring one could be any of them.
+        int[] report = ocrBridge.findTemplatePosTopmost("kill_report");
         if (report == null) {
             log("kill_report entry not found in the feed — no kill report to open. Aborting.");
             return false;
         }
-        log("Clicking the latest kill report (kill_report at " + report[0] + "," + report[1] + ").");
+        log("Clicking the latest kill report (topmost kill_report at " + report[0] + "," + report[1] + ").");
         ocrBridge.clickPos(report[0], report[1]);
         sleep(1300); // let the kill report window open
         return true;
@@ -1153,17 +1151,19 @@ public class MissionProcessor {
     }
 
     /**
-     * Close the kill report window on its X (~1240,22). Matches the close template ONLY inside a
-     * tight box around that X so it can't hit the agent-conversation dialog's X above it or the
-     * inventory/cargo window's X below it. Falls back to the fixed coordinate on a template miss.
+     * Close the kill report on its X, then close the feed window stacked behind it with a second X
+     * click. Both clicks locate the close 'X' by matching the close_active_window template full-screen
+     * (like undock's closeAllDialogs) — the X reliably closes whichever window is on top.
      */
     private void closeKillReport() {
-        if (ocrBridge.clickTemplateInRegion("close_active_window",
-                KILL_REPORT_CLOSE_BOX_X, KILL_REPORT_CLOSE_BOX_Y, KILL_REPORT_CLOSE_BOX_W, KILL_REPORT_CLOSE_BOX_H)) {
-            log("Kill report closed (close 'X' matched in region).");
-        } else {
-            log("Kill-report close 'X' not matched in region — clicking fixed (" + KILL_REPORT_CLOSE_X + "," + KILL_REPORT_CLOSE_Y + ").");
-            clickPos(KILL_REPORT_CLOSE_X, KILL_REPORT_CLOSE_Y);
+        for (int i = 1; i <= 2; i++) {
+            if (ocrBridge.findAnyTemplate("close_active_window") != null) {
+                ocrBridge.clickTemplate("close_active_window");
+                log("Kill-report window " + i + "/2 closed (close 'X' template matched).");
+            } else {
+                log("Kill-report window " + i + "/2: close 'X' template not found.");
+            }
+            sleep(400);
         }
     }
 

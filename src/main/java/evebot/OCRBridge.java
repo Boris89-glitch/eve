@@ -647,8 +647,21 @@ public class OCRBridge {
      * Find a template and return its centre coordinates as {x, y}, or null if not found.
      */
     public int[] findTemplatePos(String key) {
-        dbg("[%s] [" + activeClient + "] findTemplatePos: %s%n", ts(), key);
-        JsonObject c = cmd("find_pos");
+        return findTemplatePos(key, "find_pos");
+    }
+
+    /**
+     * Like findTemplatePos but, when the template matches several times, returns the
+     * highest one on screen (smallest y) instead of the best-scoring one. Used for the
+     * feed, where the newest entry is the top one.
+     */
+    public int[] findTemplatePosTopmost(String key) {
+        return findTemplatePos(key, "find_pos_top");
+    }
+
+    private int[] findTemplatePos(String key, String command) {
+        dbg("[%s] [" + activeClient + "] " + command + ": %s%n", ts(), key);
+        JsonObject c = cmd(command);
         c.addProperty("key", key);
         String result = sendString(c);
         if (result != null && result.contains(",")) {
@@ -656,7 +669,7 @@ public class OCRBridge {
             try {
                 return new int[]{ Integer.parseInt(parts[0]), Integer.parseInt(parts[1]) };
             } catch (NumberFormatException e) {
-                System.err.printf("[%s] [" + activeClient + "] findTemplatePos: bad output '%s'%n", ts(), result);
+                System.err.printf("[%s] [" + activeClient + "] " + command + ": bad output '%s'%n", ts(), result);
             }
         }
         return null;
