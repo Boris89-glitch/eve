@@ -2853,7 +2853,7 @@ public class ClientManager {
      *   1  → Ctrl+click 'target_sansha' (lock) + right-click → 'approach' + press 's'
      *   2  → press 'adxc' (activate modules)
      *   3  → WAIT 4s → right-click target_sansha → click range (keep at range)
-     *   4  → Proceed (keep_at_range template check removed)
+     *   4  → Confirm keep_at_range (nudge to verify); if missing, repeat step 3
      *   5  → WAIT 15s
      *   6  → Shift+ds (stop overloading afterburner + web; reps 'c' never overloaded)
      *   7  → Alt+F1 (burst cap recharge)
@@ -2892,6 +2892,28 @@ public class ClientManager {
                 + n + "/" + COMBAT_TARGET_NUDGE_LIMIT + ", holding step).");
         missionProcessor.nudgeView();
         return null;
+    }
+
+    /**
+     * After clicking "keep at range", confirm the keep_at_range indicator is on screen.
+     * If it isn't, nudge the camera once (forcing a fresh frame) and re-scan to confirm
+     * it's genuinely missing — the same nudge-to-confirm idiom used for completion polling.
+     * Returns true when the indicator is present (range settled), false when it's still
+     * missing after the nudge, so the caller repeats the keep-at-range click.
+     */
+    private boolean confirmKeepAtRange(String clientId, ClientState cs, String combatLabel) {
+        if (missionProcessor.findTemplate("keep_at_range") != null) {
+            log(clientId, "COMBAT[" + combatLabel + "] keep_at_range confirmed — proceeding.");
+            return true;
+        }
+        log(clientId, "COMBAT[" + combatLabel + "] keep_at_range not found — nudging to confirm.");
+        missionProcessor.nudgeView();
+        if (missionProcessor.findTemplate("keep_at_range") != null) {
+            log(clientId, "COMBAT[" + combatLabel + "] keep_at_range confirmed after nudge — proceeding.");
+            return true;
+        }
+        log(clientId, "COMBAT[" + combatLabel + "] keep_at_range still missing after nudge — repeating keep at range.");
+        return false;
     }
 
     private void handleCombatSansha(String clientId, ClientState cs) {
@@ -2939,7 +2961,11 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                // Range settle (keep_at_range template check removed)
+                // Verify keep_at_range engaged; if missing, nudge to confirm and repeat step 3.
+                if (!confirmKeepAtRange(clientId, cs, "Sansha")) {
+                    cs.setCombatStep(3);
+                    return;
+                }
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
@@ -3592,6 +3618,10 @@ public class ClientManager {
                 log(clientId, "COMBAT[Angel] Step 4: right-click " + rangeKey + " → click range.");
                 missionProcessor.rightClickTemplate(rangeKey);
                 missionProcessor.clickTemplate("range");
+                // Verify keep_at_range engaged; if missing, nudge to confirm and re-click next tick.
+                if (!confirmKeepAtRange(clientId, cs, "Angel")) {
+                    return;
+                }
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
