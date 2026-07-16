@@ -1063,8 +1063,7 @@ public class MissionProcessor {
         if (findTemplate("edit_corp_contact") != null) {
             log("edit_corp_contact on the name right-click — already a corporate contact, skipping add.");
             EventLog.log("CONTACT_ADD_SKIPPED", "edit_corp_contact on kill-report right-click — already a corporate contact");
-            clickPos(960, 540); // dismiss the menu (left-click empty space, never Escape)
-            sleep(300);
+            dismissKillerMenu();
         } else if (ocrBridge.waitAndClickTemplate("add_corporate_contact", 2)) {
             log("add_corporate_contact clicked — waiting for the New-Contact dialog.");
             sleep(700);
@@ -1076,8 +1075,7 @@ public class MissionProcessor {
             EventLog.log("CONTACT_ADD_SKIPPED", "add_corporate_contact missing on kill-report right-click — likely already a contact");
             // The context menu may still be open — dismiss it (left-click empty space, never
             // Escape) so the close-X click below hits the report instead of the menu.
-            clickPos(960, 540);
-            sleep(300);
+            dismissKillerMenu();
         }
         closeKillReport(); // close the kill report on its X (~1390,262), scoped away from the other windows
         return null;
@@ -1149,20 +1147,28 @@ public class MissionProcessor {
     }
 
     /**
-     * Close the kill report on its X, then close the feed window stacked behind it with a second X
-     * click. Both clicks locate the close 'X' by matching the close_active_window template full-screen
-     * (like undock's closeAllDialogs) — the X reliably closes whichever window is on top.
+     * Dismiss the Final-Blow context menu with a left-click (never Escape). The menu opens down-right
+     * from the right-click point, so the click goes up-left of it — a fixed mid-screen point lands on
+     * the menu itself and can fire a menu item (it was clicking Add Contact on the skip path).
+     */
+    private void dismissKillerMenu() {
+        clickPos(KILLER_CLICK_X - 250, KILLER_CLICK_Y - 120);
+        sleep(300);
+    }
+
+    /**
+     * Close the kill report on its X. The close 'X' is located by matching the close_active_window
+     * template full-screen (like undock's closeAllDialogs) — it closes whichever window is on top,
+     * and the kill report is the only window left once the contact dialog has confirm-closed itself.
      */
     private void closeKillReport() {
-        for (int i = 1; i <= 2; i++) {
-            if (ocrBridge.findAnyTemplate("close_active_window") != null) {
-                ocrBridge.clickTemplate("close_active_window");
-                log("Kill-report window " + i + "/2 closed (close 'X' template matched).");
-            } else {
-                log("Kill-report window " + i + "/2: close 'X' template not found.");
-            }
-            sleep(400);
+        if (ocrBridge.findAnyTemplate("close_active_window") != null) {
+            ocrBridge.clickTemplate("close_active_window");
+            log("Kill report closed (close 'X' template matched).");
+        } else {
+            log("Kill report: close 'X' template not found.");
         }
+        sleep(400);
     }
 
     // -----------------------------------------------------------------------

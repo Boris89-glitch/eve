@@ -82,6 +82,9 @@ public class ClientManager {
     private static final long SCARLET_LOCK_RETRY_SECS  = 2;
     /** Re-read agent standings after this many non-"anomic" declined missions (keeps gating current). */
     private static final int  STANDINGS_RECHECK_DECLINES = 4;
+    /** Consecutive WARPING dock re-issues that found no DOCK button and no station before we
+     *  stop re-issuing and drop the client back to IDLE. */
+    private static final int  DOCK_REISSUE_MISS_LIMIT = 3;
     /** Global watchdog: if no client switch has happened for this many seconds and a second
      *  client exists, force a switch so the idle client cannot sit AFK in space (and get podded)
      *  while the foreground client is busy in a long combat. 130s (not 120s) so a full pod /
@@ -2896,24 +2899,22 @@ public class ClientManager {
 
     /**
      * After clicking "keep at range", confirm the keep_at_range indicator is on screen.
-     * If it isn't, nudge the camera once (forcing a fresh frame) and re-scan to confirm
-     * it's genuinely missing — the same nudge-to-confirm idiom used for completion polling.
-     * Returns true when the indicator is present (range settled), false when it's still
-     * missing after the nudge, so the caller repeats the keep-at-range click.
+     * If it isn't, nudge the camera once (forcing a fresh frame) and re-scan. Either way
+     * combat proceeds — a still-missing indicator is logged and ignored rather than
+     * retried, since repeating the click never recovers it.
      */
-    private boolean confirmKeepAtRange(String clientId, ClientState cs, String combatLabel) {
+    private void confirmKeepAtRange(String clientId, String combatLabel) {
         if (missionProcessor.findTemplate("keep_at_range") != null) {
             log(clientId, "COMBAT[" + combatLabel + "] keep_at_range confirmed — proceeding.");
-            return true;
+            return;
         }
         log(clientId, "COMBAT[" + combatLabel + "] keep_at_range not found — nudging to confirm.");
         missionProcessor.nudgeView();
         if (missionProcessor.findTemplate("keep_at_range") != null) {
             log(clientId, "COMBAT[" + combatLabel + "] keep_at_range confirmed after nudge — proceeding.");
-            return true;
+            return;
         }
-        log(clientId, "COMBAT[" + combatLabel + "] keep_at_range still missing after nudge — repeating keep at range.");
-        return false;
+        log(clientId, "COMBAT[" + combatLabel + "] keep_at_range still missing after nudge — proceeding anyway.");
     }
 
     private void handleCombatSansha(String clientId, ClientState cs) {
@@ -2961,11 +2962,7 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                // Verify keep_at_range engaged; if missing, nudge to confirm and repeat step 3.
-                if (!confirmKeepAtRange(clientId, cs, "Sansha")) {
-                    cs.setCombatStep(3);
-                    return;
-                }
+                confirmKeepAtRange(clientId, "Sansha");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
@@ -3618,10 +3615,7 @@ public class ClientManager {
                 log(clientId, "COMBAT[Angel] Step 4: right-click " + rangeKey + " → click range.");
                 missionProcessor.rightClickTemplate(rangeKey);
                 missionProcessor.clickTemplate("range");
-                // Verify keep_at_range engaged; if missing, nudge to confirm and re-click next tick.
-                if (!confirmKeepAtRange(clientId, cs, "Angel")) {
-                    return;
-                }
+                confirmKeepAtRange(clientId, "Angel");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
@@ -4360,7 +4354,15 @@ public class ClientManager {
             // click silently no-ops when the button isn't on screen — that used to log a
             // "Clicking DOCK" success and then drop us into a bogus bubble escape with no bubble.
             log(clientId, "WARPING: re-issuing DOCK (button, station backup).");
-            new Thread(() -> missionProcessor.dockWithStationBackup()).start();
+            // Count re-issues that found nothing to click, so a screen with no DOCK button and no
+            // station can't spin here forever (redockOrBubbleEscape drops to IDLE at the cap).
+            new Thread(() -> {
+                if (missionProcessor.dockWithStationBackup()) {
+                    cs.setDockReissueMissCount(0);
+                } else {
+                    cs.setDockReissueMissCount(cs.getDockReissueMissCount() + 1);
+                }
+            }).start();
         } else if (missionProcessor.findTemplate("stargate") != null) {
             log(clientId, "WARPING: re-issuing gate jump.");
             new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
@@ -4494,6 +4496,18 @@ public class ClientManager {
             if (missionProcessor.isFlyingPod()) {
                 log(clientId, "WARPING: " + why + " while docking — podded in space, self-destructing.");
                 handlePodDeath(clientId, true);
+                return;
+            }
+            // Nothing to click for several re-issues running: handleWarping's retry and this branch
+            // re-issue each other (each resetting warpRetryCount), so without a cap this loops for
+            // good. Hand back to IDLE — the travel phase is kept, so it docks once DOCK renders.
+            if (cs.getDockReissueMissCount() >= DOCK_REISSUE_MISS_LIMIT) {
+                log(clientId, "WARPING: " + why + " while docking — no DOCK button or station for "
+                        + DOCK_REISSUE_MISS_LIMIT + " re-issues; dropping to IDLE to re-evaluate.");
+                cs.setDockReissueMissCount(0);
+                cs.setDockingToStation(false);
+                cs.setWarpRetryCount(0);
+                stateManager.setState(clientId, ClientState.State.IDLE);
                 return;
             }
             log(clientId, "WARPING: " + why + " while docking — re-issuing dock and waiting it out (no bubble escape).");
