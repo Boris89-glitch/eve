@@ -82,6 +82,9 @@ public class ClientManager {
     private static final long SCARLET_LOCK_RETRY_SECS  = 2;
     /** Re-read agent standings after this many non-"anomic" declined missions (keeps gating current). */
     private static final int  STANDINGS_RECHECK_DECLINES = 4;
+    /** Consecutive WARPING dock re-issues that found no DOCK button and no station before we
+     *  stop re-issuing and drop the client back to IDLE. */
+    private static final int  DOCK_REISSUE_MISS_LIMIT = 3;
     /** Global watchdog: if no client switch has happened for this many seconds and a second
      *  client exists, force a switch so the idle client cannot sit AFK in space (and get podded)
      *  while the foreground client is busy in a long combat. 130s (not 120s) so a full pod /
@@ -319,7 +322,7 @@ public class ClientManager {
     // POD_COOLDOWN — wait for global 10-minute cooldown after a pod death.
     // -----------------------------------------------------------------------
 
-    private static final int POD_COOLDOWN_MINUTES = 7;
+    private static final int POD_COOLDOWN_MINUTES = 12;
 
     /** Insta-dock attempts (dock warp never engaging) before we stop retrying and dock directly
      *  (DOCK button / right-click station → Dock). */
@@ -558,7 +561,7 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     /** Hardcoded launcher position — fallback when the 'launcher' template can't be located. */
-    private static final int LAUNCHER_X = 860;
+    private static final int LAUNCHER_X = 840;
     private static final int LAUNCHER_Y = 816;
 
     /**
@@ -2896,24 +2899,22 @@ public class ClientManager {
 
     /**
      * After clicking "keep at range", confirm the keep_at_range indicator is on screen.
-     * If it isn't, nudge the camera once (forcing a fresh frame) and re-scan to confirm
-     * it's genuinely missing — the same nudge-to-confirm idiom used for completion polling.
-     * Returns true when the indicator is present (range settled), false when it's still
-     * missing after the nudge, so the caller repeats the keep-at-range click.
+     * If it isn't, nudge the camera once (forcing a fresh frame) and re-scan. Either way
+     * combat proceeds — a still-missing indicator is logged and ignored rather than
+     * retried, since repeating the click never recovers it.
      */
-    private boolean confirmKeepAtRange(String clientId, ClientState cs, String combatLabel) {
+    private void confirmKeepAtRange(String clientId, String combatLabel) {
         if (missionProcessor.findTemplate("keep_at_range") != null) {
             log(clientId, "COMBAT[" + combatLabel + "] keep_at_range confirmed — proceeding.");
-            return true;
+            return;
         }
         log(clientId, "COMBAT[" + combatLabel + "] keep_at_range not found — nudging to confirm.");
         missionProcessor.nudgeView();
         if (missionProcessor.findTemplate("keep_at_range") != null) {
             log(clientId, "COMBAT[" + combatLabel + "] keep_at_range confirmed after nudge — proceeding.");
-            return true;
+            return;
         }
-        log(clientId, "COMBAT[" + combatLabel + "] keep_at_range still missing after nudge — repeating keep at range.");
-        return false;
+        log(clientId, "COMBAT[" + combatLabel + "] keep_at_range still missing after nudge — proceeding anyway.");
     }
 
     private void handleCombatSansha(String clientId, ClientState cs) {
@@ -2961,11 +2962,7 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                // Verify keep_at_range engaged; if missing, nudge to confirm and repeat step 3.
-                if (!confirmKeepAtRange(clientId, cs, "Sansha")) {
-                    cs.setCombatStep(3);
-                    return;
-                }
+                confirmKeepAtRange(clientId, "Sansha");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
@@ -3618,10 +3615,7 @@ public class ClientManager {
                 log(clientId, "COMBAT[Angel] Step 4: right-click " + rangeKey + " → click range.");
                 missionProcessor.rightClickTemplate(rangeKey);
                 missionProcessor.clickTemplate("range");
-                // Verify keep_at_range engaged; if missing, nudge to confirm and re-click next tick.
-                if (!confirmKeepAtRange(clientId, cs, "Angel")) {
-                    return;
-                }
+                confirmKeepAtRange(clientId, "Angel");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
@@ -3996,6 +3990,25 @@ public class ClientManager {
             return;
         }
 
+        // The other client hit a bubble/gate camp and triggered the global pod cooldown while we
+        // were mid-mission. We've now finished and turned this one in — don't undock into the same
+        // danger for the next mission. Enter POD_COOLDOWN and wait out whatever remains of the
+        // shared window (normal post-completion path is COMPLETING → CHECKING_MISSIONS, which never
+        // passes the IDLE cooldown gate, so the check has to happen here).
+        LocalDateTime podEnd = stateManager.getPodCooldownEnd();
+        if (podEnd != null && LocalDateTime.now().isBefore(podEnd)) {
+            long remaining = Duration.between(LocalDateTime.now(), podEnd).getSeconds();
+            log(clientId, "COMPLETING: mission turned in but global pod cooldown active ("
+                    + (remaining / 60) + "m " + (remaining % 60) + "s) — entering POD_COOLDOWN before next mission.");
+            stateManager.getState(clientId).setCurrentMission(null);
+            stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) {
+                bringToForeground(other);
+            }
+            return;
+        }
+
         // Request next mission immediately and go to CHECKING_MISSIONS
         // instead of IDLE — avoids stale complete_mission being misdetected.
         missionProcessor.clickRequestMission();
@@ -4360,7 +4373,15 @@ public class ClientManager {
             // click silently no-ops when the button isn't on screen — that used to log a
             // "Clicking DOCK" success and then drop us into a bogus bubble escape with no bubble.
             log(clientId, "WARPING: re-issuing DOCK (button, station backup).");
-            new Thread(() -> missionProcessor.dockWithStationBackup()).start();
+            // Count re-issues that found nothing to click, so a screen with no DOCK button and no
+            // station can't spin here forever (redockOrBubbleEscape drops to IDLE at the cap).
+            new Thread(() -> {
+                if (missionProcessor.dockWithStationBackup()) {
+                    cs.setDockReissueMissCount(0);
+                } else {
+                    cs.setDockReissueMissCount(cs.getDockReissueMissCount() + 1);
+                }
+            }).start();
         } else if (missionProcessor.findTemplate("stargate") != null) {
             log(clientId, "WARPING: re-issuing gate jump.");
             new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
@@ -4447,7 +4468,20 @@ public class ClientManager {
      * the cooldown. Only non-docking warps (safe-spot / travel) fall through to the bubble escape.
      */
     private void redockOrBubbleEscape(String clientId, ClientState cs, boolean held, String why) {
-        if (missionProcessor.findTemplate("home_station") != null) {
+        boolean stationInReach = missionProcessor.findTemplate("home_station") != null;
+        boolean returningHome = cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME;
+
+        // Returning home to deliver the mission: the home station is the destination, not an
+        // emergency. There is no "emergency redock" here — we just need to dock, which turns in
+        // the mission. Route straight into the docking block (agent_icon → finish; else re-issue
+        // the dock and wait) so a stuck warp keeps docking instead of parking the client.
+        if (stationInReach && returningHome) {
+            if (!cs.isDockingToStation()) {
+                log(clientId, "WARPING: " + why + " while returning home — station in reach, docking to deliver (no emergency redock).");
+                cs.setDockingToStation(true);
+            }
+            // fall through to the docking block below
+        } else if (stationInReach) {
             log(clientId, "WARPING: " + why + " — station in reach, emergency redock!");
             if (missionProcessor.emergencyRedock()) {
                 LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
@@ -4494,6 +4528,18 @@ public class ClientManager {
             if (missionProcessor.isFlyingPod()) {
                 log(clientId, "WARPING: " + why + " while docking — podded in space, self-destructing.");
                 handlePodDeath(clientId, true);
+                return;
+            }
+            // Nothing to click for several re-issues running: handleWarping's retry and this branch
+            // re-issue each other (each resetting warpRetryCount), so without a cap this loops for
+            // good. Hand back to IDLE — the travel phase is kept, so it docks once DOCK renders.
+            if (cs.getDockReissueMissCount() >= DOCK_REISSUE_MISS_LIMIT) {
+                log(clientId, "WARPING: " + why + " while docking — no DOCK button or station for "
+                        + DOCK_REISSUE_MISS_LIMIT + " re-issues; dropping to IDLE to re-evaluate.");
+                cs.setDockReissueMissCount(0);
+                cs.setDockingToStation(false);
+                cs.setWarpRetryCount(0);
+                stateManager.setState(clientId, ClientState.State.IDLE);
                 return;
             }
             log(clientId, "WARPING: " + why + " while docking — re-issuing dock and waiting it out (no bubble escape).");

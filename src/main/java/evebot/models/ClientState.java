@@ -111,6 +111,11 @@ public class ClientState {
      *  (bubble present or warp_active not showing). Reset on entering WARPING. */
     private int warpRetryCount = 0;
 
+    /** Consecutive dock re-issues in WARPING where no DOCK button or station was on screen, so
+     *  nothing was actually clicked. Reset on entering WARPING and whenever a dock does get
+     *  issued; at the cap the client drops to IDLE instead of re-issuing forever. */
+    private int dockReissueMissCount = 0;
+
     /** Consecutive insta-dock attempts where the dock warp never engaged. Counted in IDLE
      *  while re-trying the insta-dock; once it hits the cap the caller falls back to a direct
      *  dock. Reset on entering WARPING (i.e. once we commit to a dock/warp). */
@@ -361,6 +366,7 @@ public class ClientState {
             this.bubbleEscapeStart = LocalDateTime.MIN;
             this.bubbleEscapeAttempts = 0;
             this.warpRetryCount = 0;
+            this.dockReissueMissCount = 0;
             this.instaDockMissCount = 0;
             this.safeSpotWarp = false; // evade entries re-set this true after setState(WARPING)
         }
@@ -496,6 +502,9 @@ public class ClientState {
 
     public int  getWarpRetryCount()         { return warpRetryCount; }
     public void setWarpRetryCount(int v)    { this.warpRetryCount = v; }
+
+    public int  getDockReissueMissCount()      { return dockReissueMissCount; }
+    public void setDockReissueMissCount(int v) { this.dockReissueMissCount = v; }
 
     public int  getInstaDockMissCount()      { return instaDockMissCount; }
     public void setInstaDockMissCount(int v) { this.instaDockMissCount = v; }
