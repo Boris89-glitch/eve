@@ -232,7 +232,7 @@ TEMPLATE_FILES = {
 # Fixed screen position of the "Ship Hangar" station-services button. Used as a
 # last-resort click when the ship_hangar template can't be matched (stale image,
 # occlusion, or an unusual post-respawn layout).
-HANGAR_FALLBACK_XY = (160, 717)
+HANGAR_FALLBACK_XY = (380, 680)
 
 # Point over the ship-hangar item list to place the cursor when mouse-wheel
 # scrolling the hangar to reveal ships below the first row. Tune to your layout.
@@ -1316,7 +1316,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
         )
         # Dismiss the stale context menu (left-click empty space, never Escape) so the
         # next right-click lands on the ship icon and not on the menu already covering it.
-        matcher._do_click(800, 450, button="left", delay=0.3)
+        matcher._do_click(960, 540, button="left", delay=0.3)
         # No repair menu means the right-click isn't hitting a real ship — most likely the
         # Ship Hangar is closed and step 0's match was a false positive (there is no ship at
         # those coords). Open the hangar (once) and re-locate the ship before retrying.
@@ -1364,7 +1364,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
             MAX_REPAIR_ATTEMPTS,
         )
         # Clear any stale context menu first so the right-click hits the ship icon.
-        matcher._do_click(800, 450, button="left", delay=0.3)
+        matcher._do_click(960, 540, button="left", delay=0.3)
         matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
         matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6)
 
@@ -2085,7 +2085,7 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         #
         # Stage 2 (active): the sliver may false-miss mid-combat (e.g. an overheated
         # module changes its look). So if the sliver is MISSING, right-click the
-        # ship/capsule HUD at fixed coordinates (610,760) and look for the "Eject"
+        # ship/capsule HUD at fixed coordinates (770,860) and look for the "Eject"
         # menu item — offered only from a ship. (The "capsule" HUD template was
         # unreliable, so we probe the fixed location directly instead.) If Eject is
         # present we're still in a ship; if it's missing, we've been podded. After the
@@ -2097,14 +2097,14 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
             if matcher.find(sliver, screen=sliver_screen) is not None:
                 log.info("pod_check: '%s' sliver visible -> in a ship (skip eject probe)", sliver)
                 return {"ok": True, "value": False}  # module sliver visible → in a ship
-        px, py = 610, 760
+        px, py = 770, 860
         log.info("pod_check: no_ship/no_ship2 slivers MISSING -> right-click (%d,%d), confirm via eject", px, py)
         matcher._do_click(px, py, button="right", delay=0.3)
         time.sleep(0.3)
         eject_found = matcher.find("eject") is not None
         # Dismiss the menu by clicking away in empty space (screen centre), with a small
         # settle delay so the menu is gone before combat resumes.
-        matcher._do_click(800, 450, button="left", delay=0.3)
+        matcher._do_click(960, 540, button="left", delay=0.3)
         log.info("pod_check: eject %s -> verdict %s",
                  "found (in ship)" if eject_found else "MISSING (podded)",
                  "IN SHIP" if eject_found else "PODDED")

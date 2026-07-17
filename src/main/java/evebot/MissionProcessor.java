@@ -37,14 +37,14 @@ public class MissionProcessor {
     private static final int REDOCK_CONFIRM_TRIES = 12;
     private static final int REDOCK_CONFIRM_INTERVAL_MS = 2000;
 
-    // Agent-standings ("Character: Information") window close "X", fixed at ~636,113 (1600x1000 laptop).
+    // Agent-standings ("Character: Information") window close "X", fixed at ~632,208 (1920x1200).
     // closeStandingsDialog() matches the close_active_window template ONLY inside this box so it
     // can't hit the hangar / mission-dialog / agent X elsewhere on screen, then falls back to the
     // fixed location if not matched. Box is tight around the X — nothing else lives here.
-    private static final int STANDINGS_CLOSE_X = 636;
-    private static final int STANDINGS_CLOSE_Y = 113;
-    private static final int STANDINGS_WINDOW_X = 505;
-    private static final int STANDINGS_WINDOW_Y = 60;
+    private static final int STANDINGS_CLOSE_X = 632;
+    private static final int STANDINGS_CLOSE_Y = 208;
+    private static final int STANDINGS_WINDOW_X = 500;
+    private static final int STANDINGS_WINDOW_Y = 140;
     private static final int STANDINGS_WINDOW_W = 210;
     private static final int STANDINGS_WINDOW_H = 130;
 
@@ -485,7 +485,7 @@ public class MissionProcessor {
         // active selection, then ctrl+click again to make sure the lock takes.
         log("Ctrl+clicking template (lock, double-tap): " + key);
         ocrBridge.ctrlClickTemplate(key);
-        ocrBridge.clickPos(800, 450);   // swift click away in the middle (empty space)
+        ocrBridge.clickPos(960, 540);   // swift click away in the middle (empty space)
         ocrBridge.ctrlClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }
@@ -537,7 +537,7 @@ public class MissionProcessor {
      */
     public void nudgeView() {
         log("Nudging view (camera drag) to refresh frame");
-        ocrBridge.dragPos(800, 450, 40, 0);
+        ocrBridge.dragPos(960, 540, 40, 0);
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -738,7 +738,7 @@ public class MissionProcessor {
      */
     public InstaDockResult instaDock() {
         log("INSTA-DOCK: enemy in local — using safe dock sequence");
-        ocrBridge.rightClickPos(800, 250);   // right-click above centre (avoid clicking the ship)
+        ocrBridge.rightClickPos(960, 300);   // right-click above centre (avoid clicking the ship)
         sleep(800);
         // If Locations isn't in the menu but the dock/station is clearly on screen, the
         // right-click likely landed on the ship or a stale frame. Nudge the camera to refresh
@@ -749,7 +749,7 @@ public class MissionProcessor {
                 attempt++) {
             log("INSTA-DOCK: Locations not in menu but dock/station visible — nudge + retry right-click (" + attempt + "/2).");
             nudgeView();
-            ocrBridge.rightClickPos(800, 250);
+            ocrBridge.rightClickPos(960, 300);
             sleep(800);
         }
         ocrBridge.hoverTemplate("locations"); // hover Locations submenu
@@ -794,7 +794,7 @@ public class MissionProcessor {
             log("SAFE-SPOT: enemy in local but no jcv_next/kly_next found");
             return false;
         }
-        ocrBridge.rightClickPos(800, 250);   // right-click above centre (avoid clicking the ship)
+        ocrBridge.rightClickPos(960, 300);   // right-click above centre (avoid clicking the ship)
         sleep(800);
         ocrBridge.hoverTemplate("locations"); // hover Locations submenu
         sleep(800);
@@ -812,7 +812,7 @@ public class MissionProcessor {
      */
     public boolean warpToGenericSafeSpot() {
         log("SAFE-SPOT: enemy in local — warping to safe spot via Locations");
-        ocrBridge.rightClickPos(800, 250);   // right-click above centre (avoid clicking the ship)
+        ocrBridge.rightClickPos(960, 300);   // right-click above centre (avoid clicking the ship)
         sleep(300);
         ocrBridge.hoverTemplate("locations");
         sleep(300);
@@ -868,7 +868,7 @@ public class MissionProcessor {
         // Exact value intentionally not logged — OCR misreads it; only low-standings warnings are kept.
         // Region covers ONLY the first (agent) row of the standings list — a taller box also
         // catches the corp-standing row below it, and psm 7 single-line OCR fails on two lines.
-        return ocrBridge.readStandings(330, 405, 90, 30);
+        return ocrBridge.readStandings(300, 490, 100, 55);
     }
 
     /**
@@ -1047,11 +1047,11 @@ public class MissionProcessor {
         return ocrBridge.waitForTemplateGone(key, timeoutSeconds);
     }
 
-    // Kill Report layout (1600x1000 laptop, window locked in a fixed spot). The "Final Blow" pilot name
+    // Kill Report layout (1920×1200, window locked in a fixed spot). The "Final Blow" pilot name
     // link sits at a stable location; we right-click it to open the pilot context menu. Tune these
     // if your window is positioned differently.
-    private static final int KILLER_CLICK_X = 627;   // right-click target on the Final Blow name
-    private static final int KILLER_CLICK_Y = 319;
+    private static final int KILLER_CLICK_X = 777;   // right-click target on the Final Blow name
+    private static final int KILLER_CLICK_Y = 559;
     /**
      * Open the latest Kill Report from the feed and add its Final Blow pilot (the one who podded
      * us) as a Bad (orange) CORPORATE contact, so they show flagged next time. Pure screen
@@ -1093,7 +1093,7 @@ public class MissionProcessor {
             // Escape) so the close-X click below hits the report instead of the menu.
             dismissKillerMenu();
         }
-        closeKillReport(); // close the kill report on its X (~1240,22), scoped away from the other windows
+        closeKillReport(); // close the kill report on its X (~1390,262), scoped away from the other windows
         return null;
     }
 
