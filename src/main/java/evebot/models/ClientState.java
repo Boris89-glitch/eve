@@ -217,6 +217,10 @@ public class ClientState {
     /** True after set_destination was clicked — verify it's gone after the first jump (else re-click). */
     private boolean verifySetDest = false;
 
+    /** Re-route re-clicks attempted this leg (jump-count / drift safety nets). Bounded so a
+     *  set_destination prompt that never clears can't spin the poll loop forever. */
+    private int reRouteAttempts = 0;
+
     /** Set when set_destination was missed on undock and re-clicked one jump late: the route now
      *  points back 1 jump, so the next gate jump lands on top of the gate and shows no warp tunnel.
      *  WARPING skips warp_active verification for that jump (press 's', switch client, 15s safe wait,
@@ -586,6 +590,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isVerifySetDest()           { return verifySetDest; }
     public void    setVerifySetDest(boolean v) { this.verifySetDest = v; }
+
+    public int  getReRouteAttempts()        { return reRouteAttempts; }
+    public void setReRouteAttempts(int v)   { this.reRouteAttempts = v; }
 
     public boolean isSimplifyNextWarp()           { return simplifyNextWarp; }
     public void    setSimplifyNextWarp(boolean v) { this.simplifyNextWarp = v; }

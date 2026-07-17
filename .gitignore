@@ -45,3 +45,5 @@ __pycache__/
 config/bot_state.json
 /.claude/worktrees/exciting-dirac/
 /.claude/worktrees/lucid-taussig/
+events.log
+config/standings.json

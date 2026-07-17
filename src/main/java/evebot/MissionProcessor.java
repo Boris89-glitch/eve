@@ -167,12 +167,21 @@ public class MissionProcessor {
     }
 
     /**
-     * Non-blocking accept: click immediately, treat "not found" as already accepted.
+     * Click Accept and confirm it took: the accept button must be gone afterwards.
+     * Retries once if it's still on screen. Returns false if the offer is still up.
      */
-    public void clickAcceptButton() {
-        log("Clicking ACCEPT (non-blocking — not found = already accepted)");
-        ocrBridge.clickTemplate("accept");
-        sleep(POST_CLICK_DELAY_MS);
+    public boolean clickAcceptButton() {
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            log("Clicking ACCEPT (attempt " + attempt + ")");
+            ocrBridge.clickTemplate("accept");
+            sleep(POST_CLICK_DELAY_MS);
+            if (ocrBridge.waitForTemplateGone("accept", 3)) {
+                log("ACCEPT confirmed — accept button gone.");
+                return true;
+            }
+            log("ACCEPT not confirmed — accept button still visible.");
+        }
+        return false;
     }
 
     public void clickDeclineButton() {
@@ -1031,6 +1040,11 @@ public class MissionProcessor {
     /** Generic left-click on any registered template. */
     public void clickTemplate(String key) {
         ocrBridge.clickTemplate(key);
+    }
+
+    /** True once the template is no longer on screen (waits up to timeoutSeconds). */
+    public boolean waitForTemplateGone(String key, int timeoutSeconds) {
+        return ocrBridge.waitForTemplateGone(key, timeoutSeconds);
     }
 
     // Kill Report layout (1600x1000 laptop, window locked in a fixed spot). The "Final Blow" pilot name
