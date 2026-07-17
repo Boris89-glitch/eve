@@ -67,7 +67,36 @@ log = logging.getLogger("eve_automation")
 TEMPLATES_DIR = SCRIPT_DIR.parent / "templates"
 RULES_FILE = SCRIPT_DIR / "config" / "mission_rules.json"
 SHIP_MAP_FILE = SCRIPT_DIR / "config" / "ship_mission_map.json"
-COORDS_FILE = SCRIPT_DIR.parent / "mission_coordinates.json"
+# Per-machine screen layout. layout.json is gitignored (one per machine); the checked-in
+# layout.example.json is the desktop layout and the fallback. The Java side reads the same
+# file (see Layout.java) — no resolution-specific coordinates live in the code.
+LAYOUT_FILE = SCRIPT_DIR.parent / "config" / "layout.json"
+LAYOUT_EXAMPLE_FILE = SCRIPT_DIR.parent / "config" / "layout.example.json"
+
+
+def _load_layout() -> dict:
+    for path in (LAYOUT_FILE, LAYOUT_EXAMPLE_FILE):
+        if path.exists():
+            try:
+                with open(path) as f:
+                    return json.load(f)
+            except Exception as exc:  # noqa: BLE001 — bad JSON must not kill the daemon
+                log.error("layout: error reading %s: %s", path, exc)
+    log.error("layout: no config/layout.json — copy config/layout.example.json and tune it.")
+    return {}
+
+
+LAYOUT = _load_layout()
+
+
+def layout_point(key: str, dx: int, dy: int) -> Tuple[int, int]:
+    p = LAYOUT.get(key) or {}
+    return (p.get("x", dx), p.get("y", dy))
+
+
+def layout_rect(key: str, dx: int, dy: int, dw: int, dh: int) -> Tuple[int, int, int, int]:
+    r = LAYOUT.get(key) or {}
+    return (r.get("x", dx), r.get("y", dy), r.get("width", dw), r.get("height", dh))
 
 # -----------------------------------------------------------------------------
 # Template registry  (key -> filename without extension)
@@ -232,11 +261,17 @@ TEMPLATE_FILES = {
 # Fixed screen position of the "Ship Hangar" station-services button. Used as a
 # last-resort click when the ship_hangar template can't be matched (stale image,
 # occlusion, or an unusual post-respawn layout).
-HANGAR_FALLBACK_XY = (160, 717)
+HANGAR_FALLBACK_XY = layout_point("hangar_fallback", 380, 680)
 
 # Point over the ship-hangar item list to place the cursor when mouse-wheel
-# scrolling the hangar to reveal ships below the first row. Tune to your layout.
-HANGAR_SCROLL_XY = (600, 450)
+# scrolling the hangar to reveal ships below the first row.
+HANGAR_SCROLL_XY = layout_point("hangar_scroll", 800, 500)
+
+# Empty space in the middle of the screen — left-click here to dismiss context menus.
+EMPTY_SPACE_XY = layout_point("empty_space", 960, 540)
+
+# Ship/capsule HUD probe point for the pod check (right-click → look for "Eject").
+POD_CHECK_HUD_XY = layout_point("pod_check_hud", 770, 860)
 
 # Maps mission dialog template keys → ship template keys.
 # Checked in order; first match wins.
@@ -1100,17 +1135,7 @@ class RuleEngine:
 
 
 def load_mission_area() -> Tuple[int, int, int, int]:
-    if COORDS_FILE.exists():
-        with open(COORDS_FILE) as f:
-            data = json.load(f)
-        area = data.get("mission_area", {})
-        return (
-            area.get("x", 440),
-            area.get("y", 92),
-            area.get("width", 988),
-            area.get("height", 336),
-        )
-    return (440, 92, 988, 336)
+    return layout_rect("mission_area", 440, 92, 988, 336)
 
 
 # -----------------------------------------------------------------------------
@@ -1316,7 +1341,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
         )
         # Dismiss the stale context menu (left-click empty space, never Escape) so the
         # next right-click lands on the ship icon and not on the menu already covering it.
-        matcher._do_click(800, 450, button="left", delay=0.3)
+        matcher._do_click(*EMPTY_SPACE_XY, button="left", delay=0.3)
         # No repair menu means the right-click isn't hitting a real ship — most likely the
         # Ship Hangar is closed and step 0's match was a false positive (there is no ship at
         # those coords). Open the hangar (once) and re-locate the ship before retrying.
@@ -1364,7 +1389,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
             MAX_REPAIR_ATTEMPTS,
         )
         # Clear any stale context menu first so the right-click hits the ship icon.
-        matcher._do_click(800, 450, button="left", delay=0.3)
+        matcher._do_click(*EMPTY_SPACE_XY, button="left", delay=0.3)
         matcher._do_click(ship_cx, ship_cy, button="right", delay=0.8)
         matcher.wait_and_click("get_repair_quote", timeout=2.0, delay=0.6)
 
@@ -1651,8 +1676,8 @@ def cmd_check(threshold: float):
     area = load_mission_area()
     print(f"  x={area[0]} y={area[1]} w={area[2]} h={area[3]}")
     print(
-        f"  Coords file: {COORDS_FILE}  "
-        f"({'exists' if COORDS_FILE.exists() else 'NOT FOUND — using defaults'})"
+        f"  Layout file: {LAYOUT_FILE}  "
+        f"({'exists' if LAYOUT_FILE.exists() else 'NOT FOUND — falling back to layout.example.json'})"
     )
     print("\n=== Rules ===")
     rules = RuleEngine(RULES_FILE)
@@ -2085,7 +2110,7 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         #
         # Stage 2 (active): the sliver may false-miss mid-combat (e.g. an overheated
         # module changes its look). So if the sliver is MISSING, right-click the
-        # ship/capsule HUD at fixed coordinates (610,760) and look for the "Eject"
+        # ship/capsule HUD at its configured point and look for the "Eject"
         # menu item — offered only from a ship. (The "capsule" HUD template was
         # unreliable, so we probe the fixed location directly instead.) If Eject is
         # present we're still in a ship; if it's missing, we've been podded. After the
@@ -2097,14 +2122,14 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
             if matcher.find(sliver, screen=sliver_screen) is not None:
                 log.info("pod_check: '%s' sliver visible -> in a ship (skip eject probe)", sliver)
                 return {"ok": True, "value": False}  # module sliver visible → in a ship
-        px, py = 610, 760
+        px, py = POD_CHECK_HUD_XY
         log.info("pod_check: no_ship/no_ship2 slivers MISSING -> right-click (%d,%d), confirm via eject", px, py)
         matcher._do_click(px, py, button="right", delay=0.3)
         time.sleep(0.3)
         eject_found = matcher.find("eject") is not None
         # Dismiss the menu by clicking away in empty space (screen centre), with a small
         # settle delay so the menu is gone before combat resumes.
-        matcher._do_click(800, 450, button="left", delay=0.3)
+        matcher._do_click(*EMPTY_SPACE_XY, button="left", delay=0.3)
         log.info("pod_check: eject %s -> verdict %s",
                  "found (in ship)" if eject_found else "MISSING (podded)",
                  "IN SHIP" if eject_found else "PODDED")

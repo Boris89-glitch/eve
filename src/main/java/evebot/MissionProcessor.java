@@ -37,16 +37,10 @@ public class MissionProcessor {
     private static final int REDOCK_CONFIRM_TRIES = 12;
     private static final int REDOCK_CONFIRM_INTERVAL_MS = 2000;
 
-    // Agent-standings ("Character: Information") window close "X", fixed at ~636,113 (1600x1000 laptop).
-    // closeStandingsDialog() matches the close_active_window template ONLY inside this box so it
-    // can't hit the hangar / mission-dialog / agent X elsewhere on screen, then falls back to the
-    // fixed location if not matched. Box is tight around the X — nothing else lives here.
-    private static final int STANDINGS_CLOSE_X = 636;
-    private static final int STANDINGS_CLOSE_Y = 113;
-    private static final int STANDINGS_WINDOW_X = 505;
-    private static final int STANDINGS_WINDOW_Y = 60;
-    private static final int STANDINGS_WINDOW_W = 210;
-    private static final int STANDINGS_WINDOW_H = 130;
+    // Agent-standings ("Character: Information") window close "X" (Layout.standingsClose()).
+    // closeStandingsDialog() matches the close_active_window template ONLY inside
+    // Layout.standingsWindow() so it can't hit the hangar / mission-dialog / agent X elsewhere on
+    // screen, then falls back to the fixed location if not matched. Box is tight around the X.
 
     public MissionProcessor() {
         this.ocrBridge = new OCRBridge();
@@ -485,7 +479,7 @@ public class MissionProcessor {
         // active selection, then ctrl+click again to make sure the lock takes.
         log("Ctrl+clicking template (lock, double-tap): " + key);
         ocrBridge.ctrlClickTemplate(key);
-        ocrBridge.clickPos(800, 450);   // swift click away in the middle (empty space)
+        clickEmptySpace();   // swift click away in the middle (empty space)
         ocrBridge.ctrlClickTemplate(key);
         sleep(POST_CLICK_DELAY_MS);
     }
@@ -524,6 +518,18 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    /** Left-click empty space in the middle of the screen — dismisses context menus (never Escape). */
+    public void clickEmptySpace() {
+        Point p = Layout.emptySpace();
+        clickPos(p.x, p.y);
+    }
+
+    /** Right-click empty space above centre — avoids right-clicking our own ship. */
+    public void rightClickAboveShip() {
+        Point p = Layout.spaceAboveShip();
+        ocrBridge.rightClickPos(p.x, p.y);
+    }
+
     public void clickPos(int x, int y) {
         log("Left-clicking at (" + x + "," + y + ")");
         ocrBridge.clickPos(x, y);
@@ -537,7 +543,8 @@ public class MissionProcessor {
      */
     public void nudgeView() {
         log("Nudging view (camera drag) to refresh frame");
-        ocrBridge.dragPos(800, 450, 40, 0);
+        Point p = Layout.emptySpace();
+        ocrBridge.dragPos(p.x, p.y, 40, 0);
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -738,7 +745,7 @@ public class MissionProcessor {
      */
     public InstaDockResult instaDock() {
         log("INSTA-DOCK: enemy in local — using safe dock sequence");
-        ocrBridge.rightClickPos(800, 250);   // right-click above centre (avoid clicking the ship)
+        rightClickAboveShip();   // right-click above centre (avoid clicking the ship)
         sleep(800);
         // If Locations isn't in the menu but the dock/station is clearly on screen, the
         // right-click likely landed on the ship or a stale frame. Nudge the camera to refresh
@@ -749,7 +756,7 @@ public class MissionProcessor {
                 attempt++) {
             log("INSTA-DOCK: Locations not in menu but dock/station visible — nudge + retry right-click (" + attempt + "/2).");
             nudgeView();
-            ocrBridge.rightClickPos(800, 250);
+            rightClickAboveShip();
             sleep(800);
         }
         ocrBridge.hoverTemplate("locations"); // hover Locations submenu
@@ -794,7 +801,7 @@ public class MissionProcessor {
             log("SAFE-SPOT: enemy in local but no jcv_next/kly_next found");
             return false;
         }
-        ocrBridge.rightClickPos(800, 250);   // right-click above centre (avoid clicking the ship)
+        rightClickAboveShip();   // right-click above centre (avoid clicking the ship)
         sleep(800);
         ocrBridge.hoverTemplate("locations"); // hover Locations submenu
         sleep(800);
@@ -812,7 +819,7 @@ public class MissionProcessor {
      */
     public boolean warpToGenericSafeSpot() {
         log("SAFE-SPOT: enemy in local — warping to safe spot via Locations");
-        ocrBridge.rightClickPos(800, 250);   // right-click above centre (avoid clicking the ship)
+        rightClickAboveShip();   // right-click above centre (avoid clicking the ship)
         sleep(300);
         ocrBridge.hoverTemplate("locations");
         sleep(300);
@@ -868,7 +875,8 @@ public class MissionProcessor {
         // Exact value intentionally not logged — OCR misreads it; only low-standings warnings are kept.
         // Region covers ONLY the first (agent) row of the standings list — a taller box also
         // catches the corp-standing row below it, and psm 7 single-line OCR fails on two lines.
-        return ocrBridge.readStandings(330, 405, 90, 30);
+        Rectangle r = Layout.standingsOcr();
+        return ocrBridge.readStandings(r.x, r.y, r.width, r.height);
     }
 
     /**
@@ -878,12 +886,13 @@ public class MissionProcessor {
      */
     public void closeStandingsDialog() {
         log("Closing agent standings window (region-scoped close, fixed-location fallback)");
+        Rectangle box = Layout.standingsWindow();
         boolean closed = ocrBridge.clickTemplateInRegion("close_active_window",
-                STANDINGS_WINDOW_X, STANDINGS_WINDOW_Y,
-                STANDINGS_WINDOW_W, STANDINGS_WINDOW_H);
+                box.x, box.y, box.width, box.height);
         if (!closed) {
-            log("Close 'X' not matched in region — clicking fixed location " + STANDINGS_CLOSE_X + "," + STANDINGS_CLOSE_Y);
-            ocrBridge.clickPos(STANDINGS_CLOSE_X, STANDINGS_CLOSE_Y);
+            Point x = Layout.standingsClose();
+            log("Close 'X' not matched in region — clicking fixed location " + x.x + "," + x.y);
+            ocrBridge.clickPos(x.x, x.y);
         }
         sleep(POST_CLICK_DELAY_MS);
     }
@@ -1047,11 +1056,8 @@ public class MissionProcessor {
         return ocrBridge.waitForTemplateGone(key, timeoutSeconds);
     }
 
-    // Kill Report layout (1600x1000 laptop, window locked in a fixed spot). The "Final Blow" pilot name
-    // link sits at a stable location; we right-click it to open the pilot context menu. Tune these
-    // if your window is positioned differently.
-    private static final int KILLER_CLICK_X = 627;   // right-click target on the Final Blow name
-    private static final int KILLER_CLICK_Y = 319;
+    // Kill Report layout (window locked in a fixed spot). The "Final Blow" pilot name link sits at a
+    // stable location (Layout.killerClick()); we right-click it to open the pilot context menu.
     /**
      * Open the latest Kill Report from the feed and add its Final Blow pilot (the one who podded
      * us) as a Bad (orange) CORPORATE contact, so they show flagged next time. Pure screen
@@ -1074,7 +1080,8 @@ public class MissionProcessor {
 
         // 2. Right-click the Final Blow name. If the menu shows Edit Corporate Contact the pilot
         //    is already added — skip. Otherwise, if it offers Add Corporate Contact, use it.
-        rightClickPos(KILLER_CLICK_X, KILLER_CLICK_Y);
+        Point killer = Layout.killerClick();
+        rightClickPos(killer.x, killer.y);
         sleep(500);
         if (findTemplate("edit_corp_contact") != null) {
             log("edit_corp_contact on the name right-click — already a corporate contact, skipping add.");
@@ -1168,7 +1175,8 @@ public class MissionProcessor {
      * the menu itself and can fire a menu item (it was clicking Add Contact on the skip path).
      */
     private void dismissKillerMenu() {
-        clickPos(KILLER_CLICK_X - 250, KILLER_CLICK_Y - 120);
+        Point killer = Layout.killerClick();
+        clickPos(killer.x - 250, killer.y - 120);
         sleep(300);
     }
 

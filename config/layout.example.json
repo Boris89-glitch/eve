@@ -1,0 +1,21 @@
+{
+  "_comment": "Per-machine screen layout. Copy to config/layout.json and tune for your resolution; layout.json is gitignored so each machine keeps its own. Values below are the 1920x1200 desktop layout.",
+  "screen": "1920x1200 desktop",
+
+  "mission_area":     { "x": 440, "y": 92,  "width": 988, "height": 336 },
+
+  "empty_space":      { "x": 960, "y": 540 },
+  "space_above_ship": { "x": 960, "y": 300 },
+
+  "launcher":         { "x": 1093, "y": 1028 },
+
+  "standings_close":  { "x": 632, "y": 208 },
+  "standings_window": { "x": 500, "y": 140, "width": 210, "height": 130 },
+  "standings_ocr":    { "x": 300, "y": 490, "width": 100, "height": 55 },
+
+  "killer_click":     { "x": 777, "y": 559 },
+
+  "hangar_fallback":  { "x": 380, "y": 680 },
+  "hangar_scroll":    { "x": 800, "y": 500 },
+  "pod_check_hud":    { "x": 770, "y": 860 }
+}

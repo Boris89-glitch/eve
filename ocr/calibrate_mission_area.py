@@ -2,7 +2,26 @@
 import tkinter as tk
 import pyautogui
 import json
+from pathlib import Path
 from PIL import Image, ImageTk
+
+# This machine's screen layout (gitignored). Everything calibrated here is written into it;
+# config/layout.example.json is the checked-in template. Java and Python both read layout.json.
+LAYOUT_FILE = Path(__file__).resolve().parent.parent / "config" / "layout.json"
+
+
+def _load_layout_file() -> dict:
+    try:
+        with open(LAYOUT_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def _save_layout_file(data: dict) -> None:
+    LAYOUT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(LAYOUT_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 
 class CalibrationTool:
@@ -159,12 +178,8 @@ class CalibrationTool:
         r, g, b = self._picked_rgb
         sx, sy = self._picked_screen_pos
 
-        # Load existing coordinates file so we can append to it
-        try:
-            with open("mission_coordinates.json", "r") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
+        # Load this machine's layout file so we can append to it
+        data = _load_layout_file()
 
         data["dialog_detector"] = {
             "screen_x": sx,
@@ -174,13 +189,12 @@ class CalibrationTool:
             "comment": "Pixel colour check — red warning text in mission dialog",
         }
 
-        with open("mission_coordinates.json", "w") as f:
-            json.dump(data, f, indent=2)
+        _save_layout_file(data)
 
         self.result_text.insert(
             1.0,
             f"Saved detector: screen=({sx},{sy}) RGB=({r},{g},{b}) HEX=#{r:02X}{g:02X}{b:02X}\n"
-            f"Written to mission_coordinates.json\n",
+            f"Written to {LAYOUT_FILE}\n",
         )
 
     # ------------------------------------------------------------------
@@ -212,11 +226,7 @@ class CalibrationTool:
     # ------------------------------------------------------------------
 
     def save_coordinates(self):
-        try:
-            with open("mission_coordinates.json", "r") as f:
-                data = json.load(f)
-        except Exception:
-            data = {}
+        data = _load_layout_file()
 
         data["mission_area"] = {
             "x": self.x.get(),
@@ -225,10 +235,9 @@ class CalibrationTool:
             "height": self.height.get(),
         }
 
-        with open("mission_coordinates.json", "w") as f:
-            json.dump(data, f, indent=2)
+        _save_layout_file(data)
 
-        self.result_text.insert(1.0, "Coordinates saved to mission_coordinates.json\n")
+        self.result_text.insert(1.0, f"Coordinates saved to {LAYOUT_FILE}\n")
 
     def run(self):
         self.root.mainloop()

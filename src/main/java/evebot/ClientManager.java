@@ -5,6 +5,7 @@ import com.google.gson.JsonObject;
 import evebot.models.ClientState;
 import evebot.models.Mission;
 
+import java.awt.Point;
 import java.awt.Rectangle;
 import java.nio.file.*;
 import java.time.Duration;
@@ -129,34 +130,7 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void loadCalibratedCoordinates() {
-        List<Path> candidates = List.of(
-                Paths.get("config", "mission_coordinates.json"),
-                Paths.get("mission_coordinates.json")
-        );
-        for (Path path : candidates) {
-            if (Files.exists(path)) {
-                try {
-                    String content = new String(Files.readAllBytes(path));
-                    JsonObject json = gson.fromJson(content, JsonObject.class);
-                    JsonObject missionArea = json.getAsJsonObject("mission_area");
-                    if (missionArea != null) {
-                        Rectangle defaultRect = new Rectangle(
-                                missionArea.get("x").getAsInt(),
-                                missionArea.get("y").getAsInt(),
-                                missionArea.get("width").getAsInt(),
-                                missionArea.get("height").getAsInt()
-                        );
-                        clientMissionAreas.put("default", defaultRect);
-                        System.out.println("[ClientManager] Loaded coordinates from " + path);
-                        return;
-                    }
-                } catch (Exception e) {
-                    System.err.println("[ClientManager] Error reading coordinates: " + e.getMessage());
-                }
-            }
-        }
-        log("[ClientManager] No coordinate file found — using hardcoded defaults.");
-        clientMissionAreas.put("default", new Rectangle(230, 40, 870, 280));
+        clientMissionAreas.put("default", Layout.missionArea());
     }
 
     // -----------------------------------------------------------------------
@@ -563,10 +537,6 @@ public class ClientManager {
     // IDLE
     // -----------------------------------------------------------------------
 
-    /** Hardcoded launcher position — fallback when the 'launcher' template can't be located. */
-    private static final int LAUNCHER_X = 860;
-    private static final int LAUNCHER_Y = 816;
-
     /**
      * Locate and right-click the launcher module to open its context menu. Tries the 'launcher'
      * template once, falling back to the hardcoded position if it isn't matched.
@@ -576,8 +546,9 @@ public class ClientManager {
         if (pos != null) {
             missionProcessor.rightClickPos(pos[0], pos[1]);
         } else {
-            log(clientId, "launcher template not found — using hardcoded pos (" + LAUNCHER_X + "," + LAUNCHER_Y + ").");
-            missionProcessor.rightClickPos(LAUNCHER_X, LAUNCHER_Y);
+            Point l = Layout.launcher();
+            log(clientId, "launcher template not found — using configured pos (" + l.x + "," + l.y + ").");
+            missionProcessor.rightClickPos(l.x, l.y);
         }
     }
 
@@ -729,7 +700,7 @@ public class ClientManager {
                             stateManager.setState(clientId, ClientState.State.IN_COMBAT);
                             new Thread(() -> {
                                 missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
-                                missionProcessor.clickPos(800, 450); // click away in space to clear the menu
+                                missionProcessor.clickEmptySpace(); // click away in space to clear the menu
                             }).start();
                             break;
                         case "warp_to_location":
@@ -822,7 +793,7 @@ public class ClientManager {
                     stateManager.setState(clientId, ClientState.State.IN_COMBAT);
                     new Thread(() -> {
                         missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
-                        missionProcessor.clickPos(800, 450); // click away in space to clear the menu
+                        missionProcessor.clickEmptySpace(); // click away in space to clear the menu
                     }).start();
                     break;
                 case "warp_to_location":
@@ -1811,7 +1782,7 @@ public class ClientManager {
                     + retries + ").");
             new Thread(() -> {
                 missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
-                missionProcessor.clickPos(800, 450); // click away in space to clear the menu
+                missionProcessor.clickEmptySpace(); // click away in space to clear the menu
             }).start();
             cs.setWarpStartTime(LocalDateTime.now());       // restart the 5s grace
             cs.setLastWarpCheck(LocalDateTime.MIN);          // next poll is a fresh first check
@@ -1875,7 +1846,7 @@ public class ClientManager {
         // focus off a potential chat/other window, so combat key presses land in the game.
         if (!cs.isCombatFocusClicked()) {
             log(clientId, "IN_COMBAT: focus-away click in space (centre) before combat.");
-            missionProcessor.clickPos(800, 450);
+            missionProcessor.clickEmptySpace();
             cs.setCombatFocusClicked(true);
         }
         switch (target) {
@@ -3286,7 +3257,7 @@ public class ClientManager {
                 if (missionProcessor.findTemplate("jamed") != null) {
                     log(clientId, "COMBAT[Infested] JAMED — double-click stargate, click away to mid, press 's' to burn away.");
                     missionProcessor.doubleClickTemplate("stargate");
-                    missionProcessor.clickPos(800, 450); // click away in space to clear the menu
+                    missionProcessor.clickEmptySpace(); // click away in space to clear the menu
                     missionProcessor.keyPress("s");
                     cs.setCombatWaitStart(LocalDateTime.now());
                     cs.setCombatStep(8);
@@ -3713,7 +3684,7 @@ public class ClientManager {
                 // Completion is usually detected on the first tick after focus switches back to
                 // this client (thumbnail click), and a key press can be dropped before the game
                 // window has keyboard focus. Click empty space first to ensure focus lands, then press.
-                missionProcessor.clickPos(800, 450);
+                missionProcessor.clickEmptySpace();
                 missionProcessor.keyPress("xc");
                 // Re-detect: dock = same system, set_destination = different system
                 String result = missionProcessor.detectCombatComplete();
@@ -4786,7 +4757,7 @@ public class ClientManager {
                         break;
                     }
                     case 3: {
-                        missionProcessor.clickPos(800, 450); // dismiss the double-click tooltip
+                        missionProcessor.clickEmptySpace(); // dismiss the double-click tooltip
                         boolean jumped = false;
                         for (int attempt = 1; attempt <= 3; attempt++) {
                             missionProcessor.rightClickTemplate("stargate");
@@ -5104,8 +5075,7 @@ public class ClientManager {
         } catch (Exception e) {
             // JNA unavailable or enumeration failed — use stub for single-client testing
             if (clientWindows.isEmpty()) {
-                Rectangle defaultArea = clientMissionAreas.getOrDefault("default",
-                        new Rectangle(230, 40, 870, 280));
+                Rectangle defaultArea = clientMissionAreas.getOrDefault("default", Layout.missionArea());
                 ClientWindowInfo stub = new ClientWindowInfo(
                         "EVE - Character Name", "ExeFile", 0L,
                         defaultArea.x, defaultArea.y,

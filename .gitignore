@@ -47,3 +47,4 @@ config/bot_state.json
 /.claude/worktrees/lucid-taussig/
 events.log
 config/standings.json
+config/layout.json

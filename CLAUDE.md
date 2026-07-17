@@ -20,6 +20,7 @@ EVE Online mission automation. Java drives bot logic + window management; Python
 - Poll loop: `monitorClients()` every 500ms; only the **foreground** EVE client is processed each tick
 
 ## Config & Data
+- `config/layout.json` — **per-machine screen coordinates** (gitignored; copy `config/layout.example.json` and calibrate). Java reads it via `Layout.java`, Python via `LAYOUT`/`layout_point`/`layout_rect` in `eve_automation.py`. Never hardcode resolution-specific coordinates — add a key here instead, so machines differ only in config.
 - `config/mission_rules.json` — accept/decline rules
 - `config/faction_decline.json` — faction declines
 - `ocr/config/ship_mission_map.json` — OCR keyword → ship template mapping
