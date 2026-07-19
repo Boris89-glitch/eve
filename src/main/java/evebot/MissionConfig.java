@@ -241,8 +241,12 @@ public class MissionConfig {
         String comment = "unnamed rule";
 
         boolean matches(Mission m) {
+            // The title line does not always survive OCR (it can wrap, or merge with the
+            // "Objectives" header), so fall back to the raw dialog text — same as
+            // location_contains does. The keyword is specific enough not to false-positive.
             if (titleContains != null
-                    && !safe(m.getTitle()).contains(titleContains.toLowerCase()))
+                    && !safe(m.getTitle()).contains(titleContains.toLowerCase())
+                    && !safe(m.getRawText()).contains(titleContains.toLowerCase()))
                 return false;
             if (targetContains != null
                     && !safe(m.getTarget()).contains(targetContains.toLowerCase()))
