@@ -1150,9 +1150,11 @@ def load_mission_area() -> Tuple[int, int, int, int]:
 # Route info panel OCR
 # -----------------------------------------------------------------------------
 
-# Waypoint line: system name then its security status — "L-TSBS -0.2 < YS-GOP < Pure Blind".
-# The OCR whitelist drops the '<' separators and reads 0 as O/@, hence the loose sec-status class.
-_WAYPOINT_RE = re.compile(r"^([A-Za-z0-9]{1,6}(?:-[A-Za-z0-9]{1,6})?)\s*-?\s*[0-9O@]\s*[.,]\s*[0-9]")
+# A waypoint row reads "L-TSBS -0.2 < YS-GOP < Pure Blind" (system, security, constellation,
+# region). The security status drops out of the OCR often enough that it can't be required, so a
+# row is recognised by its '<' separators or a sec-status, and the system is its first name token.
+_WAYPOINT_ROW_RE = re.compile(r"[<«]|[0-9O@]\s*[.,]\s*[0-9]")
+_SYSTEM_RE = re.compile(r"([A-Za-z0-9]{1,6}-[A-Za-z0-9]{1,6}|[A-Za-z]{3,8})")
 _JUMPS_WORD_RE = re.compile(r"ump", re.IGNORECASE)
 
 
@@ -1177,10 +1179,15 @@ def read_route_panel(img: "Image.Image") -> dict:
     text = pytesseract.image_to_string(gray, config=cfg).strip()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # The route list is in travel order, so the destination is its last entry.
+    # The route list is in travel order, so the destination is its last entry. Stop at the
+    # Opportunities section below it — its body text names systems the same way.
     destination = None
     for line in lines:
-        m = _WAYPOINT_RE.match(line)
+        if "pportun" in line:
+            break
+        if not _WAYPOINT_ROW_RE.search(line):
+            continue
+        m = _SYSTEM_RE.search(line)
         if m:
             destination = m.group(1)
 
