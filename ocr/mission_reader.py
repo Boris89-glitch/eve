@@ -188,7 +188,13 @@ class EVEMissionReader:
         # e.g. "laraMesi AnomicAgentObjectives" — the title is embedded in this line.
         for i, line in enumerate(lines):
             if re.search(r"objectives?\s*\.?\s*$", line, re.I):
-                title = self.extract_title_from_line(line)
+                # A bare "Objective" line (the header wrapped onto its own line) carries no
+                # title — extracting from it yields "", which would masquerade as a real
+                # title and make every rule miss. Keep looking in that case.
+                candidate = self.extract_title_from_line(line)
+                if not candidate:
+                    continue
+                title = candidate
                 anchor_idx = i
                 break
 
