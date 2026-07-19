@@ -20,6 +20,7 @@ Called from Java OCRBridge via:
 
 import sys
 import os
+import re
 import json
 import time
 import logging
@@ -127,6 +128,7 @@ TEMPLATE_FILES = {
     "ship_hangar": "ship_hangar",
     # Travel / returning
     "set_destination": "set_destination",
+    "destination_set": "destination_set",   # route confirmation — shown once the destination took
     "stargate": "stargate",
     "warp_to_location": "warp_to_location",
     "activate_gate": "activate_gate",
@@ -485,9 +487,15 @@ class TemplateMatcher:
         key: str,
         screen: Optional[np.ndarray] = None,
         threshold: Optional[float] = None,
+        nms_scale: float = 0.5,
     ) -> list[Tuple[int, int, int, int]]:
         """Return list of (x, y, w, h) for ALL matches above threshold.
-        Uses non-max suppression to avoid overlapping detections."""
+        Uses non-max suppression to avoid overlapping detections.
+
+        nms_scale sets how far apart two matches must be to count as distinct, as a
+        fraction of the template size. The 0.5 default keeps adjacent overview rows
+        separate; pass 1.0 when counting rows, so a single row that matches twice at
+        slightly different offsets isn't counted as two ships."""
         template = self.templates.get(key)
         if template is None:
             log.debug("Template '%s' not loaded — skipping.", key)
@@ -509,10 +517,10 @@ class TemplateMatcher:
         candidates.sort(key=lambda c: c[4], reverse=True)
         kept: list[Tuple[int, int, int, int]] = []
         for cx, cy, cw, ch, conf in candidates:
-            # Skip if too close to an already-kept match (within half template size)
+            # Skip if too close to an already-kept match (within nms_scale × template size)
             too_close = False
             for kx, ky, kw, kh in kept:
-                if abs(cx - kx) < cw * 0.5 and abs(cy - ky) < ch * 0.5:
+                if abs(cx - kx) < cw * nms_scale and abs(cy - ky) < ch * nms_scale:
                     too_close = True
                     break
             if not too_close:
@@ -1139,6 +1147,66 @@ def load_mission_area() -> Tuple[int, int, int, int]:
 
 
 # -----------------------------------------------------------------------------
+# Route info panel OCR
+# -----------------------------------------------------------------------------
+
+# Waypoint line: system name then its security status — "L-TSBS -0.2 < YS-GOP < Pure Blind".
+# The OCR whitelist drops the '<' separators and reads 0 as O/@, hence the loose sec-status class.
+_WAYPOINT_RE = re.compile(r"^([A-Za-z0-9]{1,6}(?:-[A-Za-z0-9]{1,6})?)\s*-?\s*[0-9O@]\s*[.,]\s*[0-9]")
+_JUMPS_WORD_RE = re.compile(r"ump", re.IGNORECASE)
+
+
+def read_route_panel(img: "Image.Image") -> dict:
+    """
+    Read the info-panel Route section: {route_set, jumps, destination, raw}.
+
+    The jump count is rendered in a much smaller, thinner font than the rest of the
+    header — at panel scale tesseract reliably turns it into punctuation ("Route 4 Jumps"
+    -> "Route <<< Jumps"). So it is read in two stages: OCR the header to locate the
+    "Jumps" word, then re-OCR just the gap to its left, upscaled, digits only.
+
+    route_set is the confirmation signal and does NOT depend on the digit surviving.
+    """
+    import pytesseract
+    from PIL import ImageEnhance
+
+    big = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+    gray = ImageEnhance.Contrast(big.convert("L")).enhance(2.0)
+    cfg = r"--oem 3 --psm 6"
+
+    text = pytesseract.image_to_string(gray, config=cfg).strip()
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+
+    # The route list is in travel order, so the destination is its last entry.
+    destination = None
+    for line in lines:
+        m = _WAYPOINT_RE.match(line)
+        if m:
+            destination = m.group(1)
+
+    data = pytesseract.image_to_data(gray, config=cfg, output_type=pytesseract.Output.DICT)
+    jumps, route_set = -1, destination is not None
+    for i, word in enumerate(data["text"]):
+        if not _JUMPS_WORD_RE.search(word or ""):
+            continue
+        route_set = True
+        left, top, h = data["left"][i], data["top"][i], data["height"][i]
+        box = (max(0, int(left - 1.6 * h)), max(0, int(top - 0.5 * h)),
+               int(left - 0.1 * h), int(top + 1.5 * h))
+        if box[2] <= box[0] or box[3] <= box[1]:
+            break
+        digit = gray.crop(box)
+        digit = digit.resize((digit.width * 4, digit.height * 4), Image.LANCZOS)
+        found = pytesseract.image_to_string(
+            digit, config=r"--oem 3 --psm 7 -c tessedit_char_whitelist=0123456789").strip()
+        if found.isdigit():
+            jumps = int(found)
+        break
+
+    return {"route_set": route_set, "jumps": jumps, "destination": destination, "raw": text}
+
+
+# -----------------------------------------------------------------------------
 # Ship repair + activation flow
 # -----------------------------------------------------------------------------
 
@@ -1149,12 +1217,18 @@ def quit_mission_and_request_new(matcher) -> bool:
       quit_mission -> Yes (repair_yes) -> request_mission.
     Returns True if the quit button was found and clicked, False otherwise.
     """
-    if matcher.wait_and_click("quit_mission", timeout=2.0, delay=1.0):
-        log.info("Clicked 'Quit Mission' — confirming with Yes...")
-        matcher.wait_and_click("repair_yes", timeout=2.0, delay=1.0)
-        log.info("Clicking 'Request Mission' to get a new offer...")
-        matcher.wait_and_click("request_mission", timeout=2.0, delay=1.0)
-        return True
+    for attempt in (1, 2):
+        if matcher.wait_and_click("quit_mission", timeout=2.0, delay=1.0):
+            log.info("Clicked 'Quit Mission' — confirming with Yes...")
+            matcher.wait_and_click("repair_yes", timeout=2.0, delay=1.0)
+            log.info("Clicking 'Request Mission' to get a new offer...")
+            matcher.wait_and_click("request_mission", timeout=2.0, delay=1.0)
+            return True
+        if attempt == 1:
+            # Quit button off screen — the agent dialog lost focus / is buried behind the
+            # hangar. Double-click the agent icon to bring the mission dialog back up, then retry.
+            log.warning("'quit_mission' not visible — double-clicking agent icon to restore the mission dialog.")
+            matcher.wait_and_double_click("agent_icon", timeout=2.0, delay=1.0)
     log.error("'quit_mission' template not found — cannot abandon mission")
     return False
 
@@ -2149,6 +2223,14 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
             return {"ok": True, "value": "%d,%d" % (cx, cy)}
         return {"ok": True, "value": None}
 
+    if cmd == "count":
+        # Full-template NMS: one overview row often matches at two slightly different
+        # offsets, which the default half-size spacing would count as two ships.
+        matches = matcher.find_all(key, nms_scale=1.0)
+        log.info("count('%s'): %d matches at %s", key, len(matches),
+                 [(m[0], m[1]) for m in matches])
+        return {"ok": True, "value": len(matches)}
+
     if cmd == "find_pos_top":
         # Highest match on screen (smallest y), not the best-scoring one: the feed lists
         # newest first, so with several kill reports stacked the top entry is the latest.
@@ -2240,6 +2322,15 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
             int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
         )
         return {"ok": True, "value": mission}
+
+    if cmd == "read_route":
+        if "reader" not in reader_box:
+            reader_box["reader"] = EVEMissionReader()
+        img = reader_box["reader"].capture_region(
+            int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"]))
+        if img is None:
+            return {"ok": True, "value": {"route_set": False, "jumps": -1, "destination": None}}
+        return {"ok": True, "value": read_route_panel(img)}
 
     if cmd == "repair_ship":
         # Full repair + activate flow on the resident matcher — no spawn/import cost.

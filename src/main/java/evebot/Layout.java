@@ -81,4 +81,7 @@ public final class Layout {
 
     /** Right-click target on the kill report's "Final Blow" pilot name. */
     public static Point killerClick()         { return point("killer_click", 777, 559); }
+
+    /** Info-panel "Route" section (OCR region) — "Route  N Jumps" + the waypoint line. */
+    public static Rectangle routePanel()      { return rect("route_panel", 92, 340, 353, 183); }
 }

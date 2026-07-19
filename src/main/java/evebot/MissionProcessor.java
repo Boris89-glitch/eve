@@ -306,6 +306,24 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate(keys);
     }
 
+    /** Count distinct on-screen matches of a template. */
+    public int countTemplate(String key) {
+        return ocrBridge.countTemplate(key);
+    }
+
+    /**
+     * Confirm a template's on-screen count has dropped to at most {@code max}, filtering
+     * single-frame false negatives: re-scans up to {@code samples} times and returns true
+     * only if EVERY scan agrees. A single high reading means the count hasn't really dropped.
+     */
+    public boolean confirmTemplateCountAtMost(String key, int max, int samples, int gapMs) {
+        for (int i = 0; i < samples; i++) {
+            if (ocrBridge.countTemplate(key) > max) return false;
+            if (i < samples - 1) sleep(gapMs);
+        }
+        return true;
+    }
+
     public void pressCtrlR() {
         log("Pressing Ctrl+R (reload modules)");
         ocrBridge.ctrlR();
@@ -416,6 +434,11 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    /** True while the COMPLETE MISSION button is still on screen — the turn-in hasn't gone through. */
+    public boolean isCompleteMissionVisible() {
+        return findTemplate("complete_mission") != null;
+    }
+
     // -----------------------------------------------------------------------
     // Undock
     // -----------------------------------------------------------------------
@@ -446,12 +469,35 @@ public class MissionProcessor {
      * Used for stargate jumps (right-click stargate → click "jump")
      * and mission gate activation (right-click activate_gate → click "mission_start").
      */
-    public void rightClickAndSelect(String targetKey, String menuKey) {
-        log("Right-clicking '" + targetKey + "' → clicking '" + menuKey + "'");
-        ocrBridge.rightClickTemplate(targetKey);
-        sleep(100);
-        ocrBridge.clickTemplate(menuKey);
-        sleep(POST_CLICK_DELAY_MS);
+    public boolean rightClickAndSelect(String targetKey, String menuKey) {
+        return rightClickAndSelect(targetKey, menuKey, 3);
+    }
+
+    /**
+     * As above, but retries when the context menu never opened (the right-click missed the
+     * target, so {@code menuKey} isn't on screen). Without the retry the menu click is a no-op
+     * and the caller reads the missing warp as a failed warp — which burns a bubble-evasion
+     * attempt for what is really just a missed right-click. Between attempts we left-click
+     * empty space to dismiss any half-open menu (never Escape).
+     *
+     * @return true if the menu item was found and clicked.
+     */
+    public boolean rightClickAndSelect(String targetKey, String menuKey, int attempts) {
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            log("Right-clicking '" + targetKey + "' → clicking '" + menuKey + "' (attempt "
+                    + attempt + "/" + attempts + ")");
+            ocrBridge.rightClickTemplate(targetKey);
+            sleep(100);
+            if (ocrBridge.clickTemplateChecked(menuKey)) {
+                sleep(POST_CLICK_DELAY_MS);
+                return true;
+            }
+            log("'" + menuKey + "' not in the context menu — clicking empty space and retrying.");
+            clickEmptySpace();
+            sleep(200);
+        }
+        log("'" + menuKey + "' never appeared after " + attempts + " right-clicks on '" + targetKey + "'.");
+        return false;
     }
 
     /** @deprecated Use {@link #rightClickAndSelect} instead. Kept for combat sequences. */
@@ -589,23 +635,6 @@ public class MissionProcessor {
         log("Clicking template: " + key + " (+" + offsetY + "px below centre)");
         ocrBridge.clickTemplateBelow(key, offsetY);
         sleep(POST_CLICK_DELAY_MS);
-    }
-
-    /**
-     * Click Set Destination. Prefers the template match; if not found, falls back to
-     * the supplied coordinates — which differ by context (the button sits lower when
-     * undocking vs. returning/combat), so the caller passes the right ones.
-     */
-    public void clickSetDestination(int fallbackX, int fallbackY) {
-        int[] pos = ocrBridge.findTemplatePos("set_destination");
-        if (pos != null) {
-            log("Clicking SET DESTINATION (template) at (" + pos[0] + "," + pos[1] + ")");
-            ocrBridge.clickPos(pos[0], pos[1]);
-        } else {
-            log("set_destination template not found — using hardcoded pos (" + fallbackX + "," + fallbackY + ").");
-            ocrBridge.clickPos(fallbackX, fallbackY);
-        }
-        sleep(1000); // 1s settle after pressing Set Destination
     }
 
     /**
@@ -828,8 +857,11 @@ public class MissionProcessor {
             sleep(POST_CLICK_DELAY_MS);
             return true;
         }
-        log("SAFE-SPOT: safe_spot not found — dismissing menu");
-        sleep(100);
+        // The right-click menu is still open and would swallow the stargate right-click that
+        // follows — dismiss it with a click in empty space (never Escape).
+        log("SAFE-SPOT: safe_spot not found — dismissing menu with a click in empty space");
+        clickEmptySpace();
+        sleep(300);
         return false;
     }
 
@@ -839,13 +871,15 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
-    public void waitAndClickOk() {
+    /** @return true if the OK dialog appeared and was clicked. */
+    public boolean waitAndClickOk() {
         log("Waiting for OK dialog and clicking");
         boolean found = ocrBridge.waitAndClickTemplate("ok", 3);
         if (!found) {
-            log("OK button not found after 3s — may have already been dismissed.");
+            log("OK button not found after 3s.");
         }
         sleep(POST_CLICK_DELAY_MS);
+        return found;
     }
 
     public String detectFleetReward() {
@@ -973,6 +1007,44 @@ public class MissionProcessor {
         return ocrBridge.findAnyTemplate("set_destination") != null;
     }
 
+    /** What the info-panel Route section says. */
+    public static class RouteInfo {
+        /** True when the Route section is showing a route — the "did set_destination take?" answer. */
+        public final boolean routeSet;
+        /** Jumps remaining, or -1 if unreadable. Its tiny font fails OCR more often than the rest. */
+        public final int jumps;
+        /** Last waypoint system read (e.g. "S-MDYI"), or null. */
+        public final String destination;
+
+        RouteInfo(boolean routeSet, int jumps, String destination) {
+            this.routeSet = routeSet;
+            this.jumps = jumps;
+            this.destination = destination;
+        }
+
+        public boolean isSet() { return routeSet; }
+
+        @Override public String toString() {
+            if (!routeSet) return "no route";
+            return (jumps >= 0 ? jumps + " jump(s)" : "unknown jumps")
+                    + (destination != null ? " to " + destination : "");
+        }
+    }
+
+    /**
+     * OCR the info-panel Route section. Unlike the transient destination_set toast, the Route
+     * panel stays up for the whole leg, so this is the reliable "the destination actually took"
+     * check. One screenshot; the OCR and parsing happen in Python.
+     */
+    public RouteInfo readRoute() {
+        Rectangle r = Layout.routePanel();
+        com.google.gson.JsonObject v = ocrBridge.readRoute(r.x, r.y, r.width, r.height);
+        if (v == null) return new RouteInfo(false, -1, null);
+        String dest = v.has("destination") && !v.get("destination").isJsonNull()
+                ? v.get("destination").getAsString() : null;
+        return new RouteInfo(v.get("route_set").getAsBoolean(), v.get("jumps").getAsInt(), dest);
+    }
+
     /**
      * Checks for mission completion after combat — returns "set_destination" (different system)
      * or "dock" (same system as station), or null if neither visible.
@@ -1054,6 +1126,11 @@ public class MissionProcessor {
     /** True once the template is no longer on screen (waits up to timeoutSeconds). */
     public boolean waitForTemplateGone(String key, int timeoutSeconds) {
         return ocrBridge.waitForTemplateGone(key, timeoutSeconds);
+    }
+
+    /** True once the template appears on screen (waits up to timeoutSeconds). */
+    public boolean waitForTemplate(String key, int timeoutSeconds) {
+        return ocrBridge.waitForTemplate(key, timeoutSeconds);
     }
 
     // Kill Report layout (window locked in a fixed spot). The "Final Blow" pilot name link sits at a

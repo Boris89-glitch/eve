@@ -116,6 +116,11 @@ public class ClientState {
      *  issued; at the cap the client drops to IDLE instead of re-issuing forever. */
     private int dockReissueMissCount = 0;
 
+    /** Consecutive WARPING warp re-issues where no stargate / warp-to-location was on screen — the
+     *  usual cause is a session change (gate jump still loading), where warp_active is missing too.
+     *  These don't consume the warp retry; at the cap the normal retry/redock path takes over. */
+    private int warpReissueMissCount = 0;
+
     /** Consecutive insta-dock attempts where the dock warp never engaged. Counted in IDLE
      *  while re-trying the insta-dock; once it hits the cap the caller falls back to a direct
      *  dock. Reset on entering WARPING (i.e. once we commit to a dock/warp). */
@@ -216,6 +221,10 @@ public class ClientState {
 
     /** True after set_destination was clicked — verify it's gone after the first jump (else re-click). */
     private boolean verifySetDest = false;
+
+    /** True once 'destination_set' confirmed the route took: every set_destination check for this
+     *  leg (post-jump verify, jump-count and drift re-routes) stands down. */
+    private boolean destinationConfirmed = false;
 
     /** Re-route re-clicks attempted this leg (jump-count / drift safety nets). Bounded so a
      *  set_destination prompt that never clears can't spin the poll loop forever. */
@@ -371,6 +380,7 @@ public class ClientState {
             this.bubbleEscapeAttempts = 0;
             this.warpRetryCount = 0;
             this.dockReissueMissCount = 0;
+            this.warpReissueMissCount = 0;
             this.instaDockMissCount = 0;
             this.safeSpotWarp = false; // evade entries re-set this true after setState(WARPING)
         }
@@ -510,6 +520,9 @@ public class ClientState {
     public int  getDockReissueMissCount()      { return dockReissueMissCount; }
     public void setDockReissueMissCount(int v) { this.dockReissueMissCount = v; }
 
+    public int  getWarpReissueMissCount()      { return warpReissueMissCount; }
+    public void setWarpReissueMissCount(int v) { this.warpReissueMissCount = v; }
+
     public int  getInstaDockMissCount()      { return instaDockMissCount; }
     public void setInstaDockMissCount(int v) { this.instaDockMissCount = v; }
 
@@ -590,6 +603,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isVerifySetDest()           { return verifySetDest; }
     public void    setVerifySetDest(boolean v) { this.verifySetDest = v; }
+
+    public boolean isDestinationConfirmed()           { return destinationConfirmed; }
+    public void    setDestinationConfirmed(boolean v) { this.destinationConfirmed = v; }
 
     public int  getReRouteAttempts()        { return reRouteAttempts; }
     public void setReRouteAttempts(int v)   { this.reRouteAttempts = v; }

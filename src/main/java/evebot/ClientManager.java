@@ -89,6 +89,10 @@ public class ClientManager {
     /** Consecutive WARPING dock re-issues that found no DOCK button and no station before we
      *  stop re-issuing and drop the client back to IDLE. */
     private static final int  DOCK_REISSUE_MISS_LIMIT = 3;
+
+    /** Consecutive WARPING checks where no warp control was on screen to re-issue (session change
+     *  mid gate jump). Each one restarts the warp wait without consuming the warp retry. */
+    private static final int  WARP_REISSUE_MISS_LIMIT = 3;
     /** Global watchdog: if no client switch has happened for this many seconds and a second
      *  client exists, force a switch so the idle client cannot sit AFK in space (and get podded)
      *  while the foreground client is busy in a long combat. 130s (not 120s) so a full pod /
@@ -670,7 +674,7 @@ public class ClientManager {
                 // One-time check after the first jump: if set_destination is still on
                 // screen, the earlier click missed and we jumped a random gate — click
                 // it now to get back on the route.
-                if (cs.isVerifySetDest()) {
+                if (cs.isVerifySetDest() && !cs.isDestinationConfirmed()) {
                     cs.setVerifySetDest(false);
                     if (missionProcessor.isSetDestinationVisible()) {
                         log(clientId, "IDLE[TO_MISSION]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
@@ -739,7 +743,8 @@ public class ClientManager {
             // before this many gate jumps. Reaching jump #6 means we likely missed the
             // warp_to_location and kept jumping gates off-route — poll for set_destination
             // and re-click it to get back on the route.
-            if (cs.getJumpCount() >= 6 && cs.getReRouteAttempts() < MAX_REROUTE_ATTEMPTS
+            if (cs.getJumpCount() >= 6 && !cs.isDestinationConfirmed()
+                    && cs.getReRouteAttempts() < MAX_REROUTE_ATTEMPTS
                     && missionProcessor.isSetDestinationVisible()) {
                 cs.setReRouteAttempts(cs.getReRouteAttempts() + 1);
                 log(clientId, "IDLE[TO_MISSION]: jump #" + cs.getJumpCount() + " + set_destination visible — likely missed warp_to_location, re-clicking to re-route ("
@@ -752,6 +757,7 @@ public class ClientManager {
             // looping gates off-route. Re-click set_destination BEFORE warping again rather than after
             // the warp has gone out (the warp-entry pod check still runs in WARPING firstCheck).
             if (Duration.between(cs.getLastCombatOrCheck(), LocalDateTime.now()).toMinutes() >= 5
+                    && !cs.isDestinationConfirmed()
                     && cs.getReRouteAttempts() < MAX_REROUTE_ATTEMPTS
                     && missionProcessor.isSetDestinationVisible()) {
                 cs.setReRouteAttempts(cs.getReRouteAttempts() + 1);
@@ -855,7 +861,7 @@ public class ClientManager {
                 // One-time check after the first jump: if set_destination is still on
                 // screen, the earlier click missed and we jumped a random gate — click
                 // it now to get back on the route.
-                if (cs.isVerifySetDest()) {
+                if (cs.isVerifySetDest() && !cs.isDestinationConfirmed()) {
                     cs.setVerifySetDest(false);
                     if (missionProcessor.isSetDestinationVisible()) {
                         log(clientId, "IDLE[RETURNING_HOME]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
@@ -965,6 +971,16 @@ public class ClientManager {
                     new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
                     break;
                 case "agent_icon":
+                    // A pod respawn at the station looks identical to a normal dock arrival — only
+                    // a capsule in the hangar tells them apart. Check before handing off to
+                    // COMPLETING, which would double-click the agent for a mission we died on.
+                    if (missionProcessor.findTemplate("pod_station") != null
+                            || missionProcessor.findTemplate("capsule") != null) {
+                        log(clientId, "IDLE[RETURNING_HOME]: agent_icon + capsule in hangar — podded/respawned at station.");
+                        cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                        handlePodDeath(clientId, false);
+                        return;
+                    }
                     log(clientId, "IDLE[RETURNING_HOME]: agent_icon visible — docked in station.");
                     cs.setTravelPhase(ClientState.TravelPhase.NONE);
                     stateManager.setState(clientId, ClientState.State.COMPLETING);
@@ -1605,25 +1621,51 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     /**
-     * Click set_destination only if its template is on screen (no hardcoded fallback), then
-     * confirm the click landed — the prompt must be gone afterwards. Returns true if confirmed.
+     * Click set_destination only if its template is on screen (no hardcoded fallback), then confirm
+     * the click landed by OCR-reading the info-panel Route section ("Route  N Jumps"). The
+     * set_destination prompt itself looks the same before and after the click, so its presence
+     * proves nothing — and its *absence* proves nothing either, since a miss also closes the menu.
+     * Returns true if confirmed.
      */
     private boolean clickSetDestinationByTemplate(String clientId) {
         int[] pos = missionProcessor.findTemplatePos("set_destination");
         if (pos == null) return false;
         log(clientId, "TRAVEL: set_destination found at (" + pos[0] + "," + pos[1] + ") — clicking.");
         missionProcessor.clickPos(pos[0], pos[1]);
-        if (missionProcessor.waitForTemplateGone("set_destination", 3)) {
-            log(clientId, "TRAVEL: set_destination confirmed — prompt gone.");
+        // Move the cursor off the prompt (click in empty space) so it can't cover either template
+        // during the confirmation scan.
+        missionProcessor.clickEmptySpace();
+        // Primary check: the info-panel Route section. It persists for the whole leg, so a
+        // missed click can't be read as success the way a faded toast can.
+        log(clientId, "TRAVEL: reading the route panel to confirm the destination took.");
+        MissionProcessor.RouteInfo route = missionProcessor.readRoute();
+        if (route.isSet()) {
+            log(clientId, "TRAVEL: set_destination confirmed — route panel shows " + route + ".");
+            confirmDestination(clientId);
             return true;
         }
-        log(clientId, "TRAVEL: set_destination still visible after click — not confirmed.");
+        // Fallback: the transient destination_set toast, if we caught it before the OCR scan.
+        if ("destination_set".equals(missionProcessor.findAnyTemplate("destination_set"))) {
+            log(clientId, "TRAVEL: set_destination confirmed — destination_set visible.");
+            confirmDestination(clientId);
+            return true;
+        }
+        log(clientId, "TRAVEL: no route in the info panel and no destination_set — not confirmed.");
         return false;
+    }
+
+    /** Route is set: no further set_destination polling this leg (post-jump verify, jump-count and
+     *  drift re-routes all stand down). */
+    private void confirmDestination(String clientId) {
+        ClientState cs = stateManager.getState(clientId);
+        cs.setDestinationConfirmed(true);
+        cs.setVerifySetDest(false);
     }
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
-        cs.setReRouteAttempts(0); // fresh leg
+        cs.setReRouteAttempts(0);          // fresh leg
+        cs.setDestinationConfirmed(false); // fresh leg — route not confirmed yet
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
         missionProcessor.closeAllDialogs();
@@ -2145,18 +2187,18 @@ public class ClientManager {
      *   1  → Proceed (orbiting template check removed)
      *   2  → Keypress 's' (activate module)
      *   3  → SAFE WAIT 5s
-     *   4  → Ctrl+click 'target_inquisitor' (one) + Ctrl+click 'target_vengeance' (lock)
+     *   4  → Ctrl+click ALL 'target_inquisitor' (expect 2, retry up to 20s) + Ctrl+click 'target_vengeance' — everything locked up front
      *   5  → WAIT 3s (lock animation) → confirm 'locked_inquisitor' — if not found (out of range), relock (loop back to 4); if found, select
      *   6  → Press 'adc' (activate modules), click 'target_inquisitor' (verify)
-     *   7  → SAFE WAIT 90s (one-shot 20s drift re-check), then poll every 5s for 'locked_inquisitor' gone (dead) → re-target; never switch while still locked
-     *   8  → Ctrl+click 'target_inquisitor' (re-lock)
-     *   9  → WAIT 2s → click 'locked_inquisitor' (select) + press 'ad'
-     *   10 → SAFE WAIT 60s
+     *   7  → SAFE WAIT 90s (one-shot 30s drift re-check), then poll every 5s until only ONE 'locked_inquisitor' bracket is left (first kill, 150s failsafe)
+     *   8  → Second inquisitor already locked from step 4 — only re-lock if it drifted
+     *   9  → WAIT 3s → click 'locked_inquisitor' (select) + press 'ad'
+     *   10 → SAFE WAIT 60s (drift re-lock + re-fire), then poll until ZERO 'locked_inquisitor' brackets and no 'target_inquisitor' left to lock (150s failsafe)
      *   11 → Right-click 'launcher' (ammo switch)
      *   12 → Click 'inf_damage' (load infernal/thermal ammo)
      *   13 → SAFE WAIT 10s
      *   14 → Ctrl+click 'target_vengeance' (lock)
-     *   15 → WAIT 3s → check 'locked_vengeance' — if not found, retry (loop back to 14); if found, click + overload (shift+a, a, d)
+     *   15 → check 'locked_vengeance' — if not found, relock (3s between attempts); if found, click + press 'a', 'd' (no overload)
      *   16 → SAFE WAIT for set_destination (mission complete → RETURNING)
      */
     private void handleCombatVengeance(String clientId, ClientState cs) {
@@ -2197,16 +2239,26 @@ public class ClientManager {
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 5s wait complete — locking inquisitors.");
+                cs.setCombatWaitStart(LocalDateTime.now()); // anchors step 4's lock-all retry window
                 cs.setCombatStep(4);
                 break;
             }
             case 4: {
-                // Single ctrl+click only — the double-tap variant can lock TWO inquisitors at
-                // once (the second tap lands on a different row once the first locks), leaving a
-                // survivor bracket that stalls step 7. Step 5's 3s check retries a missed lock.
-                log(clientId, "COMBAT[Vengeance] Step 4: Ctrl+click ONE target_inquisitor + target_vengeance (lock one inquisitor).");
-                missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
+                // Lock EVERYTHING: both inquisitors + the vengeance. We expect exactly two
+                // inquisitor brackets — if fewer are seen the overview hasn't fully populated,
+                // so retry the lock-all until both are confirmed (bounded by a 20s window).
+                log(clientId, "COMBAT[Vengeance] Step 4: Ctrl+click ALL target_inquisitor + target_vengeance (lock all).");
+                int locked = missionProcessor.ctrlClickAllTemplate("target_inquisitor");
                 missionProcessor.ctrlClickTemplateOnce("target_vengeance");
+                if (locked < 2) {
+                    if (Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds() < 20) {
+                        log(clientId, "COMBAT[Vengeance] Step 4: only " + locked + " inquisitor(s) seen — expecting 2, retrying lock-all.");
+                        return;
+                    }
+                    log(clientId, "COMBAT[Vengeance] Step 4: still only " + locked + " inquisitor(s) after 20s — proceeding anyway.");
+                } else {
+                    log(clientId, "COMBAT[Vengeance] Step 4: both inquisitors confirmed locked.");
+                }
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
                 break;
@@ -2284,29 +2336,36 @@ public class ClientManager {
                 long sincePoll = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
                 if (sincePoll < 5) return;
                 cs.setCombatPollStart(LocalDateTime.now());
-                String lockedI7 = missionProcessor.findTemplate("locked_inquisitor");
-                if (lockedI7 == null) {
-                    // Double-check across multiple scans before declaring the kill — a single
-                    // missed frame would prematurely burn the overload on the main.
-                    if (missionProcessor.confirmTemplateGone("locked_inquisitor", 4, 300)) {
-                        log(clientId, "COMBAT[Vengeance] Step 7: inquisitor dead/gone (confirmed) — re-targeting.");
+                // The first kill is confirmed by the LOCKED bracket count dropping from two to one.
+                // ('target_*' is only for acquiring locks; 'locked_*' is what we confirm against.)
+                int inqs7 = missionProcessor.countTemplate("locked_inquisitor");
+                if (inqs7 <= 1) {
+                    // Double-check across multiple scans — a single missed frame would send us to
+                    // the second inquisitor while the first is still alive.
+                    if (missionProcessor.confirmTemplateCountAtMost("locked_inquisitor", 1, 4, 300)) {
+                        log(clientId, "COMBAT[Vengeance] Step 7: one locked_inquisitor left (confirmed) — first dead, switching to the second.");
                         cs.setCombatStep(8);
                     } else {
-                        log(clientId, "COMBAT[Vengeance] Step 7: locked_inquisitor missed frame (false-negative filtered) — keep shooting.");
+                        log(clientId, "COMBAT[Vengeance] Step 7: locked_inquisitor count dipped for one frame (false-negative filtered) — keep shooting.");
                     }
                 } else if (elapsed >= 150) {
-                    // Failsafe: a stale bracket (e.g. a second inquisitor locked by accident) can
-                    // keep "still alive" up forever — after 150s assume dead and move on.
-                    log(clientId, "COMBAT[Vengeance] Step 7: still alive after " + elapsed + "s — 150s failsafe, assuming dead — re-targeting.");
+                    // Failsafe: if the count never drops (bad match, wreck still rendering) don't stall forever.
+                    log(clientId, "COMBAT[Vengeance] Step 7: " + inqs7 + " locked inquisitors still up after " + elapsed + "s — 150s failsafe, assuming dead — switching to the second.");
                     cs.setCombatStep(8);
                 } else {
-                    log(clientId, "COMBAT[Vengeance] Step 7: inquisitor still alive (" + elapsed + "s) — keep shooting.");
+                    log(clientId, "COMBAT[Vengeance] Step 7: " + inqs7 + " locked inquisitors still up (" + elapsed + "s) — keep shooting.");
                 }
                 break;
             }
             case 8: {
-                log(clientId, "COMBAT[Vengeance] Step 8: Ctrl+click ONE target_inquisitor (lock).");
-                missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
+                // Both inquisitors were locked in step 4, so the survivor's bracket should still
+                // be up — only re-lock if it drifted off.
+                if (missionProcessor.findTemplate("locked_inquisitor") != null) {
+                    log(clientId, "COMBAT[Vengeance] Step 8: second inquisitor still locked (step 4) — no re-lock needed.");
+                } else {
+                    log(clientId, "COMBAT[Vengeance] Step 8: second inquisitor not locked (drifted) — Ctrl+click target_inquisitor.");
+                    missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
+                }
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(9);
                 break;
@@ -2341,11 +2400,25 @@ public class ClientManager {
                     // Second inquisitor still locked but launcher confirmed idle → re-fire (select + 'ad').
                     if (Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds() >= TEAM_REFIRE_THROTTLE_SECS) {
                         cs.setCombatPollStart(LocalDateTime.now());
-                        if (missionProcessor.findTemplate("locked_inquisitor") != null
-                                && missionProcessor.confirmTemplateGone("shooting_luncher", 3, 300)) {
-                            log(clientId, "COMBAT[Vengeance] Step 10: launcher not shooting, second inquisitor still locked — re-firing (click + 'ad').");
-                            missionProcessor.clickTemplate("locked_inquisitor");
-                            missionProcessor.keyPress("ad");
+                        if (missionProcessor.findTemplate("locked_inquisitor") != null) {
+                            if (missionProcessor.confirmTemplateGone("shooting_luncher", 3, 300)) {
+                                log(clientId, "COMBAT[Vengeance] Step 10: launcher not shooting, second inquisitor still locked — re-firing (click + 'ad').");
+                                missionProcessor.clickTemplate("locked_inquisitor");
+                                missionProcessor.keyPress("ad");
+                                return;
+                            }
+                        } else if (missionProcessor.confirmTemplateGone("locked_inquisitor", 4, 300)
+                                && missionProcessor.findTemplate("target_inquisitor") != null) {
+                            // Bracket gone but the inquisitor is still on the overview → it drifted
+                            // out of lock rather than died. Re-lock, select, re-fire, restart the 60s.
+                            log(clientId, "COMBAT[Vengeance] Step 10: second inquisitor drifted out of lock — re-locking and re-firing.");
+                            missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
+                            try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                            if (missionProcessor.findTemplate("locked_inquisitor") != null) {
+                                missionProcessor.clickTemplate("locked_inquisitor");
+                                missionProcessor.keyPress("ad");
+                                cs.setCombatWaitStart(LocalDateTime.now());
+                            }
                             return;
                         }
                     }
@@ -2355,9 +2428,34 @@ public class ClientManager {
                     }
                     return;
                 }
-                log(clientId, "COMBAT[Vengeance] 60s wait complete — switching ammo.");
-                cs.setCombatStep(11);
-                break;
+                // 60s up — the second inquisitor should be dead. Confirm NO inquisitors are left on
+                // screen before moving to the vengeance; if one is still up, re-lock + re-fire.
+                long sincePoll10 = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
+                if (sincePoll10 < 5) return;
+                cs.setCombatPollStart(LocalDateTime.now());
+                int inqs10 = missionProcessor.countTemplate("locked_inquisitor");
+                if (inqs10 == 0 && missionProcessor.confirmTemplateCountAtMost("locked_inquisitor", 0, 4, 300)
+                        && missionProcessor.findTemplate("target_inquisitor") == null) {
+                    log(clientId, "COMBAT[Vengeance] 60s wait complete — no locked inquisitors and none left to lock (confirmed) — switching ammo.");
+                    cs.setCombatStep(11);
+                    break;
+                }
+                if (elapsed >= 150) {
+                    log(clientId, "COMBAT[Vengeance] Step 10: " + inqs10 + " locked inquisitor(s) still up after " + elapsed + "s — 150s failsafe, moving on to ammo switch.");
+                    cs.setCombatStep(11);
+                    break;
+                }
+                log(clientId, "COMBAT[Vengeance] Step 10: " + inqs10 + " locked inquisitor(s) / target still on screen (" + elapsed + "s) — re-locking and keeping fire on.");
+                if (missionProcessor.findTemplate("locked_inquisitor") == null) {
+                    missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
+                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                }
+                if (missionProcessor.findTemplate("locked_inquisitor") != null
+                        && missionProcessor.confirmTemplateGone("shooting_luncher", 3, 300)) {
+                    missionProcessor.clickTemplate("locked_inquisitor");
+                    missionProcessor.keyPress("ad");
+                }
+                return;
             }
             case 11: {
                 log(clientId, "COMBAT[Vengeance] Step 11: switch ammo → inf_damage (verified).");
@@ -2395,12 +2493,10 @@ public class ClientManager {
             case 15: {
                 String lockedV = missionProcessor.findTemplate("locked_vengeance");
                 if (lockedV != null) {
-                    log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance confirmed — click + overload (shift+a, 3s, a, d).");
+                    log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance confirmed — click + press 'a', 'd' (no overload).");
                     missionProcessor.clickTemplate("locked_vengeance");
-                    missionProcessor.shiftKeyPress("a");
-                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                     missionProcessor.keyPress("a");
-                    missionProcessor.keyPress("d"); // activate 'd' after overloading 'a'
+                    missionProcessor.keyPress("d");
                     cs.setCombatStep(16);
                     ClientWindowInfo other = findOtherClient(clientId);
                     if (other != null) {
@@ -3723,7 +3819,8 @@ public class ClientManager {
      *  10 → poll completion (Sansha-style): set_destination/dock → step 11.
      *        If fight drags > 60s → Alt+F1 again (extra pulse, once).
      *        120s hardcap (pod check) → step 11.
-     *  11 → Alt+F1 (cap module OFF; fires on fast and long fights) + handle dock/returning
+     *  11 → Alt+F1 (cap module OFF; fires on fast and long fights) + press 'xc' (deactivate
+     *        modules) + handle dock/returning
      */
     private void handleCombatWorm(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -3895,6 +3992,11 @@ public class ClientManager {
                     log(clientId, "COMBAT[Worm] Step 11: long fight (extra cap pulse fired) — Alt+F1 (cap module OFF).");
                 }
                 missionProcessor.altKeyPress("f1");
+                // Deactivate modules (same as Angel step 7). Click empty space first so the
+                // key press isn't dropped before the game window has keyboard focus.
+                log(clientId, "COMBAT[Worm] Step 11: press 'xc' (deactivate modules).");
+                missionProcessor.clickEmptySpace();
+                missionProcessor.keyPress("xc");
                 // Re-detect: dock = same system, set_destination = different system.
                 String result = missionProcessor.detectCombatComplete();
                 if ("dock".equals(result)) {
@@ -3921,9 +4023,22 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleReturning(String clientId, ClientWindowInfo window) {
-        missionProcessor.clickSetDestination(280, 568); // returning/combat position
-        stateManager.getState(clientId).setVerifySetDest(true); // re-check after first jump
-        stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
+        ClientState cs = stateManager.getState(clientId);
+        cs.setReRouteAttempts(0);          // fresh leg
+        cs.setDestinationConfirmed(false); // fresh leg — route not confirmed yet
+        // Same as the outbound leg: template-only click (twice), confirmed by destination_set,
+        // nudging the camera to refresh a stale frame if the prompt isn't detected.
+        boolean destSet = clickSetDestinationByTemplate(clientId);
+        for (int attempt = 1; !destSet && attempt <= 2; attempt++) {
+            log(clientId, "RETURNING: set_destination not visible — nudging view (" + attempt + "/2).");
+            missionProcessor.nudgeView();
+            destSet = clickSetDestinationByTemplate(clientId);
+        }
+        if (!destSet) {
+            log(clientId, "RETURNING: set_destination not confirmed after 2 nudges — will re-check after jump #1.");
+        }
+        cs.setVerifySetDest(true); // re-check after first jump (skipped once confirmed)
+        cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
 
@@ -3968,11 +4083,31 @@ public class ClientManager {
 
         missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X', fixed-loc fallback)
         missionProcessor.doubleClickAgentIcon(); // refocus agent dialog (standings covers complete_mission)
-        missionProcessor.clickCompleteMission();
 
-        // Fleet reward decision based on agent standings.
-        chooseFleetReward(clientId, standings);
-        missionProcessor.waitAndClickOk(); // dismiss fleet reward confirmation dialog
+        // Turn in and confirm it took, the same way ACCEPT is confirmed: no OK dialog, or a
+        // COMPLETE MISSION button still on screen, means the turn-in didn't go through (the
+        // complete click missed, or the standings window was still covering it). Retry rather
+        // than marking the mission complete and requesting the next one on a mission still open.
+        boolean turnedIn = false;
+        for (int attempt = 1; attempt <= 3 && !turnedIn; attempt++) {
+            missionProcessor.clickCompleteMission();
+            chooseFleetReward(clientId, standings);   // fleet reward decision based on agent standings
+            missionProcessor.waitAndClickOk(); // dismiss fleet reward confirmation dialog if one appeared
+            // The OK dialog only shows up for some rewards, so its absence proves nothing — the
+            // COMPLETE MISSION button disappearing is what says the turn-in went through. Give
+            // the dialog time to actually close before scanning, or we read the stale frame.
+            try { Thread.sleep(2000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            turnedIn = !missionProcessor.isCompleteMissionVisible();
+            if (!turnedIn) {
+                log(clientId, "COMPLETING: turn-in not confirmed (attempt " + attempt
+                        + "/3, COMPLETE MISSION still visible) — retrying.");
+                missionProcessor.doubleClickAgentIcon();   // re-open the agent dialog for the retry
+            }
+        }
+        if (!turnedIn) {
+            log(clientId, "COMPLETING: turn-in never confirmed after 3 attempts — proceeding anyway.");
+            EventLog.log("COMPLETE_UNCONFIRMED", clientId + " — mission turn-in not confirmed after 3 attempts");
+        }
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
 
         // Mission turned in — record reward for the end-of-session summary.
@@ -4159,7 +4294,9 @@ public class ClientManager {
             EventLog.log("FACTION_DECLINE", clientId + " — declined faction mission: "
                     + (offer != null && offer.getTitle() != null ? offer.getTitle() : "unknown"));
             missionProcessor.clickDeclineButton();
-            missionProcessor.clickTemplate("close");   // dismiss the agent window after declining
+            // Close every open window, not just one 'close': a single close can land on the
+            // regular (non-faction) agent conversation instead of the faction one.
+            missionProcessor.closeAllDialogs();
             stateManager.recordFactionDecline(clientId, LocalDateTime.now());
         } else {
             log(clientId, "FACTION_CHECK: unwanted faction mission but declined < " + FACTION_DECLINE_HOURS
@@ -4370,8 +4507,11 @@ public class ClientManager {
      * failed (bubble present or warp_active not showing). We don't track which control kicked off
      * each WARPING entry, so pick the most likely one from current context: docking → DOCK,
      * else a visible stargate → jump, else a visible warp-to-location → warp.
+     *
+     * Returns false when nothing was on screen to click — usually a session change mid gate jump,
+     * where warp_active is missing simply because the grid hasn't loaded yet.
      */
-    private void reissueWarp(String clientId, ClientState cs) {
+    private boolean reissueWarp(String clientId, ClientState cs) {
         if (cs.isDockingToStation()) {
             // Re-issue the dock with the button-first, station-backup helper. A bare "dock"
             // click silently no-ops when the button isn't on screen — that used to log a
@@ -4393,8 +4533,9 @@ public class ClientManager {
             log(clientId, "WARPING: re-issuing warp-to-location.");
             new Thread(() -> missionProcessor.clickWarpToLocation()).start();
         } else {
-            log(clientId, "WARPING: no warp control visible to re-issue — waiting for warp to engage.");
+            return false;
         }
+        return true;
     }
 
     /**
@@ -4849,9 +4990,25 @@ public class ClientManager {
                     }
 
                     if (cs.getWarpRetryCount() < 1) {
+                        if (!reissueWarp(clientId, cs)) {
+                            // Nothing on screen to click — almost always a session change mid gate
+                            // jump, where warp_active is missing only because the grid is still
+                            // loading. Wait it out like the jump wait instead of burning the retry.
+                            if (cs.getWarpReissueMissCount() < WARP_REISSUE_MISS_LIMIT) {
+                                cs.setWarpReissueMissCount(cs.getWarpReissueMissCount() + 1);
+                                log(clientId, "WARPING: no warp control visible (jump still loading?) — waiting ("
+                                        + cs.getWarpReissueMissCount() + "/" + WARP_REISSUE_MISS_LIMIT + ").");
+                                cs.setWarpStartTime(LocalDateTime.now());
+                                return;
+                            }
+                            log(clientId, "WARPING: no warp control visible after " + WARP_REISSUE_MISS_LIMIT
+                                    + " waits — redock / bubble escape.");
+                            redockOrBubbleEscape(clientId, cs, false, "no warp control visible to re-issue");
+                            return;
+                        }
+                        cs.setWarpReissueMissCount(0);
                         cs.setWarpRetryCount(cs.getWarpRetryCount() + 1);
-                        log(clientId, "WARPING: warp_active not showing — re-issuing warp (retry " + cs.getWarpRetryCount() + "/1).");
-                        reissueWarp(clientId, cs);
+                        log(clientId, "WARPING: warp_active not showing — warp re-issued (retry " + cs.getWarpRetryCount() + "/1).");
                         cs.setWarpStartTime(LocalDateTime.now()); // restart the 4s wait, stay in first-check
                         return;
                     }

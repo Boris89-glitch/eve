@@ -244,6 +244,22 @@ public class OCRBridge {
     }
 
     /**
+     * OCR the info-panel Route section. Returns {route_set, jumps, destination, raw},
+     * or null if the daemon call failed. Parsing lives in Python (it needs the per-word
+     * OCR boxes to dig the jump count out of its smaller font).
+     */
+    public JsonObject readRoute(int x, int y, int width, int height) {
+        JsonObject c = cmd("read_route");
+        c.addProperty("x", x);
+        c.addProperty("y", y);
+        c.addProperty("w", width);
+        c.addProperty("h", height);
+        JsonObject r = daemon.send(c);
+        if (r == null || !r.has("value") || !r.get("value").isJsonObject()) return null;
+        return r.getAsJsonObject("value");
+    }
+
+    /**
      * Template-first mission classification (no OCR). Returns the matched mission
      * dialog key (e.g. "mission_hawk") or null if no known mission template is
      * visible. One screenshot inside the daemon.
@@ -310,11 +326,23 @@ public class OCRBridge {
                 System.err.println("[" + activeClient + "] Standings OCR error: " + obj.get("error").getAsString());
                 return Double.NaN;
             }
-            return obj.get("standings").getAsDouble();
+            return correctLeadingEight(obj.get("standings").getAsDouble());
         } catch (Exception e) {
             System.err.println("[" + activeClient + "] Standings parse error: " + e.getMessage());
             return Double.NaN;
         }
+    }
+
+    /**
+     * Standings can't reach 8, so a leading 8 is Tesseract misreading the leading 0
+     * (8.45 is really 0.45). Strip the 8, keeping the sign.
+     */
+    private double correctLeadingEight(double v) {
+        if (Double.isNaN(v) || Math.abs(v) < 8.0 || Math.abs(v) >= 9.0) return v;
+        double fixed = Math.signum(v) * (Math.abs(v) - 8.0);
+        System.out.println("[" + activeClient + "] Standings OCR read " + v
+                + " — impossible, leading 8 is a misread 0 → " + fixed);
+        return fixed;
     }
 
     // -----------------------------------------------------------------------
@@ -330,6 +358,14 @@ public class OCRBridge {
         JsonObject c = cmd("click");
         c.addProperty("key", key);
         sendAction(c);
+    }
+
+    /** As {@link #clickTemplate}, but returns whether the template was found and clicked. */
+    public boolean clickTemplateChecked(String key) {
+        dbg("[%s] [" + activeClient + "] clickTemplateChecked: %s%n", ts(), key);
+        JsonObject c = cmd("click");
+        c.addProperty("key", key);
+        return sendBool(c);
     }
 
     /**
@@ -523,6 +559,20 @@ public class OCRBridge {
         }
         int count = r.get("value").getAsInt();
         dbg("[%s] [" + activeClient + "] ctrlClickAllTemplate: locked %d targets.%n", ts(), count);
+        return count;
+    }
+
+    /** Count distinct on-screen matches of a template. Returns 0 if none / no result. */
+    public int countTemplate(String key) {
+        JsonObject c = cmd("count");
+        c.addProperty("key", key);
+        JsonObject r = daemon.send(c);
+        if (r == null || !r.has("value") || r.get("value").isJsonNull()) {
+            System.err.printf("[%s] [" + activeClient + "] countTemplate: no result.%n", ts());
+            return 0;
+        }
+        int count = r.get("value").getAsInt();
+        dbg("[%s] [" + activeClient + "] countTemplate(%s): %d%n", ts(), key, count);
         return count;
     }
 
