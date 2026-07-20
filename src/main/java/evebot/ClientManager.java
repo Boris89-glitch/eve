@@ -83,9 +83,6 @@ public class ClientManager {
     private static final long SCARLET_LOCK_RETRY_SECS  = 2;
     /** Re-read agent standings after this many non-"anomic" declined missions (keeps gating current). */
     private static final int  STANDINGS_RECHECK_DECLINES = 4;
-    /** Cap on set_destination re-route re-clicks per travel leg — a prompt that never clears
-     *  would otherwise re-click every poll tick forever. */
-    private static final int  MAX_REROUTE_ATTEMPTS = 3;
     /** Consecutive WARPING dock re-issues that found no DOCK button and no station before we
      *  stop re-issuing and drop the client back to IDLE. */
     private static final int  DOCK_REISSUE_MISS_LIMIT = 3;
@@ -671,26 +668,6 @@ public class ClientManager {
                     missionProcessor.closeAllDialogs();
                 }
 
-                // One-time check after the first jump: if set_destination is still on
-                // screen, the earlier click missed and we jumped a random gate — click
-                // it now to get back on the route.
-                if (cs.isVerifySetDest() && !cs.isDestinationConfirmed()) {
-                    cs.setVerifySetDest(false);
-                    if (missionProcessor.isSetDestinationVisible()) {
-                        log(clientId, "IDLE[TO_MISSION]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
-                        if (!clickSetDestinationByTemplate(clientId)) {
-                            log(clientId, "IDLE[TO_MISSION]: set_destination re-click not confirmed — will re-check after the next jump.");
-                            cs.setVerifySetDest(true);
-                            return;
-                        }
-                        // Destination set 1 jump late — the route now points back 1 jump, so the next
-                        // gate jump lands on the gate and shows no warp tunnel. Flag WARPING to skip
-                        // warp_active verification for that jump (press 's', switch, 15s safe wait).
-                        cs.setSimplifyNextWarp(true);
-                        return;
-                    }
-                }
-
                 // Just exited warp — check mission-specific elements first (no stargate,
                 // it's always visible in-system and would false-match during a gate tunnel).
                 String found = missionProcessor.detectMissionArrivalUI();
@@ -738,34 +715,6 @@ public class ClientManager {
                     }
                     log(clientId, "IDLE[TO_MISSION]: safe spot not found — falling through to stargate.");
                 }
-            }
-            // Safety net: the route to the mission should warp us into the pocket well
-            // before this many gate jumps. Reaching jump #6 means we likely missed the
-            // warp_to_location and kept jumping gates off-route — poll for set_destination
-            // and re-click it to get back on the route.
-            if (cs.getJumpCount() >= 6 && !cs.isDestinationConfirmed()
-                    && cs.getReRouteAttempts() < MAX_REROUTE_ATTEMPTS
-                    && missionProcessor.isSetDestinationVisible()) {
-                cs.setReRouteAttempts(cs.getReRouteAttempts() + 1);
-                log(clientId, "IDLE[TO_MISSION]: jump #" + cs.getJumpCount() + " + set_destination visible — likely missed warp_to_location, re-clicking to re-route ("
-                        + cs.getReRouteAttempts() + "/" + MAX_REROUTE_ATTEMPTS + ").");
-                if (clickSetDestinationByTemplate(clientId)) return;
-                log(clientId, "IDLE[TO_MISSION]: re-route click not confirmed — set_destination still up.");
-                return;
-            }
-            // Drift re-route: if we've been travelling 5min+ without combat/mission-check we may be
-            // looping gates off-route. Re-click set_destination BEFORE warping again rather than after
-            // the warp has gone out (the warp-entry pod check still runs in WARPING firstCheck).
-            if (Duration.between(cs.getLastCombatOrCheck(), LocalDateTime.now()).toMinutes() >= 5
-                    && !cs.isDestinationConfirmed()
-                    && cs.getReRouteAttempts() < MAX_REROUTE_ATTEMPTS
-                    && missionProcessor.isSetDestinationVisible()) {
-                cs.setReRouteAttempts(cs.getReRouteAttempts() + 1);
-                log(clientId, "IDLE[TO_MISSION]: 5m+ drifting toward mission + set_destination visible — re-clicking to re-route before warp ("
-                        + cs.getReRouteAttempts() + "/" + MAX_REROUTE_ATTEMPTS + ").");
-                if (clickSetDestinationByTemplate(clientId)) return;
-                log(clientId, "IDLE[TO_MISSION]: re-route click not confirmed — set_destination still up.");
-                return;
             }
             String found = missionProcessor.detectTravelUI();
             if (found == null) {
@@ -858,25 +807,6 @@ public class ClientManager {
             if (justLanded) {
                 cs.setJustExitedWarp(false);
 
-                // One-time check after the first jump: if set_destination is still on
-                // screen, the earlier click missed and we jumped a random gate — click
-                // it now to get back on the route.
-                if (cs.isVerifySetDest() && !cs.isDestinationConfirmed()) {
-                    cs.setVerifySetDest(false);
-                    if (missionProcessor.isSetDestinationVisible()) {
-                        log(clientId, "IDLE[RETURNING_HOME]: set_destination still visible after first jump — earlier click missed, re-clicking (template only).");
-                        if (!clickSetDestinationByTemplate(clientId)) {
-                            log(clientId, "IDLE[RETURNING_HOME]: set_destination re-click not confirmed — will re-check after the next jump.");
-                            cs.setVerifySetDest(true);
-                            return;
-                        }
-                        // Destination set 1 jump late — the route now points back 1 jump, so the next
-                        // gate jump lands on the gate and shows no warp tunnel. Flag WARPING to skip
-                        // warp_active verification for that jump (press 's', switch, 15s safe wait).
-                        cs.setSimplifyNextWarp(true);
-                        return;
-                    }
-                }
             }
 
             // Single returning-UI scan (dock/stargate/agent), reused for the just-landed
@@ -1625,47 +1555,30 @@ public class ClientManager {
      * the click landed by OCR-reading the info-panel Route section ("Route  N Jumps"). The
      * set_destination prompt itself looks the same before and after the click, so its presence
      * proves nothing — and its *absence* proves nothing either, since a miss also closes the menu.
+     * The route panel is the ONLY confirmation: no route logged means it wasn't clicked.
      * Returns true if confirmed.
      */
     private boolean clickSetDestinationByTemplate(String clientId) {
         int[] pos = missionProcessor.findTemplatePos("set_destination");
         if (pos == null) return false;
-        log(clientId, "TRAVEL: set_destination found at (" + pos[0] + "," + pos[1] + ") — clicking.");
+        log(clientId, "ROUTE: set_destination found at (" + pos[0] + "," + pos[1] + ") — clicking.");
         missionProcessor.clickPos(pos[0], pos[1]);
         // Move the cursor off the prompt (click in empty space) so it can't cover either template
         // during the confirmation scan.
         missionProcessor.clickEmptySpace();
-        // Primary check: the info-panel Route section. It persists for the whole leg, so a
-        // missed click can't be read as success the way a faded toast can.
-        log(clientId, "TRAVEL: reading the route panel to confirm the destination took.");
+        log(clientId, "ROUTE: reading the route panel to confirm the destination took.");
         MissionProcessor.RouteInfo route = missionProcessor.readRoute();
+        log(clientId, "ROUTE: panel OCR: [" + route.rawOneLine() + "]");
         if (route.isSet()) {
-            log(clientId, "TRAVEL: set_destination confirmed — route panel shows " + route + ".");
-            confirmDestination(clientId);
+            log(clientId, "ROUTE = " + route + " — destination confirmed.");
             return true;
         }
-        // Fallback: the transient destination_set toast, if we caught it before the OCR scan.
-        if ("destination_set".equals(missionProcessor.findAnyTemplate("destination_set"))) {
-            log(clientId, "TRAVEL: set_destination confirmed — destination_set visible.");
-            confirmDestination(clientId);
-            return true;
-        }
-        log(clientId, "TRAVEL: no route in the info panel and no destination_set — not confirmed.");
+        log(clientId, "ROUTE = none — set_destination was not clicked.");
         return false;
-    }
-
-    /** Route is set: no further set_destination polling this leg (post-jump verify, jump-count and
-     *  drift re-routes all stand down). */
-    private void confirmDestination(String clientId) {
-        ClientState cs = stateManager.getState(clientId);
-        cs.setDestinationConfirmed(true);
-        cs.setVerifySetDest(false);
     }
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
-        cs.setReRouteAttempts(0);          // fresh leg
-        cs.setDestinationConfirmed(false); // fresh leg — route not confirmed yet
         missionProcessor.closeAllDialogs();
         missionProcessor.pressCtrlR();
         missionProcessor.closeAllDialogs();
@@ -1681,21 +1594,28 @@ public class ClientManager {
                 seen = missionProcessor.findTemplate("warp_to_location") != null;
             }
         } else {
-            // Set destination by template only. Nudge the camera (refresh a stale frame) and
-            // retry up to twice if it isn't detected, rather than blind-clicking a hardcoded
-            // coordinate. If it still can't be found, make the jump anyway — the jump #1
-            // re-check (verifySetDest) re-clicks set_destination once we're on a gate.
+            // Set destination by template only, confirmed by the route panel. We do NOT jump
+            // without a route — staying in TRAVEL re-runs this whole post-undock routine on the
+            // next tick, and it keeps repeating until the route panel actually reads a route.
             // missionProcessor.clickSetDestination(281, 515); // undock position (hardcoded — disabled for now)
             boolean destSet = clickSetDestinationByTemplate(clientId);
             for (int attempt = 1; !destSet && attempt <= 2; attempt++) {
-                log(clientId, "TRAVEL: set_destination not visible — nudging view (" + attempt + "/2).");
+                log(clientId, "TRAVEL: no route yet — nudging view (" + attempt + "/2).");
                 missionProcessor.nudgeView();
                 destSet = clickSetDestinationByTemplate(clientId);
             }
             if (!destSet) {
-                log(clientId, "TRAVEL: set_destination not found after 2 nudges — making the jump, will resolve after jump #1.");
+                // No route — but a same-system mission has no destination to set at all: the
+                // agent gives warp_to_location straight away. If that's on screen, we're already
+                // where we need to be, so carry on instead of looping for a route that'll never
+                // appear. Otherwise repeat the whole post-undock routine next tick.
+                if (missionProcessor.findTemplate("warp_to_location") != null) {
+                    log(clientId, "TRAVEL: no route but warp_to_location is up — same-system mission, proceeding.");
+                } else {
+                    log(clientId, "TRAVEL: still no route and no warp_to_location after 2 nudges — NOT jumping, repeating the undock routine next tick.");
+                    return;
+                }
             }
-            cs.setVerifySetDest(true); // re-check after first jump that it actually took
         }
 
         // After setting destination, check for hostiles — warp to safe spot if needed.
@@ -2193,7 +2113,7 @@ public class ClientManager {
      *   7  → SAFE WAIT 90s (one-shot 30s drift re-check), then poll every 5s until only ONE 'locked_inquisitor' bracket is left (first kill, 150s failsafe)
      *   8  → Second inquisitor already locked from step 4 — only re-lock if it drifted
      *   9  → WAIT 3s → click 'locked_inquisitor' (select) + press 'ad'
-     *   10 → SAFE WAIT 60s (drift re-lock + re-fire), then poll until ZERO 'locked_inquisitor' brackets and no 'target_inquisitor' left to lock (150s failsafe)
+     *   10 → SAFE WAIT 60s (drift re-lock + re-fire), then poll until ZERO 'locked_inquisitor' brackets and no 'target_inquisitor' left to lock (no timeout — both must be confirmed dead)
      *   11 → Right-click 'launcher' (ammo switch)
      *   12 → Click 'inf_damage' (load infernal/thermal ammo)
      *   13 → SAFE WAIT 10s
@@ -2440,11 +2360,6 @@ public class ClientManager {
                     cs.setCombatStep(11);
                     break;
                 }
-                if (elapsed >= 150) {
-                    log(clientId, "COMBAT[Vengeance] Step 10: " + inqs10 + " locked inquisitor(s) still up after " + elapsed + "s — 150s failsafe, moving on to ammo switch.");
-                    cs.setCombatStep(11);
-                    break;
-                }
                 log(clientId, "COMBAT[Vengeance] Step 10: " + inqs10 + " locked inquisitor(s) / target still on screen (" + elapsed + "s) — re-locking and keeping fire on.");
                 if (missionProcessor.findTemplate("locked_inquisitor") == null) {
                     missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
@@ -2455,6 +2370,9 @@ public class ClientManager {
                     missionProcessor.clickTemplate("locked_inquisitor");
                     missionProcessor.keyPress("ad");
                 }
+                // Fire is on and unattended — hand the foreground to the other client between polls.
+                ClientWindowInfo other10 = findOtherClient(clientId);
+                if (other10 != null) bringToForeground(other10);
                 return;
             }
             case 11: {
@@ -4018,26 +3936,32 @@ public class ClientManager {
     }
 
     // -----------------------------------------------------------------------
-    // RETURNING — one-shot setup: set destination home.
-    //             Navigation (stargates / dock) is handled by IDLE + WARPING cycling.
+    // RETURNING — set destination home, repeating (click + nudge) until the route panel
+    //             actually shows a route. Navigation is handled by IDLE + WARPING cycling.
     // -----------------------------------------------------------------------
 
     private void handleReturning(String clientId, ClientWindowInfo window) {
         ClientState cs = stateManager.getState(clientId);
-        cs.setReRouteAttempts(0);          // fresh leg
-        cs.setDestinationConfirmed(false); // fresh leg — route not confirmed yet
-        // Same as the outbound leg: template-only click (twice), confirmed by destination_set,
-        // nudging the camera to refresh a stale frame if the prompt isn't detected.
+        // Same as the outbound leg: template-only click (twice), confirmed by the route panel,
+        // nudging the camera to refresh a stale frame if the prompt isn't detected. No route
+        // means no jump — stay in RETURNING and repeat on the next tick.
         boolean destSet = clickSetDestinationByTemplate(clientId);
         for (int attempt = 1; !destSet && attempt <= 2; attempt++) {
-            log(clientId, "RETURNING: set_destination not visible — nudging view (" + attempt + "/2).");
+            log(clientId, "RETURNING: no route yet — nudging view (" + attempt + "/2).");
             missionProcessor.nudgeView();
             destSet = clickSetDestinationByTemplate(clientId);
         }
         if (!destSet) {
-            log(clientId, "RETURNING: set_destination not confirmed after 2 nudges — will re-check after jump #1.");
+            // Same-system mission: there's no destination to set — the station is right here and
+            // the dock button is up. Hand over to IDLE[RETURNING_HOME], which docks it. Otherwise
+            // repeat next tick until the route panel actually shows a route.
+            if (missionProcessor.findTemplate("dock") != null) {
+                log(clientId, "RETURNING: no route but dock is up — station is in this system, proceeding.");
+            } else {
+                log(clientId, "RETURNING: still no route and no dock after 2 nudges — NOT jumping, repeating next tick.");
+                return;
+            }
         }
-        cs.setVerifySetDest(true); // re-check after first jump (skipped once confirmed)
         cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
@@ -4294,9 +4218,9 @@ public class ClientManager {
             EventLog.log("FACTION_DECLINE", clientId + " — declined faction mission: "
                     + (offer != null && offer.getTitle() != null ? offer.getTitle() : "unknown"));
             missionProcessor.clickDeclineButton();
-            // Close every open window, not just one 'close': a single close can land on the
-            // regular (non-faction) agent conversation instead of the faction one.
-            missionProcessor.closeAllDialogs();
+            // Dismiss both post-decline dialogs with their 'close' BUTTON, not the window X
+            // (close_active_window) — the X can tear down the wrong agent window.
+            missionProcessor.clickAllCloseButtons();
             stateManager.recordFactionDecline(clientId, LocalDateTime.now());
         } else {
             log(clientId, "FACTION_CHECK: unwanted faction mission but declined < " + FACTION_DECLINE_HOURS

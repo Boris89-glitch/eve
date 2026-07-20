@@ -164,16 +164,25 @@ public class MissionProcessor {
      * Click Accept and confirm it took: the accept button must be gone afterwards.
      * Retries once if it's still on screen. Returns false if the offer is still up.
      */
+    /**
+     * Click ACCEPT, then confirm we actually have a mission. The accept button going away
+     * proves nothing (a closed or covered dialog does the same) — 'quit_mission' and
+     * 'complete_mission' only exist while a mission is active, so either one is the real
+     * confirmation. Click away to mid first so the cursor / lingering offer buttons can't
+     * cover them during the scan.
+     */
     public boolean clickAcceptButton() {
         for (int attempt = 1; attempt <= 2; attempt++) {
             log("Clicking ACCEPT (attempt " + attempt + ")");
             ocrBridge.clickTemplate("accept");
             sleep(POST_CLICK_DELAY_MS);
-            if (ocrBridge.waitForTemplateGone("accept", 3)) {
-                log("ACCEPT confirmed — accept button gone.");
+            clickEmptySpace();   // swift click away in the middle (empty space)
+            String confirm = ocrBridge.waitForAnyTemplate(3, "quit_mission", "complete_mission");
+            if (confirm != null) {
+                log("ACCEPT confirmed — '" + confirm + "' visible, mission is active.");
                 return true;
             }
-            log("ACCEPT not confirmed — accept button still visible.");
+            log("ACCEPT not confirmed — neither quit_mission nor complete_mission visible.");
         }
         return false;
     }
@@ -337,6 +346,38 @@ public class MissionProcessor {
             sleep(500);
         }
         log("No more dialogs visible.");
+    }
+
+    /**
+     * Dismiss every dialog showing a 'close' BUTTON (not the window X). A decline leaves two
+     * stacked agent dialogs, and clickTemplate only ever presses the single best match, so
+     * loop until none are left — bounded so a close that never clears can't spin forever.
+     */
+    public void clickAllCloseButtons() {
+        log("Closing dialogs via their 'close' button");
+        int clicked = 0;
+        while (clicked < 4 && ocrBridge.findAnyTemplate("close") != null) {
+            ocrBridge.clickTemplate("close");
+            clicked++;
+            sleep(500);
+        }
+        log("'close' pressed " + clicked + " time(s) — no more close buttons visible.");
+    }
+
+    /**
+     * Dismiss every dialog showing a 'close' BUTTON (not the window X). A decline leaves two
+     * stacked agent dialogs, and clickTemplate only ever presses the single best match, so
+     * loop until none are left — bounded so a close that never clears can't spin forever.
+     */
+    public void clickAllCloseButtons() {
+        log("Closing dialogs via their 'close' button");
+        int clicked = 0;
+        while (clicked < 4 && ocrBridge.findAnyTemplate("close") != null) {
+            ocrBridge.clickTemplate("close");
+            clicked++;
+            sleep(500);
+        }
+        log("'close' pressed " + clicked + " time(s) — no more close buttons visible.");
     }
 
     public void closeMissionDialog() {
@@ -1015,14 +1056,20 @@ public class MissionProcessor {
         public final int jumps;
         /** Last waypoint system read (e.g. "S-MDYI"), or null. */
         public final String destination;
+        /** Raw OCR text of the panel — what the bot actually saw, for diagnosing misreads. */
+        public final String raw;
 
-        RouteInfo(boolean routeSet, int jumps, String destination) {
+        RouteInfo(boolean routeSet, int jumps, String destination, String raw) {
             this.routeSet = routeSet;
             this.jumps = jumps;
             this.destination = destination;
+            this.raw = raw == null ? "" : raw;
         }
 
         public boolean isSet() { return routeSet; }
+
+        /** One-line dump of the raw panel OCR, newlines flattened. */
+        public String rawOneLine() { return raw.replaceAll("\\s*\\R\\s*", " | ").trim(); }
 
         @Override public String toString() {
             if (!routeSet) return "no route";
@@ -1039,10 +1086,11 @@ public class MissionProcessor {
     public RouteInfo readRoute() {
         Rectangle r = Layout.routePanel();
         com.google.gson.JsonObject v = ocrBridge.readRoute(r.x, r.y, r.width, r.height);
-        if (v == null) return new RouteInfo(false, -1, null);
+        if (v == null) return new RouteInfo(false, -1, null, null);
         String dest = v.has("destination") && !v.get("destination").isJsonNull()
                 ? v.get("destination").getAsString() : null;
-        return new RouteInfo(v.get("route_set").getAsBoolean(), v.get("jumps").getAsInt(), dest);
+        String raw = v.has("raw") && !v.get("raw").isJsonNull() ? v.get("raw").getAsString() : null;
+        return new RouteInfo(v.get("route_set").getAsBoolean(), v.get("jumps").getAsInt(), dest, raw);
     }
 
     /**

@@ -1156,6 +1156,9 @@ def load_mission_area() -> Tuple[int, int, int, int]:
 _WAYPOINT_ROW_RE = re.compile(r"[<«]|[0-9O@]\s*[.,]\s*[0-9]")
 _SYSTEM_RE = re.compile(r"([A-Za-z0-9]{1,6}-[A-Za-z0-9]{1,6}|[A-Za-z]{3,8})")
 _JUMPS_WORD_RE = re.compile(r"ump", re.IGNORECASE)
+# "Route 1jump" / "Route 12 Jumps" — the count already glued to (or spaced from) the word,
+# read straight off the header text. Avoids the crop stage when OCR kept the digit.
+_JUMPS_INLINE_RE = re.compile(r"(\d{1,3})\s*j[uv]mps?", re.IGNORECASE)
 
 
 def read_route_panel(img: "Image.Image") -> dict:
@@ -1191,8 +1194,15 @@ def read_route_panel(img: "Image.Image") -> dict:
         if m:
             destination = m.group(1)
 
-    data = pytesseract.image_to_data(gray, config=cfg, output_type=pytesseract.Output.DICT)
     jumps, route_set = -1, destination is not None
+    # Cheap path first: the header often survives whole ("Route 1jump", "Route 12 Jumps"),
+    # digit glued to the word or not. Only fall back to the crop-and-re-OCR when it doesn't.
+    inline = _JUMPS_INLINE_RE.search(text)
+    if inline:
+        jumps, route_set = int(inline.group(1)), True
+        return {"route_set": route_set, "jumps": jumps, "destination": destination, "raw": text}
+
+    data = pytesseract.image_to_data(gray, config=cfg, output_type=pytesseract.Output.DICT)
     for i, word in enumerate(data["text"]):
         if not _JUMPS_WORD_RE.search(word or ""):
             continue
