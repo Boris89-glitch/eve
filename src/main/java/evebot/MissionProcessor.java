@@ -945,13 +945,28 @@ public class MissionProcessor {
         sleep(1200); // wait for standings window to open
     }
 
-    /** OCR-read agent standings from the standings info window. */
+    /** How many times to re-read the standings OCR region before giving up. */
+    private static final int STANDINGS_OCR_ATTEMPTS = 4;
+
+    /** OCR-read agent standings from the standings info window. Retries a few times — the
+     *  window opens fine but the OCR occasionally comes back empty (text not yet rendered). */
     public double readAgentStandings() {
         // Exact value intentionally not logged — OCR misreads it; only low-standings warnings are kept.
         // Region covers ONLY the first (agent) row of the standings list — a taller box also
         // catches the corp-standing row below it, and psm 7 single-line OCR fails on two lines.
         Rectangle r = Layout.standingsOcr();
-        return ocrBridge.readStandings(r.x, r.y, r.width, r.height);
+        for (int attempt = 1; attempt <= STANDINGS_OCR_ATTEMPTS; attempt++) {
+            double s = ocrBridge.readStandings(r.x, r.y, r.width, r.height);
+            if (!Double.isNaN(s)) return s;
+            if (attempt < STANDINGS_OCR_ATTEMPTS) {
+                log("Standings OCR empty (attempt " + attempt + "/" + STANDINGS_OCR_ATTEMPTS
+                        + ") — closing and reopening standings.");
+                closeStandingsDialog();
+                clickAgentStandings();
+            }
+        }
+        log("Standings OCR still unreadable after " + STANDINGS_OCR_ATTEMPTS + " attempts.");
+        return Double.NaN;
     }
 
     /**

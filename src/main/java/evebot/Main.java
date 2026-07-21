@@ -68,6 +68,7 @@ public class Main {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             System.out.println("\n[Main] Shutting down.");
             SessionStats.logSummary();
+            stateManager.resetAllToIdle();   // persist all clients IDLE — next launch starts clean
             stateManager.saveStates();
             clientManager.shutdown();
             scheduler.shutdownNow();

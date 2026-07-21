@@ -81,8 +81,8 @@ public class ClientManager {
     private static final int  THUMBNAIL_CLICK_OFFSET_Y = 75;
     /** Scarlet lock-confirm: seconds to wait for 'locked_anire' before re-attempting the ctrl-click. */
     private static final long SCARLET_LOCK_RETRY_SECS  = 2;
-    /** Re-read agent standings after this many non-"anomic" declined missions (keeps gating current). */
-    private static final int  STANDINGS_RECHECK_DECLINES = 4;
+    /** Re-read agent standings after this many declined missions (keeps gating current). */
+    private static final int  STANDINGS_RECHECK_DECLINES = 5;
     /** Consecutive WARPING dock re-issues that found no DOCK button and no station before we
      *  stop re-issuing and drop the client back to IDLE. */
     private static final int  DOCK_REISSUE_MISS_LIMIT = 3;
@@ -1207,6 +1207,7 @@ public class ClientManager {
             }
             System.out.println(">>> [" + clientId + "] DECLINE — auto-reject template "
                     + missionTemplate.substring(7) + " (no OCR)");
+            countDeclineForStandings(clientId, cs);
             missionProcessor.clickDeclineButton();
             stateManager.setState(clientId, ClientState.State.DECLINING);
             return;
@@ -1235,6 +1236,7 @@ public class ClientManager {
                 Mission noTplMission = missionProcessor.readMission(getMissionAreaForClient(clientId));
                 if (noTplMission == null) {
                     System.out.println(">>> [" + clientId + "] DECLINE — no mission template, OCR failed (unwanted)");
+                    countDeclineForStandings(clientId, cs);
                     missionProcessor.clickDeclineButton();
                     stateManager.setState(clientId, ClientState.State.DECLINING);
                     return;
@@ -1363,6 +1365,23 @@ public class ClientManager {
         applyDecision(clientId, mission, missionConfig.evaluate(mission, cs.getLastKnownStanding()));
     }
 
+    /**
+     * Count one declined offer; every {@link #STANDINGS_RECHECK_DECLINES}th decline schedules a
+     * standings re-read so the tracked per-client standing (used for mission gating) doesn't drift
+     * stale during a decline streak. Called from EVERY real offer-decline path, not just the
+     * OCR-evaluated one, so the count matches the declines actually happening on screen.
+     */
+    private void countDeclineForStandings(String clientId, ClientState cs) {
+        int n = cs.getDeclineCount() + 1;
+        if (n >= STANDINGS_RECHECK_DECLINES) {
+            cs.setDeclineCount(0);
+            cs.setStandingsCheckDue(true);
+            log(clientId, STANDINGS_RECHECK_DECLINES + " declines — standings re-check scheduled.");
+        } else {
+            cs.setDeclineCount(n);
+        }
+    }
+
     /** Click accept/decline for a decided mission and transition state. */
     private void applyDecision(String clientId, Mission mission, MissionConfig.Decision decision) {
         if (decision == MissionConfig.Decision.ACCEPT) {
@@ -1377,21 +1396,7 @@ public class ClientManager {
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
         } else {
             System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle());
-            // Count non-"anomic" declines; every Nth one schedules a standings re-read so the
-            // tracked per-client standing (used for mission gating) doesn't drift stale while a
-            // client sits declining offers without ever completing a mission.
-            ClientState cs = stateManager.getState(clientId);
-            String title = mission.getTitle() != null ? mission.getTitle().toLowerCase() : "";
-            if (!title.contains("anomic")) {
-                int n = cs.getNonAnomicDeclineCount() + 1;
-                if (n >= STANDINGS_RECHECK_DECLINES) {
-                    cs.setNonAnomicDeclineCount(0);
-                    cs.setStandingsCheckDue(true);
-                    log(clientId, STANDINGS_RECHECK_DECLINES + " non-anomic declines — standings re-check scheduled.");
-                } else {
-                    cs.setNonAnomicDeclineCount(n);
-                }
-            }
+            countDeclineForStandings(clientId, stateManager.getState(clientId));
             missionProcessor.clickDeclineButton();
             stateManager.setState(clientId, ClientState.State.DECLINING);
         }
@@ -4001,9 +4006,6 @@ public class ClientManager {
             stateManager.recordStanding(clientId, standings);
             log(clientId, "COMPLETING: tracked agent standing updated for mission gating (gate: < 1).");
         }
-        // Turning in a mission boosts standings and we just re-read them here, so the
-        // non-anomic decline counter (which schedules a standings re-check) starts fresh.
-        stateManager.getState(clientId).setNonAnomicDeclineCount(0);
 
         missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X', fixed-loc fallback)
         missionProcessor.doubleClickAgentIcon(); // refocus agent dialog (standings covers complete_mission)
@@ -4087,10 +4089,10 @@ public class ClientManager {
     /** Take-all standings threshold is normally 0.0. It is raised to 1.0 (this client grabs the
      *  standings for itself more eagerly) when the fleet partner grabbed a mission in the last 2
      *  minutes, and forced take-all (regardless of our own standing) when the partner's standing
-     *  is more than 1.5 above ours, so the lagging client catches up. */
+     *  is more than 1.0 above ours, so the lagging client catches up. */
     private static final double TAKE_ALL_THRESHOLD_HIGH = 1.0;
     private static final long   PARTNER_GRAB_WINDOW_MIN  = 2;
-    private static final double PARTNER_STANDING_GAP     = 1.5;
+    private static final double PARTNER_STANDING_GAP     = 1.0;
 
     /**
      * Pick the fleet reward (share vs take-all) from the agent's standing and click it.
@@ -4748,18 +4750,17 @@ public class ClientManager {
             // late jam appears. On the first jump right after undocking — home station still in
             // front of us — the warp from a standstill takes even longer to engage; in that case
             // wait up to 7s, so we don't prematurely read "warp not active" and redock.
-            // Safe-spot evade is the exception: sitting still with an enemy in local is
-            // dangerous, and the bookmark click already fired in the previous state (warp_active
-            // shows within ~1s if it took), so react fast — 1s grace, no home-station extension —
-            // to nudge + re-warp the instant it's clearly stuck.
-            long grace = cs.isSafeSpotWarp() ? 1 : 5;
+            // Safe-spot evade waits a touch shorter than a normal warp (3s vs 5s) but still
+            // long enough not to misread a still-spinning-up warp as stuck; the home-station
+            // extension below still applies.
+            long grace = cs.isSafeSpotWarp() ? 3 : 5;
             if (elapsed < grace) {
                 return;
             }
             // The extra home-station wait (grace→7s) only exists to give a standstill warp time to
             // spin up before we'd prematurely read "warp not active". If warp_active is already
             // showing (docking/undocking warp took), don't sit out the rest — proceed to switch now.
-            if (!cs.isSafeSpotWarp() && elapsed < 7
+            if (elapsed < 7
                     && !missionProcessor.isWarpActive()
                     && missionProcessor.findTemplate("home_station") != null) {
                 return;

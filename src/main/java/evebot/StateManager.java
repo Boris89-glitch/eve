@@ -249,6 +249,12 @@ public class StateManager {
         }
     }
 
+    /** Force every client to IDLE — called on shutdown so a persisted mid-mission state
+     *  can't be reloaded next launch (clients always start clean from IDLE). */
+    public void resetAllToIdle() {
+        states.values().forEach(cs -> cs.setState(ClientState.State.IDLE));
+    }
+
     public void saveStates() {
         try {
             Files.createDirectories(STATE_FILE.getParent());

@@ -48,3 +48,4 @@ config/bot_state.json
 events.log
 config/standings.json
 config/layout.json
+ocr/debug/

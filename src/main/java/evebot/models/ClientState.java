@@ -250,11 +250,11 @@ public class ClientState {
      *  fly). Set true only at the IDLE cold-check entries; cleared on leaving CHECKING_MISSIONS. */
     private boolean allowNotCompleteRecovery = false;
 
-    /** Running count of non-"anomic" missions declined (by OCR title) since the last standings
-     *  re-read. Every 4th such decline schedules a standings check so mission gating stays current. */
-    private int nonAnomicDeclineCount = 0;
+    /** Running count of missions declined since the last standings re-read. Every Nth decline
+     *  schedules a standings check so mission gating stays current. */
+    private int declineCount = 0;
 
-    /** Set when nonAnomicDeclineCount reaches the threshold — DECLINING re-reads agent standings. */
+    /** Set when declineCount reaches the threshold — DECLINING re-reads agent standings. */
     private boolean standingsCheckDue = false;
 
     /** Number of stargate jumps since undocking — logged on pod death for location context. */
@@ -533,8 +533,8 @@ public boolean isDockingToStation()             { return dockingToStation; }
     public boolean isAllowNotCompleteRecovery()           { return allowNotCompleteRecovery; }
     public void    setAllowNotCompleteRecovery(boolean v) { this.allowNotCompleteRecovery = v; }
 
-    public int  getNonAnomicDeclineCount()         { return nonAnomicDeclineCount; }
-    public void setNonAnomicDeclineCount(int v)    { this.nonAnomicDeclineCount = v; }
+    public int  getDeclineCount()                  { return declineCount; }
+    public void setDeclineCount(int v)             { this.declineCount = v; }
 
     public boolean isStandingsCheckDue()           { return standingsCheckDue; }
     public void    setStandingsCheckDue(boolean v) { this.standingsCheckDue = v; }
