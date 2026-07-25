@@ -334,9 +334,22 @@ public class ClientManager {
                 return; // station still loading — wait, keep this client in the foreground
             }
             cs.setPendingKillReportAdd(false);
-            String killer = missionProcessor.addKillerFromKillReport();
-            EventLog.log("POD_KILLER", clientId + " — podded by: "
-                    + (killer != null && !killer.isEmpty() ? killer : "unknown (added from kill report)"));
+            // Returns the system named in the report's location header — the only exact record of
+            // where we died. Everything the map says is only reachable through it is refused from
+            // here on, so we don't take the next mission straight back into the same camp.
+            String poddedSystem = missionProcessor.addKillerFromKillReport();
+            EventLog.log("POD_KILLER", clientId + " — killer flagged from kill report; podded in "
+                    + (poddedSystem != null ? poddedSystem : "an unreadable system"));
+            if (poddedSystem != null) {
+                stateManager.recordPoddedSystem(poddedSystem);
+                Set<String> blocked = SystemMap.blockedBy(poddedSystem);
+                String blockedNames = blocked.stream().map(SystemMap::display).sorted()
+                        .collect(java.util.stream.Collectors.joining(", "));
+                log(clientId, "POD_AVOID: podded in " + poddedSystem + " — refusing "
+                        + blocked.size() + " system(s): " + blockedNames);
+                EventLog.log("POD_AVOID", clientId + " — avoiding " + poddedSystem
+                        + " and everything behind it (" + blocked.size() + "): " + blockedNames);
+            }
         }
 
         LocalDateTime cooldownEnd = stateManager.getPodCooldownEnd();
@@ -778,6 +791,26 @@ public class ClientManager {
                     }
                     cs.incrementJumpCount();
                     cs.setKlyChecked(false); // new system next landing — re-arm the enemy-in-local evade check
+                    // Pod detour: take the safe branch on this jump by right-clicking that system
+                    // instead of the autopilot's stargate (see planPodDetour). One-shot — EVE
+                    // re-plots from where we land, so the rest of the trip is normal jumps. If the
+                    // template isn't on screen, fall through to the stargate rather than sit still.
+                    String detourTemplate = cs.getPodRerouteTemplate();
+                    if (detourTemplate != null) {
+                        cs.setPodRerouteTemplate(null);
+                        if (missionProcessor.findTemplate(detourTemplate) != null) {
+                            log(clientId, "IDLE[TO_MISSION]: POD_AVOID detour — right-click '"
+                                    + detourTemplate + "' → jump. (jump #" + cs.getJumpCount() + ")");
+                            EventLog.log("POD_AVOID_REROUTE", clientId + " — first jump taken via "
+                                    + detourTemplate + " to route around the podded system");
+                            cs.setWarpStartTime(LocalDateTime.now());
+                            stateManager.setState(clientId, ClientState.State.WARPING);
+                            new Thread(() -> missionProcessor.rightClickAndSelect(detourTemplate, "jump")).start();
+                            break;
+                        }
+                        log(clientId, "IDLE[TO_MISSION]: POD_AVOID detour wanted '" + detourTemplate
+                                + "' but it isn't on screen — taking the normal stargate.");
+                    }
                     log(clientId, "IDLE[TO_MISSION]: stargate — right-click → jump. (jump #" + cs.getJumpCount() + ")");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
@@ -1243,6 +1276,9 @@ public class ClientManager {
                 }
                 cs.setCurrentMission(noTplMission);
 
+                // Refuse anything at (or behind) the system we were podded in, before the rules run.
+                if (declineIfPodAvoided(clientId, cs, noTplMission)) return;
+
                 // Evolution — NEVER decline. The user runs this mission manually, so
                 // leave the offer on screen untouched, persist that it was offered, and
                 // stop checking the faction agent for the rest of the session. OCR reads
@@ -1346,6 +1382,10 @@ public class ClientManager {
         }
         cs.setCurrentMission(mission);
 
+        // Refuse anything at (or behind) the system we were podded in — a wanted mission type is
+        // still not worth flying back into the camp that killed us.
+        if (declineIfPodAvoided(clientId, cs, mission)) return;
+
         // The matched wanted template already identifies the combat ship type, so set it as the
         // combat target now. The repair-time dialog re-match (performUndockStart) still overrides
         // this if it succeeds; but when that re-match misses (flaky), this keeps IN_COMBAT from
@@ -1380,6 +1420,43 @@ public class ClientManager {
         } else {
             cs.setDeclineCount(n);
         }
+    }
+
+    /**
+     * Pod-avoidance gate for a freshly OCR'd offer: decline it outright if its Location is the
+     * system we were last podded in, or anything the map can only reach through that system.
+     *
+     * Runs before the normal rule set so a mission we'd otherwise want still gets refused — the
+     * point is to never fly back into the camp that killed us. An unreadable or off-map location
+     * passes: {@link SystemMap#isBlocked} only refuses what the map positively places behind the
+     * podded system, and the undock route-panel check (see {@link #handleTravel}) is the backstop
+     * for anything that slips through here.
+     *
+     * @return true if the mission was declined (caller must stop).
+     */
+    private boolean declineIfPodAvoided(String clientId, ClientState cs, Mission mission) {
+        String avoided = stateManager.getAvoidedSystem();
+        if (avoided == null || mission == null) return false;
+
+        String location = mission.getLocation();
+        if (!SystemMap.isBlocked(location, avoided)) return false;
+
+        long left = stateManager.getAvoidMinutesRemaining();
+        String why = SystemMap.normalize(location).equals(SystemMap.normalize(avoided))
+                ? "the system we were podded in"
+                : "only reachable through " + avoided + ", where we were podded";
+        System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle()
+                + " (location " + location + " is " + why + ")");
+        log(clientId, "POD_AVOID: declining '" + mission.getTitle() + "' — " + location + " is " + why
+                + (left >= 0 ? " (" + left + "m of avoidance left)" : " (avoided for the session)"));
+        EventLog.log("POD_AVOID_DECLINE", clientId + " — declined '" + mission.getTitle()
+                + "' at " + location + " (" + why + ")");
+
+        cs.setCurrentMission(null);
+        countDeclineForStandings(clientId, cs);
+        missionProcessor.clickDeclineButton();
+        stateManager.setState(clientId, ClientState.State.DECLINING);
+        return true;
     }
 
     /** Click accept/decline for a decided mission and transition state. */
@@ -1561,11 +1638,15 @@ public class ClientManager {
      * set_destination prompt itself looks the same before and after the click, so its presence
      * proves nothing — and its *absence* proves nothing either, since a miss also closes the menu.
      * The route panel is the ONLY confirmation: no route logged means it wasn't clicked.
-     * Returns true if confirmed.
+     * Returns the confirmed route (never null when set), or null if no route showed up.
+     *
+     * The returned destination is also what the pod-avoidance check reads in
+     * {@link #handleTravel} — the route panel is the first place the actual destination system
+     * is visible when the mission dialog's Location line failed to OCR at pickup.
      */
-    private boolean clickSetDestinationByTemplate(String clientId) {
+    private MissionProcessor.RouteInfo clickSetDestinationByTemplate(String clientId) {
         int[] pos = missionProcessor.findTemplatePos("set_destination");
-        if (pos == null) return false;
+        if (pos == null) return null;
         log(clientId, "ROUTE: set_destination found at (" + pos[0] + "," + pos[1] + ") — clicking.");
         missionProcessor.clickPos(pos[0], pos[1]);
         // Move the cursor off the prompt (click in empty space) so it can't cover either template
@@ -1576,10 +1657,79 @@ public class ClientManager {
         log(clientId, "ROUTE: panel OCR: [" + route.rawOneLine() + "]");
         if (route.isSet()) {
             log(clientId, "ROUTE = " + route + " — destination confirmed.");
-            return true;
+            return route;
         }
         log(clientId, "ROUTE = none — set_destination was not clicked.");
-        return false;
+        return null;
+    }
+
+    /**
+     * Second pod-avoidance gate, on the route panel after undock. The mission dialog's Location
+     * line is small and OCRs badly, so an offer at a system we're avoiding can get past
+     * {@link #declineIfPodAvoided}. The route panel names the destination in a much cleaner font,
+     * so re-check it here — and if it IS behind the podded system, get back in the hangar and quit
+     * the mission rather than fly the route.
+     *
+     * @return true if we redocked and quit (caller must stop).
+     */
+    private boolean quitIfRoutePodAvoided(String clientId, ClientState cs,
+                                          MissionProcessor.RouteInfo route) {
+        String avoided = stateManager.getAvoidedSystem();
+        if (avoided == null || route == null || route.destination == null) return false;
+        if (!SystemMap.isBlocked(route.destination, avoided)) return false;
+
+        String dest = SystemMap.display(SystemMap.normalize(route.destination));
+        log(clientId, "POD_AVOID: route destination " + dest + " is at/behind " + avoided
+                + " where we were podded — redocking and quitting this mission.");
+        EventLog.log("POD_AVOID_QUIT", clientId + " — undocked onto a route to " + dest
+                + ", at/behind the podded system " + avoided + "; redocked and quit");
+
+        if (missionProcessor.emergencyRedock()) {
+            missionProcessor.quitMission();
+            cs.setCurrentMission(null);
+            cs.setTravelPhase(ClientState.TravelPhase.NONE);
+            stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+        } else {
+            // Couldn't get back in. Flying the route anyway is exactly what avoidance exists to
+            // prevent, so stop the client and let the user sort it out.
+            parkClient(clientId, "route runs through the podded system " + avoided + " and redock failed");
+        }
+        return true;
+    }
+
+    /**
+     * Plan the detour around the podded system for a destination we ARE still allowed to reach.
+     *
+     * The autopilot always picks the shortest route, which after a pod death may still run through
+     * the system that killed us even when a longer way round exists (die in KLY-C0 heading for
+     * ROIR-Y: the safe path is J-CIJV => G95-VZ => ROIR-Y). EVE re-plots the route from wherever we
+     * are, so we only have to steer the FIRST jump onto the safe branch — from there the autopilot's
+     * own shortest path no longer touches the podded system. That first hop is taken by right-clicking
+     * the system and jumping instead of the stargate the autopilot would have used.
+     *
+     * Stores the template on the client state; a null (or absent template) just means the trip runs
+     * normally. Missing template PNGs match nothing, so an unbuilt template degrades to a normal jump.
+     */
+    private void planPodDetour(String clientId, ClientState cs, MissionProcessor.RouteInfo route) {
+        cs.setPodRerouteTemplate(null);
+        String avoided = stateManager.getAvoidedSystem();
+        if (avoided == null || route == null || route.destination == null) return;
+
+        List<String> detour = SystemMap.detour(route.destination, avoided);
+        if (detour.size() < 2) return; // no way round, or destination isn't on the map
+
+        String firstHop = detour.get(1);
+        String template = SystemMap.rerouteTemplate(firstHop);
+        if (template == null) {
+            log(clientId, "POD_AVOID: safe route to " + SystemMap.display(SystemMap.normalize(route.destination))
+                    + " starts at " + firstHop + ", but that system has no reroute template"
+                    + " — flying the autopilot route as-is.");
+            return;
+        }
+        cs.setPodRerouteTemplate(template);
+        log(clientId, "POD_AVOID: avoiding " + avoided + " — first jump goes to " + firstHop
+                + " via right-click on '" + template + "' instead of the autopilot stargate."
+                + " Safe path: " + String.join(" => ", detour));
     }
 
     private void handleTravel(String clientId, ClientWindowInfo window) {
@@ -1603,13 +1753,18 @@ public class ClientManager {
             // without a route — staying in TRAVEL re-runs this whole post-undock routine on the
             // next tick, and it keeps repeating until the route panel actually reads a route.
             // missionProcessor.clickSetDestination(281, 515); // undock position (hardcoded — disabled for now)
-            boolean destSet = clickSetDestinationByTemplate(clientId);
-            for (int attempt = 1; !destSet && attempt <= 2; attempt++) {
+            MissionProcessor.RouteInfo route = clickSetDestinationByTemplate(clientId);
+            for (int attempt = 1; route == null && attempt <= 2; attempt++) {
                 log(clientId, "TRAVEL: no route yet — nudging view (" + attempt + "/2).");
                 missionProcessor.nudgeView();
-                destSet = clickSetDestinationByTemplate(clientId);
+                route = clickSetDestinationByTemplate(clientId);
             }
-            if (!destSet) {
+            // The route panel is the first clean read of the destination — refuse it here if it
+            // sits at or behind the system we were podded in, or plan a detour if it's still
+            // reachable the long way round.
+            if (quitIfRoutePodAvoided(clientId, cs, route)) return;
+            planPodDetour(clientId, cs, route);
+            if (route == null) {
                 // No route — but a same-system mission has no destination to set at all: the
                 // agent gives warp_to_location straight away. If that's on screen, we're already
                 // where we need to be, so carry on instead of looping for a route that'll never
@@ -3950,13 +4105,13 @@ public class ClientManager {
         // Same as the outbound leg: template-only click (twice), confirmed by the route panel,
         // nudging the camera to refresh a stale frame if the prompt isn't detected. No route
         // means no jump — stay in RETURNING and repeat on the next tick.
-        boolean destSet = clickSetDestinationByTemplate(clientId);
-        for (int attempt = 1; !destSet && attempt <= 2; attempt++) {
+        MissionProcessor.RouteInfo route = clickSetDestinationByTemplate(clientId);
+        for (int attempt = 1; route == null && attempt <= 2; attempt++) {
             log(clientId, "RETURNING: no route yet — nudging view (" + attempt + "/2).");
             missionProcessor.nudgeView();
-            destSet = clickSetDestinationByTemplate(clientId);
+            route = clickSetDestinationByTemplate(clientId);
         }
-        if (!destSet) {
+        if (route == null) {
             // Same-system mission: there's no destination to set — the station is right here and
             // the dock button is up. Hand over to IDLE[RETURNING_HOME], which docks it. Otherwise
             // repeat next tick until the route panel actually shows a route.

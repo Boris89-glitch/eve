@@ -267,6 +267,13 @@ public class ClientState {
      *  one-shot so we only sweep close_active_window once per trip. */
     private boolean windowsClosedAfterJump1 = false;
 
+    /** templates/&lt;name&gt;.png of the system to take on the FIRST jump out of the station, when the
+     *  autopilot route would otherwise run through the system we were podded in. Right-clicked and
+     *  jumped in place of the stargate; EVE re-routes from wherever we land, so steering the first
+     *  hop onto the safe branch is enough to keep the whole trip clear. Null = no detour needed,
+     *  and it is cleared the moment the hop is taken (one-shot per trip). */
+    private String podRerouteTemplate = null;
+
     /** True after evading to a safe spot — next landing jumps out instead of re-evading. Cleared on stargate jump. */
     private boolean warpedToSafeSpot = false;
 
@@ -361,6 +368,7 @@ public class ClientState {
             this.warpedToSafeSpot = false;
             this.safeSpotWarp     = false;
             this.windowsClosedAfterJump1 = false;
+            this.podRerouteTemplate = null;
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
@@ -547,6 +555,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isWindowsClosedAfterJump1()           { return windowsClosedAfterJump1; }
     public void    setWindowsClosedAfterJump1(boolean v) { this.windowsClosedAfterJump1 = v; }
+
+    public String getPodRerouteTemplate()           { return podRerouteTemplate; }
+    public void   setPodRerouteTemplate(String t)   { this.podRerouteTemplate = t; }
 
     public LocalDateTime getLastViewNudge()             { return lastViewNudge; }
     public void          setLastViewNudge(LocalDateTime v) { this.lastViewNudge = v; }

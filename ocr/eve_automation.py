@@ -1223,6 +1223,35 @@ def read_route_panel(img: "Image.Image") -> dict:
     return {"route_set": route_set, "jumps": jumps, "destination": destination, "raw": text}
 
 
+def read_kill_system(img: "Image.Image") -> dict:
+    """
+    Read the kill report's location header: {system, raw}.
+
+    Same row shape as a route waypoint — "X47L-Q -0.3 < MDM8-J < Pure Blind" — but the
+    system we died in is the FIRST name on the line, not the last. The '<' separators and
+    the security status both drop out of OCR often enough that neither can be required, so
+    the first name-shaped token wins. Java normalises the result (O/0, dashes, letter-digit
+    swaps) before matching it against the map, so a scruffy read still lands.
+    """
+    import pytesseract
+    from PIL import ImageEnhance
+
+    big = img.resize((img.width * 3, img.height * 3), Image.LANCZOS)
+    gray = ImageEnhance.Contrast(big.convert("L")).enhance(2.0)
+    text = pytesseract.image_to_string(gray, config=r"--oem 3 --psm 7").strip()
+
+    system = None
+    for line in (ln.strip() for ln in text.splitlines()):
+        if not line:
+            continue
+        m = _SYSTEM_RE.search(line)
+        if m:
+            system = m.group(1)
+            break
+
+    return {"system": system, "raw": text}
+
+
 # -----------------------------------------------------------------------------
 # Ship repair + activation flow
 # -----------------------------------------------------------------------------
@@ -2348,6 +2377,15 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         if img is None:
             return {"ok": True, "value": {"route_set": False, "jumps": -1, "destination": None}}
         return {"ok": True, "value": read_route_panel(img)}
+
+    if cmd == "read_kill_system":
+        if "reader" not in reader_box:
+            reader_box["reader"] = EVEMissionReader()
+        img = reader_box["reader"].capture_region(
+            int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"]))
+        if img is None:
+            return {"ok": True, "value": {"system": None, "raw": ""}}
+        return {"ok": True, "value": read_kill_system(img)}
 
     if cmd == "repair_ship":
         # Full repair + activate flow on the resident matcher — no spawn/import cost.

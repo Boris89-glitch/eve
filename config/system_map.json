@@ -1,0 +1,53 @@
+{
+  "_comment": [
+    "Null-sec route map around the home station. 'routes' is a list of chains; consecutive",
+    "entries in a chain are one jump apart, and the graph is undirected. Every chain starts",
+    "at the station, so a system's jump distance is its BFS depth from 'station'.",
+    "",
+    "Used for pod avoidance: after a pod death the system we died in is cut out of the graph",
+    "and everything no longer reachable from the station is refused (missions there are",
+    "declined at the agent, or quit on undock if the route panel reveals it later).",
+    "Systems that keep an alternate path stay allowed — dying in KLY-C0 does not block",
+    "ROIR-Y, because J-CIJV => G95-VZ => ROIR-Y still reaches it.",
+    "",
+    "avoid_minutes: how long a podded system stays cut out. 0 = rest of session.",
+    "reroute_templates: system -> templates/<name>.png, right-clicked and jumped instead of",
+    "the autopilot stargate when the route has to detour around the podded system."
+  ],
+
+  "station": "X-70MU",
+  "avoid_minutes": 60,
+
+  "routes": [
+    ["X-70MU", "L-TS8S", "O-N8XZ", "MI6O-6"],
+    ["X-70MU", "L-TS8S", "O-N8XZ", "EWOK-K", "G-M4I8", "93PI-4"],
+    ["X-70MU", "L-TS8S", "O-N8XZ", "EWOK-K", "EC-P8R"],
+
+    ["X-70MU", "CXN1-Z", "CL6-ZG", "RD-G2R", "UC3H-Y", "6GWE-A"],
+    ["X-70MU", "CXN1-Z", "CL6-ZG", "RD-G2R", "UC3H-Y", "KDV-DE"],
+    ["X-70MU", "CXN1-Z", "CL6-ZG", "RD-G2R", "UC3H-Y", "MT9Q-S"],
+
+    ["X-70MU", "KLY-C0", "7RM-N0", "GA-P6C"],
+    ["X-70MU", "KLY-C0", "7RM-N0", "F-NMX6"],
+    ["X-70MU", "KLY-C0", "G95-VZ", "ROIR-Y", "C8-CHY", "E-9ORY", "HHK-VL"],
+    ["X-70MU", "KLY-C0", "CL6-ZG"],
+
+    ["X-70MU", "B8EN-S", "3V8-LJ"],
+    ["X-70MU", "R6XN-9", "3V8-LJ"],
+    ["X-70MU", "R6XN-9", "JE-D5U", "5ZXX-K", "8S-0E1", "D7T-C0"],
+
+    ["X-70MU", "J-CIJV", "G95-VZ"],
+    ["X-70MU", "J-CIJV", "4-ABS8", "DP-1YE", "3V8-LJ"],
+    ["X-70MU", "J-CIJV", "4-ABS8", "R-LW2I", "3V8-LJ"],
+    ["X-70MU", "J-CIJV", "X47L-Q", "KQK1-2"],
+    ["X-70MU", "J-CIJV", "X47L-Q", "UR-E6D"],
+    ["X-70MU", "J-CIJV", "X47L-Q", "UR-E6D", "2D-0SO", "O-BY0Y"],
+    ["X-70MU", "J-CIJV", "X47L-Q", "UR-E6D", "2D-0SO", "D7T-C0"]
+  ],
+
+  "reroute_templates": {
+    "KLY-C0":  "kly_system",
+    "J-CIJV":  "jc_system",
+    "CXN1-Z":  "cxn_system"
+  }
+}

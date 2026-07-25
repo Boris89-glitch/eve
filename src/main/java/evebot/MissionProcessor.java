@@ -364,21 +364,6 @@ public class MissionProcessor {
         log("'close' pressed " + clicked + " time(s) — no more close buttons visible.");
     }
 
-    /**
-     * Dismiss every dialog showing a 'close' BUTTON (not the window X). A decline leaves two
-     * stacked agent dialogs, and clickTemplate only ever presses the single best match, so
-     * loop until none are left — bounded so a close that never clears can't spin forever.
-     */
-    public void clickAllCloseButtons() {
-        log("Closing dialogs via their 'close' button");
-        int clicked = 0;
-        while (clicked < 4 && ocrBridge.findAnyTemplate("close") != null) {
-            ocrBridge.clickTemplate("close");
-            clicked++;
-            sleep(500);
-        }
-        log("'close' pressed " + clicked + " time(s) — no more close buttons visible.");
-    }
 
     public void closeMissionDialog() {
         log("Closing mission dialog (F key)");
@@ -1207,7 +1192,11 @@ public class MissionProcessor {
      * Right-click the Final Blow name (fixed coords) → add_corporate_contact → standing_bad →
      * add_contact_confirm → close the kill report.
      *
-     * @return always null (the pilot is added by clicking the name, not read).
+     * The report's location header also names the system we died in, which is the only exact
+     * source we have for it — so read it here, while the report is open, and hand it back for
+     * pod avoidance.
+     *
+     * @return the system we were podded in (e.g. "X47L-Q"), or null if it couldn't be read.
      */
     public String addKillerFromKillReport() {
         log("Opening kill report to add the killer as a bad (orange) corporate contact.");
@@ -1218,7 +1207,11 @@ public class MissionProcessor {
             return null;
         }
 
-        // 2. Right-click the Final Blow name. If the menu shows Edit Corporate Contact the pilot
+        // 2. Read where we died before touching anything — a context menu opened by the
+        //    right-click below can cover the header.
+        String poddedSystem = readKillReportSystem();
+
+        // 3. Right-click the Final Blow name. If the menu shows Edit Corporate Contact the pilot
         //    is already added — skip. Otherwise, if it offers Add Corporate Contact, use it.
         Point killer = Layout.killerClick();
         rightClickPos(killer.x, killer.y);
@@ -1241,7 +1234,40 @@ public class MissionProcessor {
             dismissKillerMenu();
         }
         closeKillReport(); // close the kill report on its X (~1240,22), scoped away from the other windows
-        return null;
+        return poddedSystem;
+    }
+
+    /**
+     * OCR the kill report's location header — "X47L-Q -0.3 &lt; MDM8-J &lt; Pure Blind" — and return
+     * the system we were killed in, or null if it didn't read as a system on the map. The kill
+     * report must already be open.
+     *
+     * A name that isn't on the map is dropped rather than recorded: avoidance cuts that system out
+     * of the graph, and a garbage name would cut out nothing while looking like it worked.
+     */
+    public String readKillReportSystem() {
+        Rectangle r = Layout.killReportSystem();
+        com.google.gson.JsonObject v = ocrBridge.readKillSystem(r.x, r.y, r.width, r.height);
+        if (v == null) {
+            log("Kill report location: OCR call failed — pod system unknown.");
+            return null;
+        }
+        String raw = v.has("raw") && !v.get("raw").isJsonNull() ? v.get("raw").getAsString() : "";
+        String system = v.has("system") && !v.get("system").isJsonNull() ? v.get("system").getAsString() : null;
+        String flatRaw = raw.replaceAll("\\s*\\R\\s*", " | ").trim();
+
+        if (system == null) {
+            log("Kill report location: no system in [" + flatRaw + "] — pod system unknown.");
+            return null;
+        }
+        if (!SystemMap.isKnown(system)) {
+            log("Kill report location: '" + system + "' (raw [" + flatRaw + "]) is not on the route map"
+                    + " — ignoring it rather than avoiding a system we can't place.");
+            return null;
+        }
+        String onMap = SystemMap.display(SystemMap.normalize(system));
+        log("Kill report location: podded in " + onMap + " (OCR '" + system + "', raw [" + flatRaw + "]).");
+        return onMap;
     }
 
     /**

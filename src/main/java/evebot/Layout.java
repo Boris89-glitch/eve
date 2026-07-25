@@ -84,4 +84,8 @@ public final class Layout {
 
     /** Info-panel "Route" section (OCR region) — "Route  N Jumps" + the waypoint line. */
     public static Rectangle routePanel()      { return rect("route_panel", 92, 340, 353, 183); }
+
+    /** Kill report location header (OCR region) — "X47L-Q -0.3 &lt; MDM8-J &lt; Pure Blind",
+     *  the system we were podded in. Sits just under the date, right of the portraits. */
+    public static Rectangle killReportSystem() { return rect("kill_report_system", 936, 424, 380, 28); }
 }
