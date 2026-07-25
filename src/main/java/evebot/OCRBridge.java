@@ -326,7 +326,7 @@ public class OCRBridge {
                 System.err.println("[" + activeClient + "] Standings OCR error: " + obj.get("error").getAsString());
                 return Double.NaN;
             }
-            return correctLeadingEight(obj.get("standings").getAsDouble());
+            return correctStanding(obj.get("standings").getAsDouble());
         } catch (Exception e) {
             System.err.println("[" + activeClient + "] Standings parse error: " + e.getMessage());
             return Double.NaN;
@@ -334,15 +334,28 @@ public class OCRBridge {
     }
 
     /**
-     * Standings can't reach 8, so a leading 8 is Tesseract misreading the leading 0
-     * (8.45 is really 0.45). Strip the 8, keeping the sign.
+     * Sanity-correct an OCR'd standing. EVE standings are hard-capped at ±10 and always shown
+     * to two decimals, so two Tesseract misreads are recoverable:
+     *   - Magnitude &gt;= 10: the decimal point was dropped (0.44 read as "44") — divide by 100
+     *     to restore the two-decimal value.
+     *   - Magnitude in [8, 9): a leading 8 is a misread leading 0 (8.45 is really 0.45) —
+     *     strip the 8, keeping the sign.
      */
-    private double correctLeadingEight(double v) {
-        if (Double.isNaN(v) || Math.abs(v) < 8.0 || Math.abs(v) >= 9.0) return v;
-        double fixed = Math.signum(v) * (Math.abs(v) - 8.0);
-        System.out.println("[" + activeClient + "] Standings OCR read " + v
-                + " — impossible, leading 8 is a misread 0 → " + fixed);
-        return fixed;
+    private double correctStanding(double v) {
+        if (Double.isNaN(v)) return v;
+        if (Math.abs(v) >= 10.0) {
+            double fixed = v / 100.0;
+            System.out.println("[" + activeClient + "] Standings OCR read " + v
+                    + " — impossible, dropped decimal point → " + fixed);
+            v = fixed;
+        }
+        if (Math.abs(v) >= 8.0 && Math.abs(v) < 9.0) {
+            double fixed = Math.signum(v) * (Math.abs(v) - 8.0);
+            System.out.println("[" + activeClient + "] Standings OCR read " + v
+                    + " — impossible, leading 8 is a misread 0 → " + fixed);
+            v = fixed;
+        }
+        return v;
     }
 
     // -----------------------------------------------------------------------

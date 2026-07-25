@@ -343,20 +343,32 @@ public class ClientManager {
         long remaining = Duration.between(LocalDateTime.now(), cooldownEnd).getSeconds();
         if (remaining <= 0) {
             if (cs.getCurrentMission() != null) {
-                // Before quitting, check whether the mission is actually already complete — e.g. we
-                // killed the burner and only got podded on the way back. If we respawned/redocked at
-                // the agent (agent_icon visible) and its dialog reads COMPLETED, turn it in via
-                // COMPLETING rather than throwing away a finished mission. Otherwise quit and re-pick.
-                if (missionProcessor.detectCompletingUI() != null) {
-                    missionProcessor.doubleClickAgentIcon();
-                    if (missionProcessor.detectDialog() == MissionProcessor.DialogState.COMPLETED) {
-                        log(clientId, "POD_COOLDOWN: expired — mission reads COMPLETED (target down before we were podded), turning it in.");
-                        stateManager.setState(clientId, ClientState.State.COMPLETING);
-                        return;
-                    }
+                // We're docked at the agent station — ALWAYS try to turn the mission in before
+                // quitting it (e.g. we killed the burner and only got podded on the way back).
+                // Open the agent dialog unconditionally and read it; only quit when it genuinely
+                // reads not-complete — never skip the attempt.
+                missionProcessor.doubleClickAgentIcon();
+                MissionProcessor.DialogState completeCheck = missionProcessor.detectDialog();
+                if (completeCheck == MissionProcessor.DialogState.COMPLETED) {
+                    log(clientId, "POD_COOLDOWN: expired — mission reads COMPLETED (objectives done before we were podded), turning it in.");
+                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    return;
                 }
-                // Died on this mission and it isn't complete — quit it and pick a different one rather than flying back in.
-                log(clientId, "POD_COOLDOWN: expired — quitting the mission we died on, picking a different one.");
+                // detectDialog reports "COMPLETE MISSION visible but neither status icon matched"
+                // as NOT_COMPLETE — and that ambiguous reading is exactly what a mission we
+                // finished just before being podded looks like. Only quit on a status icon we
+                // actually matched; on the ambiguous case run the turn-in (COMPLETING confirms the
+                // button disappears, and CHECKING_MISSIONS quits a still-accepted mission anyway).
+                if (completeCheck == MissionProcessor.DialogState.NOT_COMPLETE
+                        && missionProcessor.findTemplate("not_complete") == null
+                        && missionProcessor.isCompleteMissionVisible()) {
+                    log(clientId, "POD_COOLDOWN: expired — dialog ambiguous (COMPLETE MISSION visible, no status icon) — attempting the turn-in instead of quitting.");
+                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    return;
+                }
+                // Tried to complete it but the agent dialog isn't COMPLETED — quit it and pick a
+                // different one rather than flying back in.
+                log(clientId, "POD_COOLDOWN: expired — tried to complete, dialog reads " + completeCheck + " — quitting the mission we died on, picking a different one.");
                 missionProcessor.quitMission();
                 cs.setCurrentMission(null);
                 stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
@@ -528,7 +540,7 @@ public class ClientManager {
             log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
         } else {
             stateManager.setPodCooldownEnd(LocalDateTime.now());
-            log(clientId, "POD_DEATH: non-combat death, jumps>2 (" + jumps + ") — no cooldown, but quitting the mission and adding bad standings.");
+            log(clientId, "POD_DEATH: non-combat death, jumps>2 (" + jumps + ") — no cooldown; next tick will turn the mission in if it reads COMPLETED, else quit it.");
         }
         stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         return true;
@@ -1376,9 +1388,11 @@ public class ClientManager {
         if (n >= STANDINGS_RECHECK_DECLINES) {
             cs.setDeclineCount(0);
             cs.setStandingsCheckDue(true);
-            log(clientId, STANDINGS_RECHECK_DECLINES + " declines — standings re-check scheduled.");
+            log(clientId, "Decline count " + n + "/" + STANDINGS_RECHECK_DECLINES
+                    + " — standings re-check scheduled.");
         } else {
             cs.setDeclineCount(n);
+            log(clientId, "Decline count " + n + "/" + STANDINGS_RECHECK_DECLINES + ".");
         }
     }
 
