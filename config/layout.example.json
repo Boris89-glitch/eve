@@ -14,8 +14,9 @@
   "standings_ocr":    { "x": 300, "y": 490, "width": 100, "height": 55 },
 
   "killer_click":     { "x": 777, "y": 559 },
+  "kill_report_system": { "x": 936, "y": 424, "width": 380, "height": 28 },
 
-  "route_panel":      { "x": 92, "y": 340, "width": 353, "height": 183 },
+  "route_panel":      { "x": 90, "y": 262, "width": 360, "height": 100 },
 
   "hangar_fallback":  { "x": 380, "y": 680 },
   "hangar_scroll":    { "x": 800, "y": 500 },

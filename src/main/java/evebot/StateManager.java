@@ -9,6 +9,7 @@ import evebot.models.Mission;
 import java.io.*;
 import java.lang.reflect.Type;
 import java.nio.file.*;
+import java.time.Duration;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -45,6 +46,13 @@ public class StateManager {
      *  Maps clientId → last read standing. */
     private static final Path STANDINGS_FILE = Paths.get("config", "standings.json");
     private final Map<String, Double> standings = new ConcurrentHashMap<>();
+    /** The system we were last podded in, and when. Everything the map says is only reachable
+     *  through it is refused until the entry ages out (SystemMap.avoidMinutes). Its own file so a
+     *  restart mid-camp doesn't send us straight back in. Shared by both clients — one client
+     *  finding a camp is reason enough for the other to keep out. */
+    private static final Path POD_AVOID_FILE = Paths.get("config", "pod_avoid.json");
+    private volatile String poddedSystem = null;
+    private volatile LocalDateTime poddedAt = LocalDateTime.MIN;
     private static final DateTimeFormatter TS = DateTimeFormatter.ofPattern("HH:mm:ss");
     private final Gson gson;
 
@@ -60,6 +68,7 @@ public class StateManager {
 
         loadFactionDeclines();   // before loadStates so loaded clients pick up their decline time
         loadStandings();         // before loadStates so loaded clients pick up their standing
+        loadPodAvoid();
         loadStates();
         registerHotkey();
     }
@@ -337,6 +346,72 @@ public class StateManager {
         } catch (Exception e) {
             System.err.println("[StateManager] Failed to save standings: " + e.getMessage());
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Pod avoidance (separate file — outlives a bot_state.json wipe)
+    // -----------------------------------------------------------------------
+
+    /** Just enough to remember a camp across a restart. */
+    private static class PodAvoid {
+        String system;
+        LocalDateTime when;
+    }
+
+    private void loadPodAvoid() {
+        if (!Files.exists(POD_AVOID_FILE)) return;
+        try {
+            PodAvoid a = gson.fromJson(new String(Files.readAllBytes(POD_AVOID_FILE)), PodAvoid.class);
+            if (a == null || a.system == null || a.when == null) return;
+            poddedSystem = a.system;
+            poddedAt = a.when;
+            String active = getAvoidedSystem();
+            log("[StateManager] Loaded pod avoidance: " + SystemMap.display(SystemMap.normalize(a.system))
+                    + (active == null ? " (already expired — not avoiding)" : " — avoiding it and everything behind it."));
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to load pod avoidance: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Record the system we were just podded in. Everything the map says is only reachable through
+     * it is refused from now on — missions there get declined at the agent, and one that slips
+     * through is quit after undock when the route panel reveals the destination.
+     */
+    public void recordPoddedSystem(String system) {
+        if (system == null || system.trim().isEmpty()) return;
+        poddedSystem = system.trim();
+        poddedAt = LocalDateTime.now();
+        try {
+            PodAvoid a = new PodAvoid();
+            a.system = poddedSystem;
+            a.when = poddedAt;
+            Files.createDirectories(POD_AVOID_FILE.getParent());
+            Files.write(POD_AVOID_FILE, gson.toJson(a).getBytes(),
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to save pod avoidance: " + e.getMessage());
+        }
+    }
+
+    /**
+     * The system currently being avoided, or null if there is none (or the entry has aged out of
+     * SystemMap.avoidMinutes — 0 there means it lasts the rest of the session).
+     */
+    public String getAvoidedSystem() {
+        String system = poddedSystem;
+        if (system == null) return null;
+        int minutes = SystemMap.avoidMinutes();
+        if (minutes > 0 && Duration.between(poddedAt, LocalDateTime.now()).toMinutes() >= minutes) {
+            return null;
+        }
+        return system;
+    }
+
+    /** Minutes left on the current avoidance, or -1 when it has no expiry / none is active. */
+    public long getAvoidMinutesRemaining() {
+        if (getAvoidedSystem() == null || SystemMap.avoidMinutes() <= 0) return -1;
+        return SystemMap.avoidMinutes() - Duration.between(poddedAt, LocalDateTime.now()).toMinutes();
     }
 
     // -----------------------------------------------------------------------

@@ -260,6 +260,22 @@ public class OCRBridge {
     }
 
     /**
+     * OCR the kill report's location header — "X47L-Q -0.3 &lt; MDM8-J &lt; Pure Blind", the
+     * system we were killed in. Returns {system, raw}, or null if the daemon call failed.
+     * Same row format as a route waypoint, but here the system is the FIRST name on the line.
+     */
+    public JsonObject readKillSystem(int x, int y, int width, int height) {
+        JsonObject c = cmd("read_kill_system");
+        c.addProperty("x", x);
+        c.addProperty("y", y);
+        c.addProperty("w", width);
+        c.addProperty("h", height);
+        JsonObject r = daemon.send(c);
+        if (r == null || !r.has("value") || !r.get("value").isJsonObject()) return null;
+        return r.getAsJsonObject("value");
+    }
+
+    /**
      * Template-first mission classification (no OCR). Returns the matched mission
      * dialog key (e.g. "mission_hawk") or null if no known mission template is
      * visible. One screenshot inside the daemon.

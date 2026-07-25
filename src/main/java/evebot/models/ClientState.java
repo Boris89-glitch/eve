@@ -257,8 +257,26 @@ public class ClientState {
     /** Set when declineCount reaches the threshold — DECLINING re-reads agent standings. */
     private boolean standingsCheckDue = false;
 
-    /** Number of stargate jumps since undocking — logged on pod death for location context. */
+    /** How many jumps we are from the home station. Counts UP on the way out and back DOWN on
+     *  the way home (the return leg retraces the same route), so the number always means
+     *  "distance from home" rather than "jumps this leg" — which is what pod-death location
+     *  context and the near-station danger checks actually want. Reset to 0 on TRAVEL only;
+     *  RETURNING deliberately keeps the outbound total as its starting distance.
+     *
+     *  Only confirmed gate jumps move it (see {@link #pendingGateJump}); warping to a safe spot,
+     *  to the mission site or onto a station is not a jump and leaves it alone. */
     private int jumpCount = 0;
+
+    /** Destination system read off the info-panel route after undocking, kept for the whole trip
+     *  (the return leg retraces the same route, so it stays the reference path). Paired with
+     *  {@link #jumpCount} it says which system we are in right now — the fallback for locating a
+     *  pod death when the kill report can't be read. Null when the route never OCR'd. */
+    private String routeDestination = null;
+
+    /** A gate jump has been issued and is waiting on warp confirmation. The count moves only once
+     *  warp_active actually shows, so a right-click that missed — or a jump that never engaged —
+     *  cannot inflate our idea of where we are. Cleared when the jump is confirmed. */
+    private boolean pendingGateJump = false;
 
     /** True once KLY system check has been performed after first jump — skip further checks. */
     private boolean klyChecked = false;
@@ -266,6 +284,13 @@ public class ClientState {
     /** True once lingering windows have been cleared after the first jump out of the home station —
      *  one-shot so we only sweep close_active_window once per trip. */
     private boolean windowsClosedAfterJump1 = false;
+
+    /** templates/&lt;name&gt;.png of the system to take on the FIRST jump out of the station, when the
+     *  autopilot route would otherwise run through the system we were podded in. Right-clicked and
+     *  jumped in place of the stargate; EVE re-routes from wherever we land, so steering the first
+     *  hop onto the safe branch is enough to keep the whole trip clear. Null = no detour needed,
+     *  and it is cleared the moment the hop is taken (one-shot per trip). */
+    private String podRerouteTemplate = null;
 
     /** True after evading to a safe spot — next landing jumps out instead of re-evading. Cleared on stargate jump. */
     private boolean warpedToSafeSpot = false;
@@ -356,11 +381,21 @@ public class ClientState {
             this.destinationSet   = false;
             this.warpedToLocation = false;
             this.lastTravelAction = LocalDateTime.MIN;
-            this.jumpCount        = 0;
             this.klyChecked       = false;
             this.warpedToSafeSpot = false;
             this.safeSpotWarp     = false;
             this.windowsClosedAfterJump1 = false;
+            this.podRerouteTemplate = null;
+            this.pendingGateJump  = false;
+        }
+        if (state == State.TRAVEL) {
+            // Outbound leg starts at the station. RETURNING is deliberately excluded: the way home
+            // retraces the outbound route, so the distance we ended the outbound leg at IS the
+            // distance the return leg starts from, and it counts back down to 0 at the station.
+            this.jumpCount = 0;
+            // Same reason: the outbound route is the reference path for the whole trip, so it is
+            // cleared when a new trip starts, not when the return leg begins.
+            this.routeDestination = null;
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
@@ -541,12 +576,23 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public int  getJumpCount()          { return jumpCount; }
     public void incrementJumpCount()    { this.jumpCount++; }
+    /** Floors at 0 — the station itself. An extra jump home can't drive the distance negative. */
+    public void decrementJumpCount()    { if (this.jumpCount > 0) this.jumpCount--; }
+
+    public boolean isPendingGateJump()           { return pendingGateJump; }
+    public void    setPendingGateJump(boolean v) { this.pendingGateJump = v; }
+
+    public String getRouteDestination()          { return routeDestination; }
+    public void   setRouteDestination(String d)  { this.routeDestination = d; }
 
     public boolean isKlyChecked()           { return klyChecked; }
     public void    setKlyChecked(boolean v) { this.klyChecked = v; }
 
     public boolean isWindowsClosedAfterJump1()           { return windowsClosedAfterJump1; }
     public void    setWindowsClosedAfterJump1(boolean v) { this.windowsClosedAfterJump1 = v; }
+
+    public String getPodRerouteTemplate()           { return podRerouteTemplate; }
+    public void   setPodRerouteTemplate(String t)   { this.podRerouteTemplate = t; }
 
     public LocalDateTime getLastViewNudge()             { return lastViewNudge; }
     public void          setLastViewNudge(LocalDateTime v) { this.lastViewNudge = v; }
