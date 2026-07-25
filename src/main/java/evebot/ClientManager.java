@@ -456,10 +456,10 @@ public class ClientManager {
         String deathWindow = lastCheck.equals(LocalDateTime.MIN)
                 ? "death window unknown (no prior pod check)"
                 : "died within last " + Duration.between(lastCheck, LocalDateTime.now()).getSeconds() + "s";
-        // Jump category: <=2 is the near-station danger zone that pauses all clients (see
-        // below). The count runs high — the undock warp is counted as a jump and a phantom
-        // jump can be logged after the death — so a kill right by the station reads as ~2. Past
-        // that the exact count doesn't matter, so it's logged simply as ">2".
+        // Jump category: <=2 is the near-station danger zone that pauses all clients (see below).
+        // jumpCount is our distance from home in both directions (it counts back down on the way
+        // in), and only confirmed gate jumps move it, so this now reads as an actual distance
+        // rather than "jumps this leg". Past 2 the exact number doesn't matter — logged as ">2".
         String jumpsLabel = jumps <= 2 ? String.valueOf(jumps) : ">2";
         if (inSpace) {
             log(clientId, "*** CAPSULE DETECTED — ship destroyed! Self-destructing...");
@@ -789,7 +789,9 @@ public class ClientManager {
                             break;
                         }
                     }
-                    cs.incrementJumpCount();
+                    // Distance from home only moves once warp actually engages (see confirmGateJump),
+                    // so a right-click that missed the gate can't make us think we've travelled.
+                    cs.setPendingGateJump(true);
                     cs.setKlyChecked(false); // new system next landing — re-arm the enemy-in-local evade check
                     // Pod detour: take the safe branch on this jump by right-clicking that system
                     // instead of the autopilot's stargate (see planPodDetour). One-shot — EVE
@@ -926,9 +928,10 @@ public class ClientManager {
                     if (instaEngagedDock) cs.setWarpPreVerified(true);
                     break;
                 case "stargate":
-                    cs.incrementJumpCount();
+                    // Counts DOWN on the way home — see confirmGateJump; applied on warp confirmation.
+                    cs.setPendingGateJump(true);
                     cs.setWarpedToSafeSpot(false);
-                    log(clientId, "stargate — right-click → jump. (jump #" + cs.getJumpCount() + ")");
+                    log(clientId, "stargate — right-click → jump. (" + cs.getJumpCount() + " jump(s) from home)");
                     cs.setWarpStartTime(LocalDateTime.now());
                     stateManager.setState(clientId, ClientState.State.WARPING);
                     new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
@@ -4694,6 +4697,9 @@ public class ClientManager {
      * the cooldown. Only non-docking warps (safe-spot / travel) fall through to the bubble escape.
      */
     private void redockOrBubbleEscape(String clientId, ClientState cs, boolean held, String why) {
+        // Whatever gate jump was in flight is not happening — drop it, so its increment can't be
+        // banked later by an unrelated warp (a safe-spot evade, say) confirming instead.
+        cs.setPendingGateJump(false);
         boolean stationInReach = missionProcessor.findTemplate("home_station") != null;
         boolean returningHome = cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME;
 
@@ -4777,6 +4783,27 @@ public class ClientManager {
 
         log(clientId, "WARPING: " + why + " — no station in reach, starting bubble escape.");
         cs.setBubbleEscapeStep(1);
+    }
+
+    /**
+     * Bank a gate jump once its warp is confirmed. Called from every WARPING path that has
+     * established the jump actually engaged — never from the issue site, so a right-click that
+     * missed the stargate leaves our distance-from-home untouched instead of silently drifting.
+     *
+     * Direction follows the leg: outbound each jump takes us one further from the station,
+     * returning retraces that same route so each jump takes us one closer. Only gate jumps get
+     * here — safe-spot evades, the warp to the mission site and dock warps never set the flag.
+     */
+    private void confirmGateJump(String clientId, ClientState cs) {
+        if (!cs.isPendingGateJump()) return;
+        cs.setPendingGateJump(false);
+        if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
+            cs.decrementJumpCount();
+            log(clientId, "JUMP confirmed (homeward) — now " + cs.getJumpCount() + " jump(s) from home.");
+        } else {
+            cs.incrementJumpCount();
+            log(clientId, "JUMP confirmed (outbound) — now " + cs.getJumpCount() + " jump(s) from home.");
+        }
     }
 
     private void handleWarping(String clientId, ClientWindowInfo window) {
@@ -4882,6 +4909,9 @@ public class ClientManager {
                         return;
                     }
                 }
+                // This path deliberately skips warp_active verification (see above), so the jump is
+                // banked on the issued click — the best signal available here.
+                confirmGateJump(clientId, cs);
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
@@ -5098,6 +5128,7 @@ public class ClientManager {
                 }
 
                 cs.setSafeSpotWarp(false); // warp engaged — clear the evade-retry flag
+                confirmGateJump(clientId, cs); // warp_active with no bubble — the jump took
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
