@@ -338,17 +338,34 @@ public class ClientManager {
             // where we died. Everything the map says is only reachable through it is refused from
             // here on, so we don't take the next mission straight back into the same camp.
             String poddedSystem = missionProcessor.addKillerFromKillReport();
+            String source = "kill report";
+            if (poddedSystem == null) {
+                // Header didn't read (or its region isn't calibrated here) — fall back to placing
+                // ourselves on the route by how far from home we got.
+                poddedSystem = inferPoddedSystem(clientId, cs);
+                source = "jump count";
+            }
             EventLog.log("POD_KILLER", clientId + " — killer flagged from kill report; podded in "
-                    + (poddedSystem != null ? poddedSystem : "an unreadable system"));
+                    + (poddedSystem != null ? poddedSystem + " (via " + source + ")" : "an unknown system"));
             if (poddedSystem != null) {
                 stateManager.recordPoddedSystem(poddedSystem);
                 Set<String> blocked = SystemMap.blockedBy(poddedSystem);
-                String blockedNames = blocked.stream().map(SystemMap::display).sorted()
-                        .collect(java.util.stream.Collectors.joining(", "));
-                log(clientId, "POD_AVOID: podded in " + poddedSystem + " — refusing "
-                        + blocked.size() + " system(s): " + blockedNames);
-                EventLog.log("POD_AVOID", clientId + " — avoiding " + poddedSystem
-                        + " and everything behind it (" + blocked.size() + "): " + blockedNames);
+                if (blocked.isEmpty()) {
+                    // Every destination keeps an alternate path around it (or it is home) — the
+                    // system is still recorded so detours route around it, but nothing is refused.
+                    log(clientId, "POD_AVOID: podded in " + poddedSystem + " (via " + source
+                            + ") — nothing sits behind it, so no missions are refused; routes will detour around it.");
+                    EventLog.log("POD_AVOID", clientId + " — avoiding " + poddedSystem
+                            + " (via " + source + "); nothing is only reachable through it");
+                } else {
+                    String blockedNames = blocked.stream().map(SystemMap::display).sorted()
+                            .collect(java.util.stream.Collectors.joining(", "));
+                    log(clientId, "POD_AVOID: podded in " + poddedSystem + " (via " + source
+                            + ") — refusing " + blocked.size() + " system(s): " + blockedNames);
+                    EventLog.log("POD_AVOID", clientId + " — avoiding " + poddedSystem
+                            + " (via " + source + ") and everything behind it ("
+                            + blocked.size() + "): " + blockedNames);
+                }
             }
         }
 
@@ -398,6 +415,51 @@ public class ClientManager {
                 log(clientId, "POD_COOLDOWN: " + (remaining / 60) + "m " + (remaining % 60) + "s remaining...");
             }
         }
+    }
+
+    /**
+     * Work out where we were podded from the route and how far along it we were — the fallback for
+     * when the kill report's location header doesn't read (or its region isn't calibrated on this
+     * machine).
+     *
+     * jumpCount is our distance from the home station and counts back down on the way in, so it
+     * indexes the outbound path directly on both legs: 2 jumps from home is path[2] whether we were
+     * heading out or coming back. Deferring the count to warp confirmation helps here — podded
+     * while warping to a gate, the count still names the system we were actually in.
+     *
+     * Less exact than the kill report: it assumes we flew the map's shortest route, and being one
+     * short reports the previous system. Returns null rather than guess when the destination is
+     * unknown, off-map, or we never left the station — avoiding the wrong system is worse than
+     * avoiding none, and "podded at home" would otherwise cut out the entire map.
+     */
+    private String inferPoddedSystem(String clientId, ClientState cs) {
+        String destination = cs.getRouteDestination();
+        if (destination == null && cs.getCurrentMission() != null) {
+            destination = cs.getCurrentMission().getLocation();   // route never OCR'd — try the offer
+        }
+        if (destination == null || !SystemMap.isKnown(destination)) {
+            log(clientId, "POD_AVOID: no usable destination on record — cannot place the pod death by jumps.");
+            return null;
+        }
+
+        List<String> path = SystemMap.pathFromStation(destination);
+        if (path.size() < 2) {
+            log(clientId, "POD_AVOID: no route to " + destination + " on the map — cannot place the pod death by jumps.");
+            return null;
+        }
+
+        int jumps = cs.getJumpCount();
+        if (jumps <= 0) {
+            log(clientId, "POD_AVOID: podded 0 jumps out (still at the home station) — nothing to avoid.");
+            return null;
+        }
+        int index = Math.min(jumps, path.size() - 1);
+        String system = path.get(index);
+        log(clientId, "POD_AVOID: kill report unreadable — placing the pod death by jumps instead: "
+                + jumps + " jump(s) from home toward " + destination + " puts us in " + system
+                + " (route: " + String.join(" => ", path) + ")."
+                + (index < jumps ? " Count ran past the destination; clamped to it." : ""));
+        return system;
     }
 
     private static final int POD_CHECK_INTERVAL_MINUTES = 5;
@@ -1766,6 +1828,14 @@ public class ClientManager {
             // sits at or behind the system we were podded in, or plan a detour if it's still
             // reachable the long way round.
             if (quitIfRoutePodAvoided(clientId, cs, route)) return;
+            // Remember where this trip is going: with jumpCount (our distance from home) it locates
+            // us on the map, which is how a pod death is placed when the kill report can't be read.
+            if (route != null && route.destination != null && SystemMap.isKnown(route.destination)) {
+                String dest = SystemMap.display(SystemMap.normalize(route.destination));
+                cs.setRouteDestination(dest);
+                log(clientId, "TRAVEL: destination " + dest + " — route: "
+                        + String.join(" => ", SystemMap.pathFromStation(dest)));
+            }
             planPodDetour(clientId, cs, route);
             if (route == null) {
                 // No route — but a same-system mission has no destination to set at all: the

@@ -168,6 +168,9 @@ public final class SystemMap {
     public static Set<String> blockedBy(String podded) {
         String cut = normalize(podded);
         if (isEmpty() || cut.isEmpty() || !ADJACENCY.containsKey(cut)) return Collections.emptySet();
+        // Podded at the home station itself: there is nothing to route around, and cutting the
+        // station out would leave the whole map unreachable and refuse every mission there is.
+        if (station.equals(cut)) return Collections.emptySet();
 
         Set<String> reachable = new HashSet<>();
         Deque<String> queue = new ArrayDeque<>();
@@ -203,7 +206,22 @@ public final class SystemMap {
      * mission instead of flying it). This is the detour the reroute templates fly.
      */
     public static List<String> detour(String destination, String podded) {
-        String goal = normalize(destination), cut = normalize(podded);
+        return shortestPath(destination, normalize(podded));
+    }
+
+    /**
+     * Shortest station → destination path as display names, station first, with nothing cut out —
+     * the route we would normally fly. Indexing it by how many jumps we are from the station gives
+     * the system we are currently in, which is how a pod death is located when the kill report
+     * can't be read. Empty if the destination isn't on the map.
+     */
+    public static List<String> pathFromStation(String destination) {
+        return shortestPath(destination, "");
+    }
+
+    /** BFS from the station to {@code destination}, optionally with {@code cut} removed. */
+    private static List<String> shortestPath(String destination, String cut) {
+        String goal = normalize(destination);
         if (isEmpty() || goal.isEmpty() || !CANONICAL.containsKey(goal)) return Collections.emptyList();
         if (goal.equals(cut) || station.equals(cut)) return Collections.emptyList();
 

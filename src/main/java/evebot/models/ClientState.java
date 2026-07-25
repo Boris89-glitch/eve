@@ -267,6 +267,12 @@ public class ClientState {
      *  to the mission site or onto a station is not a jump and leaves it alone. */
     private int jumpCount = 0;
 
+    /** Destination system read off the info-panel route after undocking, kept for the whole trip
+     *  (the return leg retraces the same route, so it stays the reference path). Paired with
+     *  {@link #jumpCount} it says which system we are in right now — the fallback for locating a
+     *  pod death when the kill report can't be read. Null when the route never OCR'd. */
+    private String routeDestination = null;
+
     /** A gate jump has been issued and is waiting on warp confirmation. The count moves only once
      *  warp_active actually shows, so a right-click that missed — or a jump that never engaged —
      *  cannot inflate our idea of where we are. Cleared when the jump is confirmed. */
@@ -387,6 +393,9 @@ public class ClientState {
             // retraces the outbound route, so the distance we ended the outbound leg at IS the
             // distance the return leg starts from, and it counts back down to 0 at the station.
             this.jumpCount = 0;
+            // Same reason: the outbound route is the reference path for the whole trip, so it is
+            // cleared when a new trip starts, not when the return leg begins.
+            this.routeDestination = null;
         }
         if (state == State.WARPING) {
             this.lastWarpCheck = LocalDateTime.MIN;
@@ -572,6 +581,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isPendingGateJump()           { return pendingGateJump; }
     public void    setPendingGateJump(boolean v) { this.pendingGateJump = v; }
+
+    public String getRouteDestination()          { return routeDestination; }
+    public void   setRouteDestination(String d)  { this.routeDestination = d; }
 
     public boolean isKlyChecked()           { return klyChecked; }
     public void    setKlyChecked(boolean v) { this.klyChecked = v; }
