@@ -366,7 +366,7 @@ public class StateManager {
             poddedSystem = a.system;
             poddedAt = a.when;
             String active = getAvoidedSystem();
-            log("[StateManager] Loaded pod avoidance: " + SystemMap.display(SystemMap.normalize(a.system))
+            log("[StateManager] Loaded pod avoidance: " + SystemMap.display(SystemMap.resolve(a.system))
                     + (active == null ? " (already expired — not avoiding)" : " — avoiding it and everything behind it."));
         } catch (Exception e) {
             System.err.println("[StateManager] Failed to load pod avoidance: " + e.getMessage());

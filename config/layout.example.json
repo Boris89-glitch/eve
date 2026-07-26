@@ -3,6 +3,7 @@
   "screen": "1920x1200 desktop",
 
   "mission_area":     { "x": 440, "y": 92,  "width": 988, "height": 336 },
+  "mission_location": { "x": 840, "y": 238, "width": 384, "height": 29 },
 
   "empty_space":      { "x": 960, "y": 540 },
   "space_above_ship": { "x": 960, "y": 300 },

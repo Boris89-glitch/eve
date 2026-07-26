@@ -1265,7 +1265,7 @@ public class MissionProcessor {
                     + " — ignoring it rather than avoiding a system we can't place.");
             return null;
         }
-        String onMap = SystemMap.display(SystemMap.normalize(system));
+        String onMap = SystemMap.display(SystemMap.resolve(system));
         log("Kill report location: podded in " + onMap + " (OCR '" + system + "', raw [" + flatRaw + "]).");
         return onMap;
     }

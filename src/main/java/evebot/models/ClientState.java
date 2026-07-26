@@ -267,15 +267,16 @@ public class ClientState {
      *  to the mission site or onto a station is not a jump and leaves it alone. */
     private int jumpCount = 0;
 
-    /** Destination system read off the info-panel route after undocking, kept for the whole trip
-     *  (the return leg retraces the same route, so it stays the reference path). Paired with
-     *  {@link #jumpCount} it says which system we are in right now — the fallback for locating a
-     *  pod death when the kill report can't be read. Null when the route never OCR'd. */
+    /** Destination system for this trip, from the offer dialog OCR where possible and the
+     *  info-panel route after undocking otherwise, kept for the whole trip (the return leg retraces
+     *  the same route, so it stays the reference path). Paired with {@link #jumpCount} it says which
+     *  system we are in right now — the fallback for locating a pod death when the kill report can't
+     *  be read. Null when neither read placed the destination on the map. */
     private String routeDestination = null;
 
-    /** A gate jump has been issued and is waiting on warp confirmation. The count moves only once
-     *  warp_active actually shows, so a right-click that missed — or a jump that never engaged —
-     *  cannot inflate our idea of where we are. Cleared when the jump is confirmed. */
+    /** A gate jump has been issued and is waiting on arrival. The count moves only when the warp
+     *  ends and navigation resumes in the next system, so a right-click that missed — or a jump we
+     *  never came out of — cannot inflate our idea of where we are. Cleared on arrival. */
     private boolean pendingGateJump = false;
 
     /** True once KLY system check has been performed after first jump — skip further checks. */

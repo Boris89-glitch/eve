@@ -241,6 +241,38 @@ class EVEMissionReader:
             "raw_text": text,
         }
 
+    def read_location_region(self, x, y, width, height) -> Dict:
+        """
+        OCR just the offer's Location line (small light-on-dark text), instead of
+        fishing for it in the full-dialog text where nearby lines can win.
+        """
+        image = self.capture_region(x, y, width, height)
+        if image is None:
+            return {"location": "Unknown", "raw": ""}
+        gray = image.convert("L")
+        gray = ImageEnhance.Contrast(gray).enhance(2.0)
+        gray = gray.filter(ImageFilter.SHARPEN)
+        img_cv = np.array(gray)
+        img_cv = cv2.resize(img_cv, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+        _, img_cv = cv2.threshold(img_cv, 140, 255, cv2.THRESH_BINARY)
+        img_cv = cv2.bitwise_not(img_cv)  # black text on white for Tesseract
+        processed = Image.fromarray(img_cv)
+        debug_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "debug")
+        os.makedirs(debug_dir, exist_ok=True)
+        image.save(os.path.join(debug_dir, "location_capture.png"))
+        processed.save(os.path.join(debug_dir, "location_processed.png"))
+        config = (
+            r"--oem 3 --psm 7 "
+            r"-c tessedit_char_whitelist="
+            r"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.-()! "
+        )
+        try:
+            raw = pytesseract.image_to_string(processed, config=config).strip()
+        except Exception as e:
+            print(f"Location OCR error: {e}", file=sys.stderr)
+            return {"location": "Unknown", "raw": ""}
+        return {"location": self.clean_location(raw), "raw": raw}
+
     # ------------------------------------------------------------------
     # Dialog detection
     # ------------------------------------------------------------------

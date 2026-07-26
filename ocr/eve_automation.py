@@ -1146,6 +1146,30 @@ def load_mission_area() -> Tuple[int, int, int, int]:
     return layout_rect("mission_area", 440, 92, 988, 336)
 
 
+def load_mission_location_area() -> Tuple[int, int, int, int]:
+    return layout_rect("mission_location", 840, 238, 384, 29)
+
+
+def refine_mission_location(reader: EVEMissionReader, mission: Optional[dict]) -> Optional[dict]:
+    """
+    Re-read the offer's Location line from its own small region — the full-dialog
+    scan picks up neighbouring lines (e.g. 'Effective Standing') too often.
+    Keeps the full-dialog value when the focused read comes back empty.
+    """
+    if not mission:
+        return mission
+    x, y, w, h = load_mission_location_area()
+    result = reader.read_location_region(x, y, w, h)
+    location = result.get("location", "Unknown")
+    log.info("   Location OCR: raw='%s' -> '%s'", result.get("raw", ""), location)
+    if location and location != "Unknown":
+        mission["location"] = location
+        sec = re.search(r"-?\d\.\d+", result.get("raw", ""))
+        if sec:
+            mission["security"] = sec.group(0)
+    return mission
+
+
 # -----------------------------------------------------------------------------
 # Route info panel OCR
 # -----------------------------------------------------------------------------
@@ -1678,7 +1702,7 @@ class EVEAutomation:
 
         time.sleep(0.3)
         x, y, w, h = self.mission_area
-        mission = self.ocr.read_mission(x, y, w, h)
+        mission = refine_mission_location(self.ocr, self.ocr.read_mission(x, y, w, h))
         if mission:
             log.info(
                 "   OCR: title='%s' target='%s' location='%s'",
@@ -2364,8 +2388,11 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
     if cmd == "read_mission":
         if "reader" not in reader_box:
             reader_box["reader"] = EVEMissionReader()
-        mission = reader_box["reader"].read_mission(
-            int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
+        mission = refine_mission_location(
+            reader_box["reader"],
+            reader_box["reader"].read_mission(
+                int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
+            ),
         )
         return {"ok": True, "value": mission}
 

@@ -436,7 +436,7 @@ public class ClientManager {
      *
      * jumpCount is our distance from the home station and counts back down on the way in, so it
      * indexes the outbound path directly on both legs: 2 jumps from home is path[2] whether we were
-     * heading out or coming back. Deferring the count to warp confirmation helps here — podded
+     * heading out or coming back. Deferring the count to arrival helps here — podded
      * while warping to a gate, the count still names the system we were actually in.
      *
      * Less exact than the kill report: it assumes we flew the map's shortest route, and being one
@@ -713,6 +713,10 @@ public class ClientManager {
             }
         }
 
+        // Settle over — we are navigating the next system now, so bank the gate jump that brought
+        // us here. One-shot (pendingGateJump), so the ticks that follow leave the count alone.
+        confirmGateJump(clientId, cs);
+
         // Periodic 'general' overview reset only while outbound in space (TO_MISSION).
         if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION) {
             runPeriodicOverviewReset(clientId, cs);
@@ -863,8 +867,9 @@ public class ClientManager {
                             break;
                         }
                     }
-                    // Distance from home only moves once warp actually engages (see confirmGateJump),
-                    // so a right-click that missed the gate can't make us think we've travelled.
+                    // Distance from home only moves once we come out of warp in the next system
+                    // (see confirmGateJump), so a right-click that missed the gate can't make us
+                    // think we've travelled.
                     cs.setPendingGateJump(true);
                     cs.setKlyChecked(false); // new system next landing — re-arm the enemy-in-local evade check
                     // Pod detour: take the safe branch on this jump by right-clicking that system
@@ -1002,7 +1007,7 @@ public class ClientManager {
                     if (instaEngagedDock) cs.setWarpPreVerified(true);
                     break;
                 case "stargate":
-                    // Counts DOWN on the way home — see confirmGateJump; applied on warp confirmation.
+                    // Counts DOWN on the way home — see confirmGateJump; applied when we land.
                     cs.setPendingGateJump(true);
                     cs.setWarpedToSafeSpot(false);
                     log(clientId, "stargate — right-click → jump. (" + cs.getJumpCount() + " jump(s) from home)");
@@ -1436,7 +1441,7 @@ public class ClientManager {
 
         // Scarlet: its dialog text OCRs unreliably (the title comes through as "Sc a rlet"),
         // so skip OCR — set the title ourselves and run the standings gate. The config rule
-        // (title_contains "scarlet", max_standing 1.0) accepts it only when standing < 1.
+        // (title_contains "scarlet", max_standing 0.5) accepts it only when standing < 0.5.
         if ("mission_scarlet".equals(missionTemplate)) {
             Mission scarlet = new Mission();
             scarlet.setTitle("scarlet");
@@ -1458,6 +1463,7 @@ public class ClientManager {
             return;
         }
         cs.setCurrentMission(mission);
+        seedRouteDestinationFromOffer(clientId, cs, mission);
 
         // Refuse anything at (or behind) the system we were podded in — a wanted mission type is
         // still not worth flying back into the camp that killed us.
@@ -1477,7 +1483,7 @@ public class ClientManager {
         // can be a false positive (e.g. mission_enyo matching "Smash the Supplier").
         // Run the FULL rule set: an accept rule must match, and any decline rule
         // (too-far / base / blood / Recon2of3) still wins. Default is decline.
-        // Standings-gated rules (e.g. recon 1, accepted only when standing < 1) are
+        // Standings-gated rules (e.g. recon 1, accepted only when standing < 0.5) are
         // resolved here against the tracked per-client standing.
         applyDecision(clientId, mission, missionConfig.evaluate(mission, cs.getLastKnownStanding()));
     }
@@ -1521,7 +1527,7 @@ public class ClientManager {
         if (!SystemMap.isBlocked(location, avoided)) return false;
 
         long left = stateManager.getAvoidMinutesRemaining();
-        String why = SystemMap.normalize(location).equals(SystemMap.normalize(avoided))
+        String why = SystemMap.resolve(location).equals(SystemMap.resolve(avoided))
                 ? "the system we were podded in"
                 : "only reachable through " + avoided + ", where we were podded";
         System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle()
@@ -1757,7 +1763,7 @@ public class ClientManager {
         if (avoided == null || route == null || route.destination == null) return false;
         if (!SystemMap.isBlocked(route.destination, avoided)) return false;
 
-        String dest = SystemMap.display(SystemMap.normalize(route.destination));
+        String dest = SystemMap.display(SystemMap.resolve(route.destination));
         log(clientId, "POD_AVOID: route destination " + dest + " is at/behind " + avoided
                 + " where we were podded — redocking and quitting this mission.");
         EventLog.log("POD_AVOID_QUIT", clientId + " — undocked onto a route to " + dest
@@ -1800,7 +1806,7 @@ public class ClientManager {
         String firstHop = detour.get(1);
         String template = SystemMap.rerouteTemplate(firstHop);
         if (template == null) {
-            log(clientId, "POD_AVOID: safe route to " + SystemMap.display(SystemMap.normalize(route.destination))
+            log(clientId, "POD_AVOID: safe route to " + SystemMap.display(SystemMap.resolve(route.destination))
                     + " starts at " + firstHop + ", but that system has no reroute template"
                     + " — flying the autopilot route as-is.");
             return;
@@ -1844,11 +1850,18 @@ public class ClientManager {
             if (quitIfRoutePodAvoided(clientId, cs, route)) return;
             // Remember where this trip is going: with jumpCount (our distance from home) it locates
             // us on the map, which is how a pod death is placed when the kill report can't be read.
+            // The offer dialog already gave us a mapped destination in the normal case — keep that
+            // one; the route panel's tiny font OCRs worse, so it only fills in when we have nothing.
             if (route != null && route.destination != null && SystemMap.isKnown(route.destination)) {
-                String dest = SystemMap.display(SystemMap.normalize(route.destination));
-                cs.setRouteDestination(dest);
-                log(clientId, "TRAVEL: destination " + dest + " — route: "
-                        + String.join(" => ", SystemMap.pathFromStation(dest)));
+                String dest = SystemMap.display(SystemMap.resolve(route.destination));
+                if (cs.getRouteDestination() == null) {
+                    cs.setRouteDestination(dest);
+                    log(clientId, "TRAVEL: destination " + dest + " — route: "
+                            + String.join(" => ", SystemMap.pathFromStation(dest)));
+                } else if (!dest.equals(cs.getRouteDestination())) {
+                    log(clientId, "TRAVEL: route panel reads " + dest + " but the offer dialog gave "
+                            + cs.getRouteDestination() + " — keeping the offer's.");
+                }
             }
             planPodDetour(clientId, cs, route);
             if (route == null) {
@@ -4242,7 +4255,7 @@ public class ClientManager {
         double standings = missionProcessor.readAgentStandings();
 
         // Track the standing for mission gating (recon 1 / scarlet / pot-and-kettle are
-        // accepted only when standing < 1). recordStanding ignores NaN OCR misses (never
+        // accepted only when standing < 0.5). recordStanding ignores NaN OCR misses (never
         // clobbers a good value) and persists to disk so it survives restarts.
         if (!Double.isNaN(standings)) {
             stateManager.recordStanding(clientId, standings);
@@ -4870,24 +4883,84 @@ public class ClientManager {
     }
 
     /**
-     * Bank a gate jump once its warp is confirmed. Called from every WARPING path that has
-     * established the jump actually engaged — never from the issue site, so a right-click that
-     * missed the stargate leaves our distance-from-home untouched instead of silently drifting.
+     * Bank a gate jump once we are actually through it. Called from IDLE past the landing settle —
+     * out of warp, grid rendered, looking for warp elements again — not at the right-click and not
+     * when the warp engages, so neither a missed stargate nor a jump we never came out of moves our
+     * distance-from-home.
      *
      * Direction follows the leg: outbound each jump takes us one further from the station,
      * returning retraces that same route so each jump takes us one closer. Only gate jumps get
-     * here — safe-spot evades, the warp to the mission site and dock warps never set the flag.
+     * here — safe-spot evades, bubble escapes, the warp to the mission site and dock warps never
+     * set the flag.
      */
     private void confirmGateJump(String clientId, ClientState cs) {
         if (!cs.isPendingGateJump()) return;
         cs.setPendingGateJump(false);
         if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
             cs.decrementJumpCount();
-            log(clientId, "JUMP confirmed (homeward) — now " + cs.getJumpCount() + " jump(s) from home.");
+            log(clientId, "JUMP confirmed (homeward) — now " + cs.getJumpCount() + " jump(s) from home."
+                    + mapSystemSuffix(cs));
         } else {
             cs.incrementJumpCount();
-            log(clientId, "JUMP confirmed (outbound) — now " + cs.getJumpCount() + " jump(s) from home.");
+            log(clientId, "JUMP confirmed (outbound) — now " + cs.getJumpCount() + " jump(s) from home."
+                    + mapSystemSuffix(cs));
         }
+    }
+
+    /**
+     * Take the destination from the offer dialog OCR (the same read the distance check uses), so we
+     * can place ourselves on the map from the first jump instead of waiting for the route panel —
+     * which only reads after undock, and often not at all. This is the preferred source: once it
+     * lands the route panel does not overwrite it. Clears the previous trip's destination when this
+     * offer has none, so we never index our jumps off a route we are no longer flying.
+     */
+    private void seedRouteDestinationFromOffer(String clientId, ClientState cs, Mission mission) {
+        String location = mission.getLocation();
+        if (location == null || location.isEmpty() || "Unknown".equalsIgnoreCase(location)) {
+            cs.setRouteDestination(null);
+            log(clientId, "MAP: offer dialog gave no location — waiting on the route panel to place us.");
+            return;
+        }
+        if (!SystemMap.isKnown(location)) {
+            cs.setRouteDestination(null);
+            log(clientId, "MAP: offer location '" + location + "' is not on the route map — ignoring it.");
+            return;
+        }
+        String dest = SystemMap.display(SystemMap.resolve(location));
+        cs.setRouteDestination(dest);
+        log(clientId, "MAP: destination " + dest + " from the offer dialog — route: "
+                + String.join(" => ", SystemMap.pathFromStation(dest)));
+    }
+
+    /**
+     * " Map says we are in X." for the jump log — the outbound route indexed by our distance from
+     * home, the same reckoning {@link #inferPoddedSystem} uses. Always says something: when the map
+     * can't place us it names the reason, so a silent line isn't mistaken for a working map.
+     *
+     * The way home is the same route flown backwards, so nothing new has to be read on that leg:
+     * jumpCount counts back down and still indexes the outbound path. The route is only printed
+     * reversed so the log reads in the order we're actually flying it.
+     */
+    private String mapSystemSuffix(ClientState cs) {
+        String destination = cs.getRouteDestination();
+        if (destination == null && cs.getCurrentMission() != null) {
+            destination = cs.getCurrentMission().getLocation();
+        }
+        if (destination == null) return " Map can't place us: no destination on record.";
+        if (!SystemMap.isKnown(destination)) {
+            return " Map can't place us: destination '" + destination + "' is not on the map.";
+        }
+        List<String> path = SystemMap.pathFromStation(destination);
+        if (path.isEmpty()) {
+            return " Map can't place us: no route from home to " + destination + ".";
+        }
+        int index = Math.max(0, Math.min(cs.getJumpCount(), path.size() - 1));
+        String system = path.get(index);
+        List<String> shown = new ArrayList<>(path);
+        if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
+            Collections.reverse(shown);
+        }
+        return " Map says we are in " + system + " (route: " + String.join(" => ", shown) + ").";
     }
 
     private void handleWarping(String clientId, ClientWindowInfo window) {
@@ -4993,9 +5066,6 @@ public class ClientManager {
                         return;
                     }
                 }
-                // This path deliberately skips warp_active verification (see above), so the jump is
-                // banked on the issued click — the best signal available here.
-                confirmGateJump(clientId, cs);
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
@@ -5212,7 +5282,6 @@ public class ClientManager {
                 }
 
                 cs.setSafeSpotWarp(false); // warp engaged — clear the evade-retry flag
-                confirmGateJump(clientId, cs); // warp_active with no bubble — the jump took
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
