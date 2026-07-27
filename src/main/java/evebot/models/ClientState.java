@@ -200,12 +200,11 @@ public class ClientState {
      *  client compares its own standing against the fleet partner's to decide the fleet reward. */
     private double lastKnownStanding = Double.NaN;
 
-    /** When this client last grabbed (accepted) a mission. Read by the fleet partner: for 2
-     *  minutes after a grab, the partner raises its take-all threshold (fleet reward). MIN until
-     *  the first accept. NOT reset by setState. */
-    private LocalDateTime lastMissionGrab = LocalDateTime.MIN;
-
-/** True when docking to home station after combat — WARPING should transition to COMPLETING. */
+/** True when docking to home station after combat — WARPING should transition to COMPLETING.
+     *  Set right before each dock's setState(WARPING) and cleared on the docking-completion paths
+     *  (finishDockArrival / the dock-reissue give-up). setState also clears it on TRAVEL/RETURNING
+     *  entry, so a WARPING that ended without finishDockArrival (e.g. a pod death mid-dock-warp)
+     *  can't leave it set and make the next leg's warp landing read as a phantom dock. */
     private boolean dockingToStation = false;
 
     /** Set when an insta-dock (enemy in local) engaged: instaDock() already slept ~7s and verified
@@ -388,6 +387,11 @@ public class ClientState {
             this.windowsClosedAfterJump1 = false;
             this.podRerouteTemplate = null;
             this.pendingGateJump  = false;
+            // A fresh outbound/return leg is never a completion dock. Clear any stale
+            // dockingToStation left set by a WARPING that ended without finishDockArrival
+            // (e.g. a pod death mid-dock-warp) — otherwise this leg's warp landing is
+            // misread as a dock and the client flips into a phantom COMPLETING.
+            this.dockingToStation = false;
         }
         if (state == State.TRAVEL) {
             // Outbound leg starts at the station. RETURNING is deliberately excluded: the way home
@@ -613,8 +617,6 @@ public boolean isDockingToStation()             { return dockingToStation; }
     public double getLastKnownStanding()             { return lastKnownStanding; }
     public void   setLastKnownStanding(double v)     { this.lastKnownStanding = v; }
 
-    public LocalDateTime getLastMissionGrab()                { return lastMissionGrab; }
-    public void          setLastMissionGrab(LocalDateTime t) { this.lastMissionGrab = t; }
 
     public boolean isEnterCombatOnWarpLand()           { return enterCombatOnWarpLand; }
     public void    setEnterCombatOnWarpLand(boolean v) { this.enterCombatOnWarpLand = v; }

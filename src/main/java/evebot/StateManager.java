@@ -36,6 +36,12 @@ public class StateManager {
 
     /** Global pod-death cooldown — all clients must wait until this time before resuming. */
     private volatile LocalDateTime podCooldownEnd = LocalDateTime.MIN;
+    /** Re-pod escalation: a pod death landing within {@link #POD_REPOD_WINDOW_MINUTES} after the
+     *  previous cooldown expired escalates every subsequent pod cooldown to
+     *  {@link #POD_COOLDOWN_ESCALATED_MINUTES} for the rest of the session (one-way). */
+    private static final long POD_REPOD_WINDOW_MINUTES       = 15;
+    private static final int  POD_COOLDOWN_ESCALATED_MINUTES = 30;
+    private volatile boolean  podCooldownEscalated           = false;
     private static final Path STATE_FILE = Paths.get("config", "bot_state.json");
     /** Faction decline timestamps live in their own file so they survive a bot_state.json wipe
      *  (which is cleared every restart). Maps clientId → last faction-decline time. */
@@ -106,6 +112,33 @@ public class StateManager {
 
     public LocalDateTime getPodCooldownEnd()                { return podCooldownEnd; }
     public void          setPodCooldownEnd(LocalDateTime t) { this.podCooldownEnd = t; }
+
+    /**
+     * Register a fresh pod death for re-pod escalation. When it lands within
+     * {@link #POD_REPOD_WINDOW_MINUTES} after the previous cooldown expired, escalate — this and
+     * every subsequent pod cooldown then run {@link #POD_COOLDOWN_ESCALATED_MINUTES} minutes.
+     * One-way for the session. Call once per pod death, BEFORE {@link #setPodCooldownEnd} overwrites
+     * the reference end time.
+     */
+    public void notePodDeathForEscalation() {
+        if (podCooldownEscalated) return;
+        LocalDateTime prev = podCooldownEnd;
+        LocalDateTime now  = LocalDateTime.now();
+        if (!prev.equals(LocalDateTime.MIN)
+                && !now.isBefore(prev)
+                && now.isBefore(prev.plusMinutes(POD_REPOD_WINDOW_MINUTES))) {
+            podCooldownEscalated = true;
+            log("[StateManager] Re-podded within " + POD_REPOD_WINDOW_MINUTES
+                    + " min of the last cooldown expiry — escalating all pod cooldowns to "
+                    + POD_COOLDOWN_ESCALATED_MINUTES + " min for the session.");
+        }
+    }
+
+    /** Pod-cooldown length to apply: the escalated length once a re-pod inside the window has been
+     *  seen this session, otherwise {@code base}. */
+    public int podCooldownMinutes(int base) {
+        return podCooldownEscalated ? POD_COOLDOWN_ESCALATED_MINUTES : base;
+    }
 
     private void registerHotkey() {
         if (tryRegisterJnaHotkey()) {

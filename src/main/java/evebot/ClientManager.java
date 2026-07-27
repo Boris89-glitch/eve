@@ -609,10 +609,14 @@ public class ClientManager {
         // Clear the travel phase (same reason as the in-combat branch): we're docked now, so a later
         // IDLE tick with TO_MISSION + agent_icon would read the station agent as another pod death.
         cs.setTravelPhase(ClientState.TravelPhase.NONE);
+        // Escalate if this is a re-pod soon after the last cooldown expired — checked against the
+        // still-current podCooldownEnd, before either branch below overwrites it.
+        stateManager.notePodDeathForEscalation();
         if (jumps <= 2) {
-            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
+            int minutes = stateManager.podCooldownMinutes(POD_COOLDOWN_MINUTES);
+            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(minutes);
             stateManager.setPodCooldownEnd(cooldownEnd);
-            log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
+            log(clientId, "POD_COOLDOWN: set " + minutes + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
         } else {
             stateManager.setPodCooldownEnd(LocalDateTime.now());
             log(clientId, "POD_DEATH: non-combat death, jumps>2 (" + jumps + ") — no cooldown; next tick will turn the mission in if it reads COMPLETED, else quit it.");
@@ -1552,9 +1556,6 @@ public class ClientManager {
                 log(clientId, "ACCEPT failed — offer still on screen, staying put to retry next tick.");
                 return;
             }
-            // Record the grab time so the fleet partner can raise its take-all threshold
-            // (fleet reward) for the next 2 minutes — see chooseFleetReward.
-            stateManager.getState(clientId).setLastMissionGrab(LocalDateTime.now());
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
         } else {
             System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle());
@@ -4341,22 +4342,38 @@ public class ClientManager {
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
-    /** Take-all standings threshold is normally 0.0. It is raised to 1.0 (this client grabs the
-     *  standings for itself more eagerly) when the fleet partner grabbed a mission in the last 2
-     *  minutes, and forced take-all (regardless of our own standing) when the partner's standing
-     *  is more than 1.0 above ours, so the lagging client catches up. */
-    private static final double TAKE_ALL_THRESHOLD_HIGH = 1.0;
-    private static final long   PARTNER_GRAB_WINDOW_MIN  = 2;
-    private static final double PARTNER_STANDING_GAP     = 1.0;
+    /** Take-all standings threshold is normally 0.0, forced to take-all (regardless of our own
+     *  standing) when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours,
+     *  so the lagging client catches up. The same gap drives the leader's forced share. */
+    private static final double PARTNER_STANDING_GAP = 0.6;
 
     /**
      * Pick the fleet reward (share vs take-all) from the agent's standing and click it.
      * Below the take-all threshold: take all (fleet_no) to recover standings; healthy: share
-     * (fleet_yes). The threshold is normally 0, raised to 1 when the fleet partner just grabbed
-     * a mission or is well ahead of us in standing (see {@link #takeAllThreshold}).
+     * (fleet_yes). The threshold is normally 0, forced take-all when the partner is well ahead of
+     * us in standing (see {@link #takeAllThreshold}).
      * Exact standings are not logged — OCR misreads the value; only a low-standings warning is kept.
      */
     private void chooseFleetReward(String clientId, double standings) {
+        // Leader override — mirror of the lagging client's forced take-all: if we're more than
+        // PARTNER_STANDING_GAP AHEAD of the partner, share unconditionally so the lagging client
+        // catches up. Driven off LAST KNOWN standings (not the current OCR read): recordStanding()
+        // ran just before this and keeps the last good value on a NaN read, so a failed/blank
+        // standings OCR can't flip the leader into taking for himself. Standings don't swing a
+        // full point in one mission, so trusting the stored lead is safe.
+        ClientState partner = stateManager.getOtherState(clientId);
+        if (partner != null) {
+            double selfLast    = stateManager.getState(clientId).getLastKnownStanding();
+            double partnerLast = partner.getLastKnownStanding();
+            if (!Double.isNaN(selfLast) && !Double.isNaN(partnerLast)
+                    && selfLast - partnerLast > PARTNER_STANDING_GAP) {
+                log(clientId, "COMPLETING: leader >" + PARTNER_STANDING_GAP
+                        + " above partner (last known) — sharing to let partner catch up.");
+                missionProcessor.clickFleetYes();
+                return;
+            }
+        }
+
         if (Double.isNaN(standings)) {
             log(clientId, "COMPLETING: standings OCR failed — defaulting to fleet YES.");
             missionProcessor.clickFleetYes();
@@ -4380,30 +4397,22 @@ public class ClientManager {
     }
 
     /**
-     * The take-all (fleet_no) threshold for this client's completion. Normally 0.0, raised to
-     * {@link #TAKE_ALL_THRESHOLD_HIGH} when the fleet partner grabbed a mission within the last
-     * {@link #PARTNER_GRAB_WINDOW_MIN} minutes, or when the partner's standing is more than
-     * {@link #PARTNER_STANDING_GAP} above ours (so the lagging client catches up).
+     * The take-all (fleet_no) threshold for this client's completion. Normally 0.0, forced to
+     * take-all when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours
+     * (so the lagging client catches up) — if the other has more standing, we take all.
      */
     private double takeAllThreshold(String clientId, double standings) {
         ClientState partner = stateManager.getOtherState(clientId);
         if (partner == null) return 0.0;
 
-        // Partner well ahead of us in standing: take all unconditionally to catch up,
-        // even when our own standing already looks healthy (checked before the grab window).
+        // Partner ahead of us in standing: take all unconditionally to catch up, even when our
+        // own standing already looks healthy.
         double partnerStanding = partner.getLastKnownStanding();
         if (!Double.isNaN(standings) && !Double.isNaN(partnerStanding)
                 && partnerStanding - standings > PARTNER_STANDING_GAP) {
             log(clientId, "COMPLETING: partner standing >" + PARTNER_STANDING_GAP
                     + " above ours — taking all.");
             return Double.POSITIVE_INFINITY;
-        }
-
-        LocalDateTime grab = partner.getLastMissionGrab();
-        if (grab.isAfter(LocalDateTime.now().minusMinutes(PARTNER_GRAB_WINDOW_MIN))) {
-            log(clientId, "COMPLETING: partner grabbed a mission recently — take-all threshold raised to "
-                    + TAKE_ALL_THRESHOLD_HIGH + ".");
-            return TAKE_ALL_THRESHOLD_HIGH;
         }
         return 0.0;
     }
@@ -4813,10 +4822,11 @@ public class ClientManager {
         } else if (stationInReach) {
             log(clientId, "WARPING: " + why + " — station in reach, emergency redock!");
             if (missionProcessor.emergencyRedock()) {
-                LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
+                int minutes = stateManager.podCooldownMinutes(POD_COOLDOWN_MINUTES);
+                LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(minutes);
                 stateManager.setPodCooldownEnd(cooldownEnd);
                 log(clientId, (held ? "BUBBLE_CAMP: held at station (jam/bubble)" : "WARPING: stuck warp at station")
-                        + " — redocked, " + POD_COOLDOWN_MINUTES + "-minute global cooldown before retry.");
+                        + " — redocked, " + minutes + "-minute global cooldown before retry.");
                 cs.setPendingPodStationCheck(true);
                 stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
                 ClientWindowInfo other = findOtherClient(clientId);
