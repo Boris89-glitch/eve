@@ -70,6 +70,11 @@ public class ClientManager {
     /** Consecutive polls that must show warp_active gone before a gate-warp landing is confirmed —
      *  guards against a single sub-threshold frame ending the warp early. */
     private static final int  WARP_END_MISS_CONFIRM     = 2;
+    /** While a warp/jump click is still being issued on the background thread, warpStartTime is held
+     *  this many seconds in the future so the spin-up grace can't start (and misfire) before the click
+     *  actually lands. Just needs to exceed the worst-case rightClickAndSelect latency; the click
+     *  thread resets warpStartTime to the real land time as soon as it finishes. */
+    private static final int  WARP_CLICK_PENDING_SECS   = 30;
     /** Safe settle window (seconds) held in IDLE after a warp lands before this client navigates,
      *  so it doesn't grab a stargate before warp_to_location / dock has rendered. Exits early once
      *  the expected landing element is on screen. Non-blocking (ticks per focus, like combat). */
@@ -751,22 +756,19 @@ public class ClientManager {
                         case "activate_gate":
                             loadAmmoBeforeGate(clientId, cs);
                             log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
-                            cs.setWarpStartTime(LocalDateTime.now());
                             cs.setLastWarpCheck(LocalDateTime.MIN);
                             stateManager.setState(clientId, ClientState.State.IN_COMBAT);
-                            new Thread(() -> {
+                            startWarpClickDeferred(cs, () -> {
                                 missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
                                 missionProcessor.clickEmptySpace(); // click away in space to clear the menu
-                            }).start();
+                            });
                             break;
                         case "warp_to_location":
                             log(clientId, "IDLE[TO_MISSION]: warp_to_location — warping into mission space.");
-                            cs.setWarpStartTime(LocalDateTime.now());
-                            stateManager.setState(clientId, ClientState.State.WARPING);
                             // Scarlet lands straight in the pocket (mission already started) — flag so
                             // the next landing enters combat directly instead of seeking an activate_gate.
                             if (isScarletMission(cs)) cs.setEnterCombatOnWarpLand(true);
-                            new Thread(() -> missionProcessor.clickWarpToLocation()).start();
+                            issueWarp(clientId, cs, () -> missionProcessor.clickWarpToLocation());
                             break;
                         default:
                             log(clientId, "unexpected '" + found + "' — ignoring.");
@@ -778,7 +780,8 @@ public class ClientManager {
             // Each system after the first jump, check for hostiles once — warp to safe spot if
             // enemy found. klyChecked latches per system and is reset on every gate jump below,
             // so this re-evaluates in each new system (same as RETURNING_HOME), not just once.
-            if (cs.getJumpCount() >= 1 && !cs.isKlyChecked()) {
+            // High sec has no hostile-local evasion — skip the whole check.
+            if (!Environment.isHighSec() && cs.getJumpCount() >= 1 && !cs.isKlyChecked()) {
                 cs.setKlyChecked(true);
                 if (missionProcessor.isEnemyInLocal()) {
                     log(clientId, "IDLE[TO_MISSION]: enemy in local after jump — warping to safe spot. (jumpCount=" + cs.getJumpCount() + ")");
@@ -818,22 +821,19 @@ public class ClientManager {
                 case "activate_gate":
                     loadAmmoBeforeGate(clientId, cs);
                     log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
-                    cs.setWarpStartTime(LocalDateTime.now());
                     cs.setLastWarpCheck(LocalDateTime.MIN);
                     stateManager.setState(clientId, ClientState.State.IN_COMBAT);
-                    new Thread(() -> {
+                    startWarpClickDeferred(cs, () -> {
                         missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
                         missionProcessor.clickEmptySpace(); // click away in space to clear the menu
-                    }).start();
+                    });
                     break;
                 case "warp_to_location":
                     log(clientId, "IDLE[TO_MISSION]: warp_to_location — warping into mission space.");
-                    cs.setWarpStartTime(LocalDateTime.now());
-                    stateManager.setState(clientId, ClientState.State.WARPING);
                     // Scarlet lands straight in the pocket (mission already started) — flag so the
                     // next landing enters combat directly instead of looking for an activate_gate.
                     if (isScarletMission(cs)) cs.setEnterCombatOnWarpLand(true);
-                    new Thread(() -> missionProcessor.clickWarpToLocation()).start();
+                    issueWarp(clientId, cs, () -> missionProcessor.clickWarpToLocation());
                     break;
                 case "stargate":
                     // Once we've passed the missed-warp_to_location safety threshold (jump #6+),
@@ -844,10 +844,8 @@ public class ClientManager {
                         missionProcessor.nudgeView();
                         if (missionProcessor.findTemplate("warp_to_location") != null) {
                             log(clientId, "IDLE[TO_MISSION]: warp_to_location revealed after nudge — warping into mission space.");
-                            cs.setWarpStartTime(LocalDateTime.now());
-                            stateManager.setState(clientId, ClientState.State.WARPING);
                             if (isScarletMission(cs)) cs.setEnterCombatOnWarpLand(true);
-                            new Thread(() -> missionProcessor.clickWarpToLocation()).start();
+                            issueWarp(clientId, cs, () -> missionProcessor.clickWarpToLocation());
                             break;
                         }
                     }
@@ -867,18 +865,14 @@ public class ClientManager {
                                     + detourTemplate + "' → jump. (jump #" + cs.getJumpCount() + ")");
                             EventLog.log("POD_AVOID_REROUTE", clientId + " — first jump taken via "
                                     + detourTemplate + " to route around the podded system");
-                            cs.setWarpStartTime(LocalDateTime.now());
-                            stateManager.setState(clientId, ClientState.State.WARPING);
-                            new Thread(() -> missionProcessor.rightClickAndSelect(detourTemplate, "jump")).start();
+                            issueWarp(clientId, cs, () -> missionProcessor.rightClickAndSelect(detourTemplate, "jump"));
                             break;
                         }
                         log(clientId, "IDLE[TO_MISSION]: POD_AVOID detour wanted '" + detourTemplate
                                 + "' but it isn't on screen — taking the normal stargate.");
                     }
                     log(clientId, "IDLE[TO_MISSION]: stargate — right-click → jump. (jump #" + cs.getJumpCount() + ")");
-                    cs.setWarpStartTime(LocalDateTime.now());
-                    stateManager.setState(clientId, ClientState.State.WARPING);
-                    new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
+                    issueWarp(clientId, cs, () -> missionProcessor.rightClickAndSelect("stargate", "jump"));
                     break;
                 default:
                     log(clientId, "unexpected '" + found + "' — ignoring.");
@@ -894,9 +888,7 @@ public class ClientManager {
                 log(clientId, "IDLE[RETURNING_HOME][Scarlet]: home_station visible — right-click → Dock.");
                 cs.setJustExitedWarp(false);
                 cs.setDockingToStation(true);
-                cs.setWarpStartTime(LocalDateTime.now());
-                stateManager.setState(clientId, ClientState.State.WARPING);
-                new Thread(() -> missionProcessor.rightClickAndSelect("home_station", "dock")).start();
+                issueWarp(clientId, cs, () -> missionProcessor.rightClickAndSelect("home_station", "dock"));
                 return;
             }
 
@@ -916,7 +908,7 @@ public class ClientManager {
                 // Just exited warp — dock first (no stargate false-match during the gate tunnel).
                 if ("dock".equals(found)) {
                     boolean instaEngaged = false;
-                    if (missionProcessor.isEnemyInLocal()) {
+                    if (!Environment.isHighSec() && missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
                         MissionProcessor.InstaDockResult r = missionProcessor.instaDock();
                         if (r == MissionProcessor.InstaDockResult.NOT_ENGAGED
@@ -939,7 +931,8 @@ public class ClientManager {
 
                 // Dock not visible — check for hostiles before proceeding to stargate.
                 // Skip if we already evaded to a safe spot this system; jump out instead of re-evading.
-                if (!cs.isWarpedToSafeSpot() && missionProcessor.isEnemyInLocal()) {
+                // High sec has no hostile-local evasion — skip.
+                if (!Environment.isHighSec() && !cs.isWarpedToSafeSpot() && missionProcessor.isEnemyInLocal()) {
                     log(clientId, "IDLE[RETURNING_HOME]: enemy in local after jump — warping to safe spot. (jumpCount=" + cs.getJumpCount() + ")");
                     if (missionProcessor.warpToGenericSafeSpot()) {
                         cs.setWarpedToSafeSpot(true);
@@ -971,7 +964,7 @@ public class ClientManager {
             switch (found) {
                 case "dock":
                     boolean instaEngagedDock = false;
-                    if (missionProcessor.isEnemyInLocal()) {
+                    if (!Environment.isHighSec() && missionProcessor.isEnemyInLocal()) {
                         log(clientId, "IDLE[RETURNING_HOME]: dock visible + ENEMY in local — insta-docking.");
                         MissionProcessor.InstaDockResult r = missionProcessor.instaDock();
                         if (r == MissionProcessor.InstaDockResult.NOT_ENGAGED
@@ -994,9 +987,7 @@ public class ClientManager {
                     cs.setPendingGateJump(true);
                     cs.setWarpedToSafeSpot(false);
                     log(clientId, "stargate — right-click → jump. (" + cs.getJumpCount() + " jump(s) from home)");
-                    cs.setWarpStartTime(LocalDateTime.now());
-                    stateManager.setState(clientId, ClientState.State.WARPING);
-                    new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
+                    issueWarp(clientId, cs, () -> missionProcessor.rightClickAndSelect("stargate", "jump"));
                     break;
                 case "agent_icon":
                     // A pod respawn at the station looks identical to a normal dock arrival — only
@@ -1852,7 +1843,8 @@ public class ClientManager {
         }
 
         // After setting destination, check for hostiles — warp to safe spot if needed.
-        if (missionProcessor.findTemplate("enemy") != null) {
+        // High sec has no hostile-local evasion — skip.
+        if (!Environment.isHighSec() && missionProcessor.findTemplate("enemy") != null) {
             log(clientId, "TRAVEL: enemy in local after undock — warping to safe spot.");
             if (missionProcessor.warpToSafeSpot()) {
                 // Evaded — enter WARPING so the safe-spot warp completes, instead of
@@ -1887,10 +1879,11 @@ public class ClientManager {
         if (!cs.isCombatWarpLanded()) {
             long elapsed = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
 
-            // 0–5s: grace — give the right-click+mission_start click time to land and
-            // the gate warp to begin before polling warp_active (a grayed-out gate that
-            // never warped is caught afterward by the re-click logic).
-            if (elapsed < 5) {
+            // Grace — give the right-click+mission_start click time to land and the gate warp to
+            // begin before polling warp_active (a grayed-out gate that never warped is caught
+            // afterward by the re-click logic). 5s in null sec; 2s in high sec (no bubbles/jams,
+            // only warp spin-up to wait out).
+            if (elapsed < (Environment.isHighSec() ? 2 : 5)) {
                 if (cs.getLastWarpCheck().equals(LocalDateTime.MIN)) {
                     log(clientId, "IN_COMBAT: waiting for gate warp to begin.");
                     cs.setLastWarpCheck(LocalDateTime.MIN.plusNanos(1)); // grace-logged marker
@@ -1975,12 +1968,12 @@ public class ClientManager {
             int retries = gateWarpRetries.merge(clientId, 1, Integer::sum);
             log(clientId, "IN_COMBAT: no warp after " + elapsed + "s — re-clicking activate_gate (attempt "
                     + retries + ").");
-            new Thread(() -> {
+            cs.setLastWarpCheck(LocalDateTime.MIN);          // next poll is a fresh first check
+            // Deferred clock: the grace restarts when the re-click lands, not now (see startWarpClickDeferred).
+            startWarpClickDeferred(cs, () -> {
                 missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
                 missionProcessor.clickEmptySpace(); // click away in space to clear the menu
-            }).start();
-            cs.setWarpStartTime(LocalDateTime.now());       // restart the 5s grace
-            cs.setLastWarpCheck(LocalDateTime.MIN);          // next poll is a fresh first check
+            });
             return;
         }
 
@@ -3541,7 +3534,7 @@ public class ClientManager {
      *        → mission_start). The 20s IN_COMBAT grace period covers the gate load.
      *
      *   0  → right-click activate_gate → click mission_start (second gate) → press 's' twice
-     *   1  → SAFE WAIT 30s (gate load) + switch to other client
+     *   1  → SAFE WAIT 40s (gate load — the gate is further away) + switch to other client
      *   2  → look for dock → click dock → WARPING → COMPLETING
      */
     private void handleCombatRecon(String clientId, ClientState cs) {
@@ -3557,18 +3550,18 @@ public class ClientManager {
                 cs.setCombatStep(1);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Recon] gate loading — safe wait 20s, switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Recon] gate loading — safe wait 40s (gate further away), switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 1: {
-                // SAFE WAIT 30s for gate load
+                // SAFE WAIT 40s for gate load — the gate is further away, so +10s over the usual.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 30) {
+                if (elapsed < 40) {
                     return;
                 }
-                log(clientId, "COMBAT[Recon] 30s gate load complete — looking for dock.");
+                log(clientId, "COMBAT[Recon] 40s gate load complete — looking for dock.");
                 cs.setCombatStep(2);
                 break;
             }
@@ -4420,9 +4413,19 @@ public class ClientManager {
             }
         }
 
-        // 1) Kernite ("Resources for War") — can't accept remotely, so don't click accept here.
-        //    Just undock and head to the SOE station; we accept + complete on arrival.
+        // 1) Kernite ("Resources for War").
         if (missionProcessor.isKerniteOffer()) {
+            // High sec: the faction agent is in our home station, so there's no remote-accept
+            // limitation and no travel — accept and complete right here, then resume.
+            if (Environment.isHighSec()) {
+                log(clientId, "FACTION_CHECK: kernite offer — high sec, agent in-station: accepting + completing here (no travel).");
+                EventLog.log("FACTION_KERNITE", clientId + " — kernite offered, completing in-station (high sec)");
+                completeFactionKerniteInPlace(clientId, cs);
+                stateManager.setState(clientId, ClientState.State.IDLE);
+                return;
+            }
+            // Null sec: the SOE agent is remote — can't accept here. Undock and head to the SOE
+            // station; we accept + complete on arrival.
             log(clientId, "FACTION_CHECK: kernite offer ('Resources for War') — can't accept remotely, undocking to SOE (accept on arrival).");
             EventLog.log("FACTION_KERNITE", clientId + " — kernite (Resources for War) offered, heading to SOE to accept + complete");
             cs.setFactionLeg(ClientState.FactionLeg.TO_SOE);
@@ -4502,9 +4505,7 @@ public class ClientManager {
 
         log(clientId, "FACTION_TRAVEL[" + leg + "]: " + stationKey + " visible — right-click → Dock.");
         cs.setDockingToStation(true);
-        cs.setWarpStartTime(LocalDateTime.now());
-        stateManager.setState(clientId, ClientState.State.WARPING);
-        new Thread(() -> missionProcessor.rightClickAndSelect(stationKey, "dock")).start();
+        issueWarp(clientId, cs, () -> missionProcessor.rightClickAndSelect(stationKey, "dock"));
     }
 
     /**
@@ -4557,6 +4558,27 @@ public class ClientManager {
         // Head back to the home station, then resume normal mission checking.
         cs.setFactionLeg(ClientState.FactionLeg.TO_HOME);
         stateManager.setState(clientId, ClientState.State.FACTION_TRAVEL);
+    }
+
+    /**
+     * High-sec kernite completion — the faction agent shares our home station, so the whole
+     * undock → SOE → dock → complete → home travel is unnecessary. The kernite offer is already
+     * on screen (FACTION_CHECK just requested it): accept it, read standings, complete, pick the
+     * fleet reward, OK. Same accept+turn-in as {@link #handleFactionCompleting} minus travel.
+     */
+    private void completeFactionKerniteInPlace(String clientId, ClientState cs) {
+        missionProcessor.clickAcceptButton();
+        missionProcessor.clickAgentStandings();
+        double standings = missionProcessor.readAgentStandings();
+        if (!Double.isNaN(standings)) {
+            stateManager.recordStanding(clientId, standings);   // persist — survives restarts
+        }
+        missionProcessor.doubleClickFactionAgent(); // refocus agent dialog (standings covers complete_mission)
+        missionProcessor.clickCompleteMission();
+        chooseFleetReward(clientId, standings);
+        missionProcessor.waitAndClickOk();
+        EventLog.log("FACTION_COMPLETE", clientId + " — kernite (Resources for War) turned in (in-station, high sec)");
+        log(clientId, "FACTION_CHECK: kernite accepted + turned in in-station — resuming normal checking.");
     }
 
     // -----------------------------------------------------------------------
@@ -4621,6 +4643,16 @@ public class ClientManager {
 
         log(clientId, "UNDOCKING: agent_icon gone after " + elapsed + "s — undocked, proceeding to TRAVEL.");
         stateManager.setState(clientId, ClientState.State.TRAVEL);
+        // High sec: nothing to babysit after undock — we can't insta-dock back on this station
+        // anyway (session-change timer), so hand focus to the other client now; TRAVEL resumes
+        // for this client when it's refocused.
+        if (Environment.isHighSec()) {
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) {
+                log(clientId, "UNDOCKING: switching focus to " + other.getClientId() + " on undock.");
+                bringToForeground(other);
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4665,6 +4697,30 @@ public class ClientManager {
      * Returns false when nothing was on screen to click — usually a session change mid gate jump,
      * where warp_active is missing simply because the grid hasn't loaded yet.
      */
+    /**
+     * Issue a warp/jump/dock click on a background thread and start the warp-grace clock only once the
+     * click has actually landed. rightClickAndSelect / clickWarpToLocation take ~1–2s (more if the
+     * right-click misses and retries); if the clock started before the click, that latency would be
+     * eaten out of the grace and a still-spinning-up warp could read as "not active". Until the click
+     * lands, warpStartTime is held in the near future so handleWarping / IN_COMBAT wait. The reset runs
+     * in a finally so the clock always starts even if the click throws.
+     */
+    private void startWarpClickDeferred(ClientState cs, Runnable warpClick) {
+        cs.setWarpStartTime(LocalDateTime.now().plusSeconds(WARP_CLICK_PENDING_SECS));
+        new Thread(() -> {
+            try { warpClick.run(); }
+            finally { cs.setWarpStartTime(LocalDateTime.now()); }
+        }).start();
+    }
+
+    /** Enter WARPING and issue the warp/jump/dock click with the clock deferred until the click lands
+     *  (see {@link #startWarpClickDeferred}). Set any per-warp flags (dockingToStation, enterCombatOn
+     *  WarpLand, travelPhase) on {@code cs} before calling. */
+    private void issueWarp(String clientId, ClientState cs, Runnable warpClick) {
+        stateManager.setState(clientId, ClientState.State.WARPING);
+        startWarpClickDeferred(cs, warpClick);
+    }
+
     private boolean reissueWarp(String clientId, ClientState cs) {
         if (cs.isDockingToStation()) {
             // Re-issue the dock with the button-first, station-backup helper. A bare "dock"
@@ -4673,19 +4729,19 @@ public class ClientManager {
             log(clientId, "WARPING: re-issuing DOCK (button, station backup).");
             // Count re-issues that found nothing to click, so a screen with no DOCK button and no
             // station can't spin here forever (redockOrBubbleEscape drops to IDLE at the cap).
-            new Thread(() -> {
+            startWarpClickDeferred(cs, () -> {
                 if (missionProcessor.dockWithStationBackup()) {
                     cs.setDockReissueMissCount(0);
                 } else {
                     cs.setDockReissueMissCount(cs.getDockReissueMissCount() + 1);
                 }
-            }).start();
+            });
         } else if (missionProcessor.findTemplate("stargate") != null) {
             log(clientId, "WARPING: re-issuing gate jump.");
-            new Thread(() -> missionProcessor.rightClickAndSelect("stargate", "jump")).start();
+            startWarpClickDeferred(cs, () -> missionProcessor.rightClickAndSelect("stargate", "jump"));
         } else if (missionProcessor.findTemplate("warp_to_location") != null) {
             log(clientId, "WARPING: re-issuing warp-to-location.");
-            new Thread(() -> missionProcessor.clickWarpToLocation()).start();
+            startWarpClickDeferred(cs, () -> missionProcessor.clickWarpToLocation());
         } else {
             return false;
         }
@@ -4845,9 +4901,8 @@ public class ClientManager {
                 return;
             }
             log(clientId, "WARPING: " + why + " while docking — re-issuing dock and waiting it out (no bubble escape).");
-            reissueWarp(clientId, cs);               // dockingToStation → dockWithStationBackup
             cs.setWarpRetryCount(0);                  // verify the re-issued dock afresh next cycle
-            cs.setWarpStartTime(LocalDateTime.now());
+            reissueWarp(clientId, cs);               // holds the grace clock until the dock re-click lands
             return;
         }
 
@@ -5008,14 +5063,19 @@ public class ClientManager {
             // Safe-spot evade waits a touch shorter than a normal warp (3s vs 5s) but still
             // long enough not to misread a still-spinning-up warp as stuck; the home-station
             // extension below still applies.
-            long grace = cs.isSafeSpotWarp() ? 3 : 5;
+            // High sec has no bubbles/jams, so we only need to cover warp spin-up — a short 2s
+            // grace. Null sec keeps the longer margin that also lets a late jam surface first.
+            long grace = Environment.isHighSec() ? 2 : (cs.isSafeSpotWarp() ? 3 : 5);
             if (elapsed < grace) {
                 return;
             }
             // The extra home-station wait (grace→7s) only exists to give a standstill warp time to
             // spin up before we'd prematurely read "warp not active". If warp_active is already
             // showing (docking/undocking warp took), don't sit out the rest — proceed to switch now.
-            if (elapsed < 7
+            // High sec skips this undock/home warp-check delay: we can't insta-dock back on this
+            // station anyway, so there's nothing to protect by waiting.
+            if (!Environment.isHighSec()
+                    && elapsed < 7
                     && !missionProcessor.isWarpActive()
                     && missionProcessor.findTemplate("home_station") != null) {
                 return;
@@ -5189,7 +5249,8 @@ public class ClientManager {
                         cs.setWarpReissueMissCount(0);
                         cs.setWarpRetryCount(cs.getWarpRetryCount() + 1);
                         log(clientId, "WARPING: warp_active not showing — warp re-issued (retry " + cs.getWarpRetryCount() + "/1).");
-                        cs.setWarpStartTime(LocalDateTime.now()); // restart the 4s wait, stay in first-check
+                        // reissueWarp holds the grace clock in the future until the re-click lands, so
+                        // don't stamp warpStartTime here — that would restart the grace before the click.
                         return;
                     }
 

@@ -116,6 +116,13 @@ public class MissionConfig {
      * when we have a reading that is at/above the max.
      */
     private Decision gatedDecision(Mission mission, Rule rule, double standing) {
+        // High sec: we always run the standings-gated missions (Scarlet, Recon 1) regardless of
+        // standing — drop the gate entirely. Null sec keeps it (accept only while standing is low).
+        if (Environment.isHighSec()) {
+            System.out.printf("[DECISION] ACCEPT  — %s  (rule: %s; high sec → standing gate ignored)%n",
+                    mission.getTitle(), rule.comment);
+            return Decision.ACCEPT;
+        }
         if (Double.isNaN(standing)) {
             System.out.printf("[DECISION] ACCEPT  — %s  (rule: %s; standing not yet known → accept)%n",
                     mission.getTitle(), rule.comment);

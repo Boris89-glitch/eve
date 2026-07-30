@@ -106,6 +106,7 @@ def layout_rect(key: str, dx: int, dy: int, dw: int, dh: int) -> Tuple[int, int,
 TEMPLATE_FILES = {
     # UI buttons / dialogs
     "request_mission": "request_mission",
+    "view_mission": "view_mission",  # high-sec: shown instead of request_mission when a mission is already held
     "accept": "accept",
     "decline": "decline",
     "track": "track",
@@ -381,27 +382,38 @@ def resolve_ship_template(mission_target: str, ship_map: dict):
 class TemplateMatcher:
     """Loads PNG templates once and exposes find / click / right-click helpers."""
 
-    def __init__(self, templates_dir: Path, threshold: float = 0.83):
+    def __init__(self, templates_dir: Path, threshold: float = 0.83,
+                 security: str = "nullsec"):
         self.threshold = threshold
+        self.security = security
         self.templates: Dict[str, np.ndarray] = {}
         self.templates_dir = templates_dir
         self._load_all(templates_dir)
 
     # -- loading ---------------------------------------------------------------
 
+    def _load_one(self, directory: Path, fname: str) -> Optional[np.ndarray]:
+        """Load one template image. In high sec, prefer a '<fname>.highsec.<ext>' variant so
+        the null-sec captures stay untouched for a move back; fall back to the base name."""
+        stems = [f"{fname}.highsec", fname] if self.security == "highsec" else [fname]
+        for stem in stems:
+            for ext in (".png", ".jpg", ".bmp"):
+                path = directory / (stem + ext)
+                if path.exists():
+                    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        log.debug("Loaded template (%s)", path.name)
+                        return img
+        return None
+
     def _load_all(self, directory: Path):
         if not directory.exists():
             log.warning("Templates dir not found: %s", directory)
             return
         for key, fname in TEMPLATE_FILES.items():
-            for ext in (".png", ".jpg", ".bmp"):
-                path = directory / (fname + ext)
-                if path.exists():
-                    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-                    if img is not None:
-                        self.templates[key] = img
-                        log.debug("Loaded template '%s' (%s)", key, path.name)
-                    break
+            img = self._load_one(directory, fname)
+            if img is not None:
+                self.templates[key] = img
             else:
                 log.debug(
                     "Template not found: '%s' (expected: %s[.png/.jpg/.bmp])",
@@ -2404,15 +2416,15 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
     return {"ok": False, "error": "unknown cmd: %s" % cmd}
 
 
-def run_daemon(threshold: float = 0.80, verbose: bool = False):
+def run_daemon(threshold: float = 0.80, verbose: bool = False, security: str = "nullsec"):
     # Quiet by default: the per-action INFO echoes (clicks, dialog matched, pod verdict)
     # duplicate the Java-side state logs. Raise to WARNING unless --verbose is passed, so
     # warnings/errors still surface. Java passes --verbose when -Docr.verbose=true.
     if not verbose:
         log.setLevel(logging.WARNING)
-    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold)
+    matcher = TemplateMatcher(TEMPLATES_DIR, threshold=threshold, security=security)
     reader_box: dict = {}  # lazily holds an EVEMissionReader for OCR commands
-    log.info("Daemon ready — %d templates loaded.", len(matcher.templates))
+    log.info("Daemon ready — %d templates loaded (security=%s).", len(matcher.templates), security)
     # Announce readiness on stdout so Java knows the daemon is up.
     sys.stdout.write(json.dumps({"ok": True, "value": "ready"}) + "\n")
     sys.stdout.flush()
@@ -2558,10 +2570,14 @@ Examples:
     )
     parser.add_argument("--timeout", type=float, default=8.0)
     parser.add_argument("--threshold", type=float, default=0.80)
+    parser.add_argument(
+        "--security", default="nullsec", choices=("nullsec", "highsec"),
+        help="Security band. 'highsec' prefers '<name>.highsec.png' template variants.",
+    )
     args = parser.parse_args()
 
     if args.daemon:
-        run_daemon(threshold=args.threshold, verbose=args.verbose)
+        run_daemon(threshold=args.threshold, verbose=args.verbose, security=args.security)
         return
 
     if args.check:

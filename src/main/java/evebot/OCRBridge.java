@@ -165,9 +165,11 @@ public class OCRBridge {
 
         private void ensureStarted() throws IOException {
             if (proc != null && proc.isAlive()) return;
-            ProcessBuilder pb = VERBOSE
-                    ? new ProcessBuilder("python", automationScriptPath, "--daemon", "--verbose")
-                    : new ProcessBuilder("python", automationScriptPath, "--daemon");
+            java.util.List<String> args = new java.util.ArrayList<>(java.util.List.of(
+                    "python", automationScriptPath, "--daemon",
+                    "--security", Environment.security()));
+            if (VERBOSE) args.add("--verbose");
+            ProcessBuilder pb = new ProcessBuilder(args);
             pb.environment().put("PYTHONIOENCODING", "utf-8");
             pb.environment().put("PYTHONUNBUFFERED", "1");
             pb.redirectErrorStream(false);

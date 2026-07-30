@@ -65,12 +65,35 @@ public class MissionProcessor {
     // -----------------------------------------------------------------------
 
     public void clickRequestMission() {
-        log("Clicking REQUEST MISSION (template) — with agent_icon double-click fallback");
-        boolean found = ocrBridge.waitAndClickTemplate("request_mission", 1);
-        if (!found) {
-            log("Request Mission not visible — double-clicking agent_icon as fallback.");
-            ocrBridge.doubleClickTemplate("agent_icon");
+        log("Clicking REQUEST/VIEW MISSION (whichever is shown) — no agent_icon fallback");
+        clickRequestOrViewMission();
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /**
+     * Click the button that surfaces the mission dialog from an open agent window: Request
+     * Mission (no mission yet) or View Mission (already have one). No agent_icon double-click
+     * fallback — opening the agent window is the double-click's job, not this one's. Returns
+     * true if a button was clicked.
+     */
+    private boolean clickRequestOrViewMission() {
+        String btn = ocrBridge.findAnyTemplate("request_mission", "view_mission");
+        if (btn == null) {
+            log("Neither request_mission nor view_mission visible.");
+            return false;
         }
+        return ocrBridge.waitAndClickTemplate(btn, 1);
+    }
+
+    /**
+     * High-sec only: a bare double-click of the agent portrait opens the agent window but no
+     * longer the mission dialog itself — you must then click View/Request Mission. In null sec
+     * the double-click opens the dialog directly, so this is a no-op there.
+     */
+    private void surfaceMissionDialogIfHighSec() {
+        if (!Environment.isHighSec()) return;
+        log("High sec — clicking View/Request Mission to surface the dialog.");
+        clickRequestOrViewMission();
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -219,6 +242,7 @@ public class MissionProcessor {
         log("Double-clicking agent_icon to open agent dialog");
         ocrBridge.doubleClickTemplate("agent_icon");
         sleep(1200);
+        surfaceMissionDialogIfHighSec();
     }
 
     /**
@@ -240,6 +264,8 @@ public class MissionProcessor {
     // -----------------------------------------------------------------------
 
     public void doubleClickFactionAgent() {
+        // The faction agent has no View Mission button — a bare double-click opens his dialog
+        // directly in both null and high sec, so no surface-click follow-up here.
         log("Double-clicking faction_agent to open faction agent dialog");
         ocrBridge.doubleClickTemplate("faction_agent");
         sleep(1200);
@@ -280,7 +306,9 @@ public class MissionProcessor {
     /** Request a mission with NO agent_icon fallback — used for the faction agent so we never
      *  accidentally re-open the regular home agent. */
     public void clickRequestMissionPlain() {
-        log("Clicking REQUEST MISSION (template only — no agent_icon fallback)");
+        // Faction agent has no View Mission button and needs no agent_icon fallback (that could
+        // re-open the regular home agent) — request_mission only.
+        log("Clicking REQUEST MISSION (faction — request_mission only, no fallback)");
         ocrBridge.waitAndClickTemplate("request_mission", 1);
         sleep(POST_CLICK_DELAY_MS);
     }

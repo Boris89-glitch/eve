@@ -12,10 +12,10 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class SessionStats {
 
     // Approximate total ISK value per mission type (direct ISK reward + LP value).
-    public static final long BURNER_VALUE   = 58_000_000L; // anomic burners: 13m ISK + 22k LP (~45m)
-    public static final long RECON_VALUE    = 12_000_000L;
-    public static final long INFESTED_VALUE = 35_000_000L;
-    public static final long SCARLET_VALUE  = 35_000_000L;
+    public static final long BURNER_VALUE   = 40_000_000L; // anomic burners
+    public static final long RECON_VALUE    =  8_400_000L; // 12m − 30%
+    public static final long INFESTED_VALUE = 24_500_000L; // 35m − 30%
+    public static final long SCARLET_VALUE  = 24_500_000L; // 35m − 30%
 
     private static final AtomicInteger missions   = new AtomicInteger(0);
     private static final AtomicLong    totalValue = new AtomicLong(0);

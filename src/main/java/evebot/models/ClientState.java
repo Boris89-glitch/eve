@@ -83,8 +83,11 @@ public class ClientState {
     /** Timestamp when Undock was clicked — used to track the 15s undock animation wait. */
     private LocalDateTime undockStartTime = LocalDateTime.MIN;
 
-    /** Timestamp when a warp action was initiated — used by WARPING state. */
-    private LocalDateTime warpStartTime = LocalDateTime.MIN;
+    /** Timestamp when the warp/jump click actually landed — used by WARPING/IN_COMBAT to measure the
+     *  spin-up grace. Written by the background click thread (see ClientManager.startWarpClickDeferred)
+     *  and read by the poll loop, so it must be volatile for cross-thread visibility. Held briefly in
+     *  the future while the click is still pending, so the grace can't start before the click lands. */
+    private volatile LocalDateTime warpStartTime = LocalDateTime.MIN;
 
     /** Timestamp of the last warp_active template check in WARPING state. */
     private LocalDateTime lastWarpCheck = LocalDateTime.MIN;
