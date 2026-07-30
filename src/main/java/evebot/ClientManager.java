@@ -230,6 +230,23 @@ public class ClientManager {
             return;
         }
 
+        // Temporary standings pause (unlike the permanent block above): this client's standing
+        // dropped below the pause floor, so it yields to the partner and does no work until the
+        // partner turns in a mission — that clears the flag (see handleCompleting). If no partner
+        // can carry (solo, or the partner is also paused/parked), don't wait for a completion that
+        // will never come: clear the pause and work, so the pair can't deadlock.
+        ClientState pausedCs = stateManager.getState(clientId);
+        if (pausedCs.isStandingsPaused()) {
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null && !isParkedOrLocked(other.getClientId())
+                    && !stateManager.getState(other.getClientId()).isStandingsPaused()) {
+                bringToForeground(other);
+                return;
+            }
+            log(clientId, "standings-paused but no partner can carry — resuming to avoid a stall.");
+            pausedCs.setStandingsPaused(false);
+        }
+
         ClientState.State state = stateManager.getStateEnum(clientId);
 
         // Graceful session end (Ctrl+Shift+R): stop taking on NEW work. Clients mid-mission
@@ -378,20 +395,32 @@ public class ClientManager {
         long remaining = Duration.between(LocalDateTime.now(), cooldownEnd).getSeconds();
         if (remaining <= 0) {
             if (cs.getCurrentMission() != null) {
-                // Before quitting, check whether the mission is actually already complete — e.g. we
-                // killed the burner and only got podded on the way back. If we respawned/redocked at
-                // the agent (agent_icon visible) and its dialog reads COMPLETED, turn it in via
-                // COMPLETING rather than throwing away a finished mission. Otherwise quit and re-pick.
-                if (missionProcessor.detectCompletingUI() != null) {
-                    missionProcessor.doubleClickAgentIcon();
-                    if (missionProcessor.detectDialog() == MissionProcessor.DialogState.COMPLETED) {
-                        log(clientId, "POD_COOLDOWN: expired — mission reads COMPLETED (target down before we were podded), turning it in.");
-                        stateManager.setState(clientId, ClientState.State.COMPLETING);
-                        return;
-                    }
+                // We're docked at the agent station — ALWAYS try to turn the mission in before
+                // quitting it (e.g. we killed the burner and only got podded on the way back).
+                // Open the agent dialog unconditionally and read it; only quit when it genuinely
+                // reads not-complete — never skip the attempt.
+                missionProcessor.doubleClickAgentIcon();
+                MissionProcessor.DialogState completeCheck = missionProcessor.detectDialog();
+                if (completeCheck == MissionProcessor.DialogState.COMPLETED) {
+                    log(clientId, "POD_COOLDOWN: expired — mission reads COMPLETED (objectives done before we were podded), turning it in.");
+                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    return;
                 }
-                // Died on this mission and it isn't complete — quit it and pick a different one rather than flying back in.
-                log(clientId, "POD_COOLDOWN: expired — quitting the mission we died on, picking a different one.");
+                // detectDialog reports "COMPLETE MISSION visible but neither status icon matched"
+                // as NOT_COMPLETE — and that ambiguous reading is exactly what a mission we
+                // finished just before being podded looks like. Only quit on a status icon we
+                // actually matched; on the ambiguous case run the turn-in (COMPLETING confirms the
+                // button disappears, and CHECKING_MISSIONS quits a still-accepted mission anyway).
+                if (completeCheck == MissionProcessor.DialogState.NOT_COMPLETE
+                        && missionProcessor.findTemplate("not_complete") == null
+                        && missionProcessor.isCompleteMissionVisible()) {
+                    log(clientId, "POD_COOLDOWN: expired — dialog ambiguous (COMPLETE MISSION visible, no status icon) — attempting the turn-in instead of quitting.");
+                    stateManager.setState(clientId, ClientState.State.COMPLETING);
+                    return;
+                }
+                // Tried to complete it but the agent dialog isn't COMPLETED — quit it and pick a
+                // different one rather than flying back in.
+                log(clientId, "POD_COOLDOWN: expired — tried to complete, dialog reads " + completeCheck + " — quitting the mission we died on, picking a different one.");
                 missionProcessor.quitMission();
                 cs.setCurrentMission(null);
                 stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
@@ -429,7 +458,7 @@ public class ClientManager {
      *
      * jumpCount is our distance from the home station and counts back down on the way in, so it
      * indexes the outbound path directly on both legs: 2 jumps from home is path[2] whether we were
-     * heading out or coming back. Deferring the count to warp confirmation helps here — podded
+     * heading out or coming back. Deferring the count to arrival helps here — podded
      * while warping to a gate, the count still names the system we were actually in.
      *
      * Less exact than the kill report: it assumes we flew the map's shortest route, and being one
@@ -602,13 +631,17 @@ public class ClientManager {
         // Clear the travel phase (same reason as the in-combat branch): we're docked now, so a later
         // IDLE tick with TO_MISSION + agent_icon would read the station agent as another pod death.
         cs.setTravelPhase(ClientState.TravelPhase.NONE);
+        // Escalate if this is a re-pod soon after the last cooldown expired — checked against the
+        // still-current podCooldownEnd, before either branch below overwrites it.
+        stateManager.notePodDeathForEscalation();
         if (jumps <= 2) {
-            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
+            int minutes = stateManager.podCooldownMinutes(POD_COOLDOWN_MINUTES);
+            LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(minutes);
             stateManager.setPodCooldownEnd(cooldownEnd);
-            log(clientId, "POD_COOLDOWN: set " + POD_COOLDOWN_MINUTES + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
+            log(clientId, "POD_COOLDOWN: set " + minutes + "-minute global cooldown (non-combat death, jumps=" + jumps + (bubbleRelated ? ", bubble" : "") + ").");
         } else {
             stateManager.setPodCooldownEnd(LocalDateTime.now());
-            log(clientId, "POD_DEATH: non-combat death, jumps>2 (" + jumps + ") — no cooldown, but quitting the mission and adding bad standings.");
+            log(clientId, "POD_DEATH: non-combat death, jumps>2 (" + jumps + ") — no cooldown; next tick will turn the mission in if it reads COMPLETED, else quit it.");
         }
         stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
         return true;
@@ -705,6 +738,10 @@ public class ClientManager {
                 return;
             }
         }
+
+        // Settle over — we are navigating the next system now, so bank the gate jump that brought
+        // us here. One-shot (pendingGateJump), so the ticks that follow leave the count alone.
+        confirmGateJump(clientId, cs);
 
         // Periodic 'general' overview reset only while outbound in space (TO_MISSION).
         if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION) {
@@ -849,8 +886,9 @@ public class ClientManager {
                             break;
                         }
                     }
-                    // Distance from home only moves once warp actually engages (see confirmGateJump),
-                    // so a right-click that missed the gate can't make us think we've travelled.
+                    // Distance from home only moves once we come out of warp in the next system
+                    // (see confirmGateJump), so a right-click that missed the gate can't make us
+                    // think we've travelled.
                     cs.setPendingGateJump(true);
                     cs.setKlyChecked(false); // new system next landing — re-arm the enemy-in-local evade check
                     // Pod detour: take the safe branch on this jump by right-clicking that system
@@ -983,7 +1021,7 @@ public class ClientManager {
                     if (instaEngagedDock) cs.setWarpPreVerified(true);
                     break;
                 case "stargate":
-                    // Counts DOWN on the way home — see confirmGateJump; applied on warp confirmation.
+                    // Counts DOWN on the way home — see confirmGateJump; applied when we land.
                     cs.setPendingGateJump(true);
                     cs.setWarpedToSafeSpot(false);
                     log(clientId, "stargate — right-click → jump. (" + cs.getJumpCount() + " jump(s) from home)");
@@ -1415,7 +1453,7 @@ public class ClientManager {
 
         // Scarlet: its dialog text OCRs unreliably (the title comes through as "Sc a rlet"),
         // so skip OCR — set the title ourselves and run the standings gate. The config rule
-        // (title_contains "scarlet", max_standing 1.0) accepts it only when standing < 1.
+        // (title_contains "scarlet", max_standing 0.5) accepts it only when standing < 0.5.
         if ("mission_scarlet".equals(missionTemplate)) {
             Mission scarlet = new Mission();
             scarlet.setTitle("scarlet");
@@ -1423,6 +1461,20 @@ public class ClientManager {
             cs.setCurrentMission(scarlet);
             log(clientId, "Scarlet template matched — evaluating against standings (accept only if < 1).");
             applyDecision(clientId, scarlet, missionConfig.evaluate(scarlet, cs.getLastKnownStanding()));
+            return;
+        }
+
+        // Pot and Kettle: identified by its own 'pot' dialog template. Set the title ourselves
+        // and run the standings gate (config rule: title_contains "pot and kettle", max_standing
+        // -0.7 — accept only when standing < -0.7). shipTarget "pot" routes IN_COMBAT to
+        // handleCombatPot; the Garmur is resolved from the "pot" lookup via ship_mission_map.json.
+        if ("pot".equals(missionTemplate)) {
+            Mission pot = new Mission();
+            pot.setTitle("pot and kettle");
+            pot.setShipTarget("pot"); // so IN_COMBAT routes to handleCombatPot
+            cs.setCurrentMission(pot);
+            log(clientId, "Pot and Kettle template matched — evaluating against standings (accept only if < -0.7).");
+            applyDecision(clientId, pot, missionConfig.evaluate(pot, cs.getLastKnownStanding()));
             return;
         }
 
@@ -1437,6 +1489,7 @@ public class ClientManager {
             return;
         }
         cs.setCurrentMission(mission);
+        seedRouteDestinationFromOffer(clientId, cs, mission);
 
         // Refuse anything at (or behind) the system we were podded in — a wanted mission type is
         // still not worth flying back into the camp that killed us.
@@ -1456,7 +1509,7 @@ public class ClientManager {
         // can be a false positive (e.g. mission_enyo matching "Smash the Supplier").
         // Run the FULL rule set: an accept rule must match, and any decline rule
         // (too-far / base / blood / Recon2of3) still wins. Default is decline.
-        // Standings-gated rules (e.g. recon 1, accepted only when standing < 1) are
+        // Standings-gated rules (e.g. recon 1, accepted only when standing < 0.5) are
         // resolved here against the tracked per-client standing.
         applyDecision(clientId, mission, missionConfig.evaluate(mission, cs.getLastKnownStanding()));
     }
@@ -1472,9 +1525,11 @@ public class ClientManager {
         if (n >= STANDINGS_RECHECK_DECLINES) {
             cs.setDeclineCount(0);
             cs.setStandingsCheckDue(true);
-            log(clientId, STANDINGS_RECHECK_DECLINES + " declines — standings re-check scheduled.");
+            log(clientId, "Decline count " + n + "/" + STANDINGS_RECHECK_DECLINES
+                    + " — standings re-check scheduled.");
         } else {
             cs.setDeclineCount(n);
+            log(clientId, "Decline count " + n + "/" + STANDINGS_RECHECK_DECLINES + ".");
         }
     }
 
@@ -1498,7 +1553,7 @@ public class ClientManager {
         if (!SystemMap.isBlocked(location, avoided)) return false;
 
         long left = stateManager.getAvoidMinutesRemaining();
-        String why = SystemMap.normalize(location).equals(SystemMap.normalize(avoided))
+        String why = SystemMap.resolve(location).equals(SystemMap.resolve(avoided))
                 ? "the system we were podded in"
                 : "only reachable through " + avoided + ", where we were podded";
         System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle()
@@ -1523,9 +1578,6 @@ public class ClientManager {
                 log(clientId, "ACCEPT failed — offer still on screen, staying put to retry next tick.");
                 return;
             }
-            // Record the grab time so the fleet partner can raise its take-all threshold
-            // (fleet reward) for the next 2 minutes — see chooseFleetReward.
-            stateManager.getState(clientId).setLastMissionGrab(LocalDateTime.now());
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
         } else {
             System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle());
@@ -1583,12 +1635,23 @@ public class ClientManager {
             log(clientId, "DECLINING: standings re-check due — reading agent standings.");
             missionProcessor.clickAgentStandings();
             double standings = missionProcessor.readAgentStandings();
+            boolean pauseNow = false;
             if (!Double.isNaN(standings)) {
                 stateManager.recordStanding(clientId, standings);
                 log(clientId, "DECLINING: tracked agent standing updated for mission gating.");
+                // Standing dropped below the pause floor mid-decline-streak (no completion to
+                // trigger the check in handleCompleting): yield to the partner now instead of
+                // requesting/accepting the next mission. The partner turning in clears the pause.
+                if (standings < STANDINGS_PAUSE_FLOOR) {
+                    cs.setStandingsPaused(true);
+                    pauseNow = true;
+                    log(clientId, "DECLINING: standing below " + STANDINGS_PAUSE_FLOOR
+                            + " — pausing until the partner completes a mission.");
+                }
             }
             missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X')
             missionProcessor.doubleClickAgentIcon(); // refocus agent dialog after the standings window
+            if (pauseNow) return;   // yield; the pause gate hands focus to the partner next tick
         }
 
         log(clientId, "Dialog closed — requesting new mission.");
@@ -1734,7 +1797,7 @@ public class ClientManager {
         if (avoided == null || route == null || route.destination == null) return false;
         if (!SystemMap.isBlocked(route.destination, avoided)) return false;
 
-        String dest = SystemMap.display(SystemMap.normalize(route.destination));
+        String dest = SystemMap.display(SystemMap.resolve(route.destination));
         log(clientId, "POD_AVOID: route destination " + dest + " is at/behind " + avoided
                 + " where we were podded — redocking and quitting this mission.");
         EventLog.log("POD_AVOID_QUIT", clientId + " — undocked onto a route to " + dest
@@ -1777,7 +1840,7 @@ public class ClientManager {
         String firstHop = detour.get(1);
         String template = SystemMap.rerouteTemplate(firstHop);
         if (template == null) {
-            log(clientId, "POD_AVOID: safe route to " + SystemMap.display(SystemMap.normalize(route.destination))
+            log(clientId, "POD_AVOID: safe route to " + SystemMap.display(SystemMap.resolve(route.destination))
                     + " starts at " + firstHop + ", but that system has no reroute template"
                     + " — flying the autopilot route as-is.");
             return;
@@ -1821,11 +1884,18 @@ public class ClientManager {
             if (quitIfRoutePodAvoided(clientId, cs, route)) return;
             // Remember where this trip is going: with jumpCount (our distance from home) it locates
             // us on the map, which is how a pod death is placed when the kill report can't be read.
+            // The offer dialog already gave us a mapped destination in the normal case — keep that
+            // one; the route panel's tiny font OCRs worse, so it only fills in when we have nothing.
             if (route != null && route.destination != null && SystemMap.isKnown(route.destination)) {
-                String dest = SystemMap.display(SystemMap.normalize(route.destination));
-                cs.setRouteDestination(dest);
-                log(clientId, "TRAVEL: destination " + dest + " — route: "
-                        + String.join(" => ", SystemMap.pathFromStation(dest)));
+                String dest = SystemMap.display(SystemMap.resolve(route.destination));
+                if (cs.getRouteDestination() == null) {
+                    cs.setRouteDestination(dest);
+                    log(clientId, "TRAVEL: destination " + dest + " — route: "
+                            + String.join(" => ", SystemMap.pathFromStation(dest)));
+                } else if (!dest.equals(cs.getRouteDestination())) {
+                    log(clientId, "TRAVEL: route panel reads " + dest + " but the offer dialog gave "
+                            + cs.getRouteDestination() + " — keeping the offer's.");
+                }
             }
             planPodDetour(clientId, cs, route);
             if (route == null) {
@@ -2062,6 +2132,10 @@ public class ClientManager {
                 break;
             case "scarlet":
                 handleCombatScarlet(clientId, cs);
+                break;
+            case "pot":
+            case "prophecy":
+                handleCombatPot(clientId, cs);
                 break;
             case "angel":
                 handleCombatAngel(clientId, cs);
@@ -3085,6 +3159,103 @@ public class ClientManager {
             }
             default:
                 log(clientId, "COMBAT[Hawk] unexpected step " + step + " — resetting.");
+                cs.setCombatStep(0);
+        }
+    }
+
+    /**
+     * Pot and Kettle — single-target Prophecy kill (Garmur, EM rockets). No support frigates.
+     *
+     * Steps:
+     *   0 → switch ammo → em_damage (EM rockets)
+     *   1 → settle
+     *   2 → right-click 'prophecy' → click 'orbit'
+     *   3 → press 's' (activate prop mod), start 15s approach wait
+     *   4 → SAFE WAIT 15s
+     *   5 → Ctrl+click 'prophecy' (lock)
+     *   6 → WAIT 3s → confirm 'locked_prophecy'; not found → relock (back to 5); found → select, overload (shift+a), fire 'adc'
+     *   7 → stay on this client (no switch, like Scarlet) and watch for set_destination/dock — mission
+     *       complete → RETURNING (same-system dock → WARPING); pod-check backstop on a long silence
+     */
+    private void handleCombatPot(String clientId, ClientState cs) {
+        int step = cs.getCombatStep();
+
+        switch (step) {
+            case 0: {
+                log(clientId, "COMBAT[Pot] Step 0: switch ammo → em_damage (EM rockets).");
+                switchAmmo(clientId, "em_damage");
+                cs.setCombatStep(1);
+                break;
+            }
+            case 1: {
+                // Ammo loaded+verified in step 0 — this tick just lets the selection settle.
+                log(clientId, "COMBAT[Pot] Step 1: EM rockets loaded — settling.");
+                cs.setCombatStep(2);
+                break;
+            }
+            case 2: {
+                String tk = awaitCombatTarget(clientId, cs, "prophecy");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[Pot] Step 2: right-click " + tk + " → click orbit.");
+                missionProcessor.rightClickTemplate(tk);
+                missionProcessor.clickTemplate("orbit");
+                cs.setCombatStep(3);
+                break;
+            }
+            case 3: {
+                // From here on stay on this client and kill the Prophecy — no focus hand-offs.
+                log(clientId, "COMBAT[Pot] Step 3: press 's' (activate prop mod) — staying to kill.");
+                missionProcessor.keyPress("s");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                // WAIT 15s (orbit/approach to range) — stay on this client, no switching.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 15) {
+                    log(clientId, "COMBAT[Pot] approach wait: " + elapsed + "s / 15s.");
+                    return;
+                }
+                log(clientId, "COMBAT[Pot] 15s approach complete — locking Prophecy.");
+                cs.setCombatStep(5);
+                break;
+            }
+            case 5: {
+                log(clientId, "COMBAT[Pot] Step 5: Ctrl+click prophecy (lock).");
+                missionProcessor.ctrlClickTemplateOnce("prophecy");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(6);
+                break;
+            }
+            case 6: {
+                // WAIT 3s for lock animation, then confirm locked_prophecy.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 3) return;
+                if (missionProcessor.findTemplate("locked_prophecy") != null) {
+                    log(clientId, "COMBAT[Pot] Step 6: locked_prophecy confirmed — select, overload (shift+a), fire 'adc'.");
+                    missionProcessor.clickTemplate("locked_prophecy");
+                    missionProcessor.shiftKeyPress("a");   // overload first
+                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    missionProcessor.keyPress("adc");       // fire a, d, c
+                    cs.setCombatWaitStart(LocalDateTime.now());
+                    cs.setCombatStep(7);
+                } else {
+                    log(clientId, "COMBAT[Pot] Step 6: locked_prophecy NOT found — retrying lock.");
+                    cs.setCombatStep(5);
+                }
+                break;
+            }
+            case 7: {
+                // Shooting — stay on this client (no switch, like Scarlet's final step) and watch for
+                // the mission-complete set_destination (or same-system dock) prompt. The overloaded
+                // 'adc' volley kills the Prophecy; this poller nudges the view to reveal the prompt,
+                // routes dock→WARPING / set_destination→RETURNING, and pod-checks on a long silence.
+                pollSetDestinationOrCapsule(clientId, cs, "Pot", false);
+                break;
+            }
+            default:
+                log(clientId, "COMBAT[Pot] unexpected step " + step + " — resetting.");
                 cs.setCombatStep(0);
         }
     }
@@ -4221,7 +4392,7 @@ public class ClientManager {
         double standings = missionProcessor.readAgentStandings();
 
         // Track the standing for mission gating (recon 1 / scarlet / pot-and-kettle are
-        // accepted only when standing < 1). recordStanding ignores NaN OCR misses (never
+        // accepted only when standing < 0.5). recordStanding ignores NaN OCR misses (never
         // clobbers a good value) and persists to disk so it survives restarts.
         if (!Double.isNaN(standings)) {
             stateManager.recordStanding(clientId, standings);
@@ -4256,6 +4427,21 @@ public class ClientManager {
             EventLog.log("COMPLETE_UNCONFIRMED", clientId + " — mission turn-in not confirmed after 3 attempts");
         }
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
+
+        // Standings pause: turning in a mission is the partner's cue to resume — clear its pause so
+        // it checks again. Then, if OUR standing is still below the pause floor, pause ourselves and
+        // let the partner carry the next mission; we resume when it completes and hands focus back.
+        ClientState selfCs    = stateManager.getState(clientId);
+        ClientState partnerCs = stateManager.getOtherState(clientId);
+        if (partnerCs != null && partnerCs.isStandingsPaused()) {
+            partnerCs.setStandingsPaused(false);
+            log(clientId, "COMPLETING: turned in — clearing partner's standings pause (resume checking).");
+        }
+        if (!Double.isNaN(standings) && standings < STANDINGS_PAUSE_FLOOR) {
+            selfCs.setStandingsPaused(true);
+            log(clientId, "COMPLETING: standing below " + STANDINGS_PAUSE_FLOOR
+                    + " — pausing until the partner completes a mission.");
+        }
 
         // Mission turned in — record reward for the end-of-session summary.
         Mission done = stateManager.getState(clientId).getCurrentMission();
@@ -4307,22 +4493,42 @@ public class ClientManager {
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
-    /** Take-all standings threshold is normally 0.0. It is raised to 1.0 (this client grabs the
-     *  standings for itself more eagerly) when the fleet partner grabbed a mission in the last 2
-     *  minutes, and forced take-all (regardless of our own standing) when the partner's standing
-     *  is more than 1.0 above ours, so the lagging client catches up. */
-    private static final double TAKE_ALL_THRESHOLD_HIGH = 1.0;
-    private static final long   PARTNER_GRAB_WINDOW_MIN  = 2;
-    private static final double PARTNER_STANDING_GAP     = 1.0;
+    /** Take-all standings threshold is normally 0.0, forced to take-all (regardless of our own
+     *  standing) when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours,
+     *  so the lagging client catches up. The same gap drives the leader's forced share. */
+    private static final double PARTNER_STANDING_GAP = 0.6;
+
+    /** A client whose standing is below this at completion pauses (yields to the partner) until the
+     *  partner turns in a mission, then resumes; re-pauses if still below on its next completion. */
+    private static final double STANDINGS_PAUSE_FLOOR = -1.5;
 
     /**
      * Pick the fleet reward (share vs take-all) from the agent's standing and click it.
      * Below the take-all threshold: take all (fleet_no) to recover standings; healthy: share
-     * (fleet_yes). The threshold is normally 0, raised to 1 when the fleet partner just grabbed
-     * a mission or is well ahead of us in standing (see {@link #takeAllThreshold}).
+     * (fleet_yes). The threshold is normally 0, forced take-all when the partner is well ahead of
+     * us in standing (see {@link #takeAllThreshold}).
      * Exact standings are not logged — OCR misreads the value; only a low-standings warning is kept.
      */
     private void chooseFleetReward(String clientId, double standings) {
+        // Leader override — mirror of the lagging client's forced take-all: if we're more than
+        // PARTNER_STANDING_GAP AHEAD of the partner, share unconditionally so the lagging client
+        // catches up. Driven off LAST KNOWN standings (not the current OCR read): recordStanding()
+        // ran just before this and keeps the last good value on a NaN read, so a failed/blank
+        // standings OCR can't flip the leader into taking for himself. Standings don't swing a
+        // full point in one mission, so trusting the stored lead is safe.
+        ClientState partner = stateManager.getOtherState(clientId);
+        if (partner != null) {
+            double selfLast    = stateManager.getState(clientId).getLastKnownStanding();
+            double partnerLast = partner.getLastKnownStanding();
+            if (!Double.isNaN(selfLast) && !Double.isNaN(partnerLast)
+                    && selfLast - partnerLast > PARTNER_STANDING_GAP) {
+                log(clientId, "COMPLETING: leader >" + PARTNER_STANDING_GAP
+                        + " above partner (last known) — sharing to let partner catch up.");
+                missionProcessor.clickFleetYes();
+                return;
+            }
+        }
+
         if (Double.isNaN(standings)) {
             log(clientId, "COMPLETING: standings OCR failed — defaulting to fleet YES.");
             missionProcessor.clickFleetYes();
@@ -4346,30 +4552,22 @@ public class ClientManager {
     }
 
     /**
-     * The take-all (fleet_no) threshold for this client's completion. Normally 0.0, raised to
-     * {@link #TAKE_ALL_THRESHOLD_HIGH} when the fleet partner grabbed a mission within the last
-     * {@link #PARTNER_GRAB_WINDOW_MIN} minutes, or when the partner's standing is more than
-     * {@link #PARTNER_STANDING_GAP} above ours (so the lagging client catches up).
+     * The take-all (fleet_no) threshold for this client's completion. Normally 0.0, forced to
+     * take-all when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours
+     * (so the lagging client catches up) — if the other has more standing, we take all.
      */
     private double takeAllThreshold(String clientId, double standings) {
         ClientState partner = stateManager.getOtherState(clientId);
         if (partner == null) return 0.0;
 
-        // Partner well ahead of us in standing: take all unconditionally to catch up,
-        // even when our own standing already looks healthy (checked before the grab window).
+        // Partner ahead of us in standing: take all unconditionally to catch up, even when our
+        // own standing already looks healthy.
         double partnerStanding = partner.getLastKnownStanding();
         if (!Double.isNaN(standings) && !Double.isNaN(partnerStanding)
                 && partnerStanding - standings > PARTNER_STANDING_GAP) {
             log(clientId, "COMPLETING: partner standing >" + PARTNER_STANDING_GAP
                     + " above ours — taking all.");
             return Double.POSITIVE_INFINITY;
-        }
-
-        LocalDateTime grab = partner.getLastMissionGrab();
-        if (grab.isAfter(LocalDateTime.now().minusMinutes(PARTNER_GRAB_WINDOW_MIN))) {
-            log(clientId, "COMPLETING: partner grabbed a mission recently — take-all threshold raised to "
-                    + TAKE_ALL_THRESHOLD_HIGH + ".");
-            return TAKE_ALL_THRESHOLD_HIGH;
         }
         return 0.0;
     }
@@ -4842,10 +5040,11 @@ public class ClientManager {
         } else if (stationInReach) {
             log(clientId, "WARPING: " + why + " — station in reach, emergency redock!");
             if (missionProcessor.emergencyRedock()) {
-                LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(POD_COOLDOWN_MINUTES);
+                int minutes = stateManager.podCooldownMinutes(POD_COOLDOWN_MINUTES);
+                LocalDateTime cooldownEnd = LocalDateTime.now().plusMinutes(minutes);
                 stateManager.setPodCooldownEnd(cooldownEnd);
                 log(clientId, (held ? "BUBBLE_CAMP: held at station (jam/bubble)" : "WARPING: stuck warp at station")
-                        + " — redocked, " + POD_COOLDOWN_MINUTES + "-minute global cooldown before retry.");
+                        + " — redocked, " + minutes + "-minute global cooldown before retry.");
                 cs.setPendingPodStationCheck(true);
                 stateManager.setState(clientId, ClientState.State.POD_COOLDOWN);
                 ClientWindowInfo other = findOtherClient(clientId);
@@ -4911,24 +5110,84 @@ public class ClientManager {
     }
 
     /**
-     * Bank a gate jump once its warp is confirmed. Called from every WARPING path that has
-     * established the jump actually engaged — never from the issue site, so a right-click that
-     * missed the stargate leaves our distance-from-home untouched instead of silently drifting.
+     * Bank a gate jump once we are actually through it. Called from IDLE past the landing settle —
+     * out of warp, grid rendered, looking for warp elements again — not at the right-click and not
+     * when the warp engages, so neither a missed stargate nor a jump we never came out of moves our
+     * distance-from-home.
      *
      * Direction follows the leg: outbound each jump takes us one further from the station,
      * returning retraces that same route so each jump takes us one closer. Only gate jumps get
-     * here — safe-spot evades, the warp to the mission site and dock warps never set the flag.
+     * here — safe-spot evades, bubble escapes, the warp to the mission site and dock warps never
+     * set the flag.
      */
     private void confirmGateJump(String clientId, ClientState cs) {
         if (!cs.isPendingGateJump()) return;
         cs.setPendingGateJump(false);
         if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
             cs.decrementJumpCount();
-            log(clientId, "JUMP confirmed (homeward) — now " + cs.getJumpCount() + " jump(s) from home.");
+            log(clientId, "JUMP confirmed (homeward) — now " + cs.getJumpCount() + " jump(s) from home."
+                    + mapSystemSuffix(cs));
         } else {
             cs.incrementJumpCount();
-            log(clientId, "JUMP confirmed (outbound) — now " + cs.getJumpCount() + " jump(s) from home.");
+            log(clientId, "JUMP confirmed (outbound) — now " + cs.getJumpCount() + " jump(s) from home."
+                    + mapSystemSuffix(cs));
         }
+    }
+
+    /**
+     * Take the destination from the offer dialog OCR (the same read the distance check uses), so we
+     * can place ourselves on the map from the first jump instead of waiting for the route panel —
+     * which only reads after undock, and often not at all. This is the preferred source: once it
+     * lands the route panel does not overwrite it. Clears the previous trip's destination when this
+     * offer has none, so we never index our jumps off a route we are no longer flying.
+     */
+    private void seedRouteDestinationFromOffer(String clientId, ClientState cs, Mission mission) {
+        String location = mission.getLocation();
+        if (location == null || location.isEmpty() || "Unknown".equalsIgnoreCase(location)) {
+            cs.setRouteDestination(null);
+            log(clientId, "MAP: offer dialog gave no location — waiting on the route panel to place us.");
+            return;
+        }
+        if (!SystemMap.isKnown(location)) {
+            cs.setRouteDestination(null);
+            log(clientId, "MAP: offer location '" + location + "' is not on the route map — ignoring it.");
+            return;
+        }
+        String dest = SystemMap.display(SystemMap.resolve(location));
+        cs.setRouteDestination(dest);
+        log(clientId, "MAP: destination " + dest + " from the offer dialog — route: "
+                + String.join(" => ", SystemMap.pathFromStation(dest)));
+    }
+
+    /**
+     * " Map says we are in X." for the jump log — the outbound route indexed by our distance from
+     * home, the same reckoning {@link #inferPoddedSystem} uses. Always says something: when the map
+     * can't place us it names the reason, so a silent line isn't mistaken for a working map.
+     *
+     * The way home is the same route flown backwards, so nothing new has to be read on that leg:
+     * jumpCount counts back down and still indexes the outbound path. The route is only printed
+     * reversed so the log reads in the order we're actually flying it.
+     */
+    private String mapSystemSuffix(ClientState cs) {
+        String destination = cs.getRouteDestination();
+        if (destination == null && cs.getCurrentMission() != null) {
+            destination = cs.getCurrentMission().getLocation();
+        }
+        if (destination == null) return " Map can't place us: no destination on record.";
+        if (!SystemMap.isKnown(destination)) {
+            return " Map can't place us: destination '" + destination + "' is not on the map.";
+        }
+        List<String> path = SystemMap.pathFromStation(destination);
+        if (path.isEmpty()) {
+            return " Map can't place us: no route from home to " + destination + ".";
+        }
+        int index = Math.max(0, Math.min(cs.getJumpCount(), path.size() - 1));
+        String system = path.get(index);
+        List<String> shown = new ArrayList<>(path);
+        if (cs.getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME) {
+            Collections.reverse(shown);
+        }
+        return " Map says we are in " + system + " (route: " + String.join(" => ", shown) + ").";
     }
 
     private void handleWarping(String clientId, ClientWindowInfo window) {
@@ -5034,9 +5293,6 @@ public class ClientManager {
                         return;
                     }
                 }
-                // This path deliberately skips warp_active verification (see above), so the jump is
-                // banked on the issued click — the best signal available here.
-                confirmGateJump(clientId, cs);
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
@@ -5259,7 +5515,6 @@ public class ClientManager {
                 }
 
                 cs.setSafeSpotWarp(false); // warp engaged — clear the evade-retry flag
-                confirmGateJump(clientId, cs); // warp_active with no bubble — the jump took
                 cs.setLastWarpCheck(LocalDateTime.now());
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {

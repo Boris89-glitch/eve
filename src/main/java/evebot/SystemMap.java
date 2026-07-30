@@ -138,6 +138,43 @@ public final class SystemMap {
         return sb.toString();
     }
 
+    /**
+     * Normalize, then — when that lands on nothing — accept the nearest system that is one
+     * character off, as long as exactly one system is that close. The fold above only covers the
+     * swaps we listed; tesseract also drops the dash into a wrong glyph ("KLY-C0" → "KLYCB"), and
+     * refusing those means the map can't place us at all. One edit with a unique answer is safe:
+     * the map's systems are far enough apart that an ambiguous read matches two and is refused.
+     * Returns "" when nothing matches.
+     */
+    public static String resolve(String raw) {
+        String key = normalize(raw);
+        if (key.isEmpty() || CANONICAL.containsKey(key)) return key;
+        if (key.length() < 4) return "";  // too short to correct without guessing
+        String match = null;
+        for (String candidate : CANONICAL.keySet()) {
+            if (Math.abs(candidate.length() - key.length()) > 1) continue;
+            if (!withinOneEdit(key, candidate)) continue;
+            if (match != null) return "";  // ambiguous — two systems are equally close
+            match = candidate;
+        }
+        return match == null ? "" : match;
+    }
+
+    /** True if a single insert, delete or substitution turns {@code a} into {@code b}. */
+    private static boolean withinOneEdit(String a, String b) {
+        if (a.length() > b.length()) { String t = a; a = b; b = t; }
+        if (b.length() - a.length() > 1) return false;
+        int i = 0, j = 0;
+        boolean edited = false;
+        while (i < a.length() && j < b.length()) {
+            if (a.charAt(i) == b.charAt(j)) { i++; j++; continue; }
+            if (edited) return false;
+            edited = true;
+            if (a.length() == b.length()) { i++; j++; } else { j++; }  // substitution vs insert
+        }
+        return true;
+    }
+
     /** The map's spelling of a normalized key, or the key itself if it isn't a known system. */
     public static String display(String normalized) {
         if (normalized == null || normalized.isEmpty()) return "unknown";
@@ -146,7 +183,7 @@ public final class SystemMap {
 
     /** True if this OCR'd name matches a system in the map at all. */
     public static boolean isKnown(String raw) {
-        return CANONICAL.containsKey(normalize(raw));
+        return CANONICAL.containsKey(resolve(raw));
     }
 
     /** How long a podded system stays cut out, in minutes; 0 or less means rest of session. */
@@ -166,7 +203,7 @@ public final class SystemMap {
      * the whole map.
      */
     public static Set<String> blockedBy(String podded) {
-        String cut = normalize(podded);
+        String cut = resolve(podded);
         if (isEmpty() || cut.isEmpty() || !ADJACENCY.containsKey(cut)) return Collections.emptySet();
         // Podded at the home station itself: there is nothing to route around, and cutting the
         // station out would leave the whole map unreachable and refuse every mission there is.
@@ -196,7 +233,7 @@ public final class SystemMap {
      * OCR miss lets the mission through rather than declining everything.
      */
     public static boolean isBlocked(String location, String podded) {
-        String key = normalize(location);
+        String key = resolve(location);
         return !key.isEmpty() && blockedBy(podded).contains(key);
     }
 
@@ -206,7 +243,7 @@ public final class SystemMap {
      * mission instead of flying it). This is the detour the reroute templates fly.
      */
     public static List<String> detour(String destination, String podded) {
-        return shortestPath(destination, normalize(podded));
+        return shortestPath(destination, resolve(podded));
     }
 
     /**
@@ -221,7 +258,7 @@ public final class SystemMap {
 
     /** BFS from the station to {@code destination}, optionally with {@code cut} removed. */
     private static List<String> shortestPath(String destination, String cut) {
-        String goal = normalize(destination);
+        String goal = resolve(destination);
         if (isEmpty() || goal.isEmpty() || !CANONICAL.containsKey(goal)) return Collections.emptyList();
         if (goal.equals(cut) || station.equals(cut)) return Collections.emptyList();
 
@@ -247,6 +284,6 @@ public final class SystemMap {
 
     /** templates/&lt;name&gt;.png to right-click-and-jump for this system, or null if it has none. */
     public static String rerouteTemplate(String system) {
-        return REROUTE.get(normalize(system));
+        return REROUTE.get(resolve(system));
     }
 }

@@ -9,6 +9,12 @@
       "comment": "Garmur hull for all other Anomic Team missions"
     },
     {
+      "ship_template": "ship_garmur",
+      "ship_display": "ship_garmur (Garmur hull)",
+      "title_contains": ["pot and kettle", "pot", "kettle", "prophecy"],
+      "comment": "Pot and Kettle — Garmur hull, EM rockets vs the Prophecy"
+    },
+    {
       "ship_template": "ship_worm",
       "ship_display": "ship_worm (Daredevil hull)",
       "title_contains": ["worm", "guristas"],

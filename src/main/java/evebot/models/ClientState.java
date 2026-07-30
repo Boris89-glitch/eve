@@ -196,6 +196,12 @@ public class ClientState {
      *  work until the bot is restarted. Like standingsLocked, NOT reset by setState. */
     private boolean parked = false;
 
+    /** TEMPORARILY paused because agent standing dropped below the pause floor. Unlike
+     *  standingsLocked/parked this is not for the session: while set, the client yields to the
+     *  partner and does no work; the partner turning in a mission clears it (resume checking), and
+     *  the next completion re-sets it if standing is still below the floor. NOT reset by setState. */
+    private boolean standingsPaused = false;
+
     /** Last agent standing read at mission completion, used to gate standings-restricted
      *  missions (recon 1, scarlet, pot-and-kettle — accepted only when standing &lt; 1).
      *  NaN until the first completion populates it. NOT reset by setState.
@@ -203,12 +209,11 @@ public class ClientState {
      *  client compares its own standing against the fleet partner's to decide the fleet reward. */
     private double lastKnownStanding = Double.NaN;
 
-    /** When this client last grabbed (accepted) a mission. Read by the fleet partner: for 2
-     *  minutes after a grab, the partner raises its take-all threshold (fleet reward). MIN until
-     *  the first accept. NOT reset by setState. */
-    private LocalDateTime lastMissionGrab = LocalDateTime.MIN;
-
-/** True when docking to home station after combat — WARPING should transition to COMPLETING. */
+/** True when docking to home station after combat — WARPING should transition to COMPLETING.
+     *  Set right before each dock's setState(WARPING) and cleared on the docking-completion paths
+     *  (finishDockArrival / the dock-reissue give-up). setState also clears it on TRAVEL/RETURNING
+     *  entry, so a WARPING that ended without finishDockArrival (e.g. a pod death mid-dock-warp)
+     *  can't leave it set and make the next leg's warp landing read as a phantom dock. */
     private boolean dockingToStation = false;
 
     /** Set when an insta-dock (enemy in local) engaged: instaDock() already slept ~7s and verified
@@ -270,15 +275,16 @@ public class ClientState {
      *  to the mission site or onto a station is not a jump and leaves it alone. */
     private int jumpCount = 0;
 
-    /** Destination system read off the info-panel route after undocking, kept for the whole trip
-     *  (the return leg retraces the same route, so it stays the reference path). Paired with
-     *  {@link #jumpCount} it says which system we are in right now — the fallback for locating a
-     *  pod death when the kill report can't be read. Null when the route never OCR'd. */
+    /** Destination system for this trip, from the offer dialog OCR where possible and the
+     *  info-panel route after undocking otherwise, kept for the whole trip (the return leg retraces
+     *  the same route, so it stays the reference path). Paired with {@link #jumpCount} it says which
+     *  system we are in right now — the fallback for locating a pod death when the kill report can't
+     *  be read. Null when neither read placed the destination on the map. */
     private String routeDestination = null;
 
-    /** A gate jump has been issued and is waiting on warp confirmation. The count moves only once
-     *  warp_active actually shows, so a right-click that missed — or a jump that never engaged —
-     *  cannot inflate our idea of where we are. Cleared when the jump is confirmed. */
+    /** A gate jump has been issued and is waiting on arrival. The count moves only when the warp
+     *  ends and navigation resumes in the next system, so a right-click that missed — or a jump we
+     *  never came out of — cannot inflate our idea of where we are. Cleared on arrival. */
     private boolean pendingGateJump = false;
 
     /** True once KLY system check has been performed after first jump — skip further checks. */
@@ -390,6 +396,11 @@ public class ClientState {
             this.windowsClosedAfterJump1 = false;
             this.podRerouteTemplate = null;
             this.pendingGateJump  = false;
+            // A fresh outbound/return leg is never a completion dock. Clear any stale
+            // dockingToStation left set by a WARPING that ended without finishDockArrival
+            // (e.g. a pod death mid-dock-warp) — otherwise this leg's warp landing is
+            // misread as a dock and the client flips into a phantom COMPLETING.
+            this.dockingToStation = false;
         }
         if (state == State.TRAVEL) {
             // Outbound leg starts at the station. RETURNING is deliberately excluded: the way home
@@ -504,6 +515,9 @@ public class ClientState {
     public boolean isParked()                        { return parked; }
     public void    setParked(boolean v)              { this.parked = v; }
 
+    public boolean isStandingsPaused()               { return standingsPaused; }
+    public void    setStandingsPaused(boolean v)     { this.standingsPaused = v; }
+
     public boolean isFactionLocked()                 { return factionLocked; }
     public void    setFactionLocked(boolean v)       { this.factionLocked = v; }
 
@@ -615,8 +629,6 @@ public boolean isDockingToStation()             { return dockingToStation; }
     public double getLastKnownStanding()             { return lastKnownStanding; }
     public void   setLastKnownStanding(double v)     { this.lastKnownStanding = v; }
 
-    public LocalDateTime getLastMissionGrab()                { return lastMissionGrab; }
-    public void          setLastMissionGrab(LocalDateTime t) { this.lastMissionGrab = t; }
 
     public boolean isEnterCombatOnWarpLand()           { return enterCombatOnWarpLand; }
     public void    setEnterCombatOnWarpLand(boolean v) { this.enterCombatOnWarpLand = v; }

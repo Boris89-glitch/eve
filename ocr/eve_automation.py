@@ -194,6 +194,7 @@ TEMPLATE_FILES = {
     "mission_infested": "mission_infested",  # → ship_infested  (Infested Ruins)
     "mission_scarlet": "mission_scarlet",  # → ship_infested  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
+    "pot": "pot",  # Pot and Kettle offer dialog → ship_garmur  (standings-gated: standing < -0.7)
     "mission_evolution": "evolution",  # evolution.png → never run: leave for manual handling, lock faction agent
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
@@ -229,6 +230,8 @@ TEMPLATE_FILES = {
     "target_sansha": "target_sansha",    # Sansha burner — overview row
     "target_angel": "target_angel",      # Angel burner — overview row
     "target_worm": "target_worm",        # Worm burner — overview row
+    "prophecy": "prophecy",              # Pot and Kettle — Prophecy overview row (target)
+    "locked_prophecy": "locked_prophecy",  # Pot and Kettle — Prophecy locked bracket (gone = destroyed)
     "alt_target": "alt_target",          # Generic fallback overview row — used when target_{angel,worm,sansha} can't be found
     "target_hive": "target_hive",        # Infested Ruins — overview row
     "target_hive1": "target_hive1",
@@ -292,6 +295,7 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_angel",     "ship_angel",   None),
     ("mission_infested",  "ship_infested", ["infested", "hive", "ruins"]),
     ("mission_scarlet",   "ship_infested", None),
+    ("pot",               "ship_garmur",   None),  # Pot and Kettle — Garmur, EM rockets vs the Prophecy
 ]
 
 # -----------------------------------------------------------------------------
@@ -1158,6 +1162,30 @@ def load_mission_area() -> Tuple[int, int, int, int]:
     return layout_rect("mission_area", 440, 92, 988, 336)
 
 
+def load_mission_location_area() -> Tuple[int, int, int, int]:
+    return layout_rect("mission_location", 840, 238, 384, 29)
+
+
+def refine_mission_location(reader: EVEMissionReader, mission: Optional[dict]) -> Optional[dict]:
+    """
+    Re-read the offer's Location line from its own small region — the full-dialog
+    scan picks up neighbouring lines (e.g. 'Effective Standing') too often.
+    Keeps the full-dialog value when the focused read comes back empty.
+    """
+    if not mission:
+        return mission
+    x, y, w, h = load_mission_location_area()
+    result = reader.read_location_region(x, y, w, h)
+    location = result.get("location", "Unknown")
+    log.info("   Location OCR: raw='%s' -> '%s'", result.get("raw", ""), location)
+    if location and location != "Unknown":
+        mission["location"] = location
+        sec = re.search(r"-?\d\.\d+", result.get("raw", ""))
+        if sec:
+            mission["security"] = sec.group(0)
+    return mission
+
+
 # -----------------------------------------------------------------------------
 # Route info panel OCR
 # -----------------------------------------------------------------------------
@@ -1690,7 +1718,7 @@ class EVEAutomation:
 
         time.sleep(0.3)
         x, y, w, h = self.mission_area
-        mission = self.ocr.read_mission(x, y, w, h)
+        mission = refine_mission_location(self.ocr, self.ocr.read_mission(x, y, w, h))
         if mission:
             log.info(
                 "   OCR: title='%s' target='%s' location='%s'",
@@ -2376,8 +2404,11 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
     if cmd == "read_mission":
         if "reader" not in reader_box:
             reader_box["reader"] = EVEMissionReader()
-        mission = reader_box["reader"].read_mission(
-            int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
+        mission = refine_mission_location(
+            reader_box["reader"],
+            reader_box["reader"].read_mission(
+                int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
+            ),
         )
         return {"ok": True, "value": mission}
 
