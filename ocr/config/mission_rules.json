@@ -37,7 +37,10 @@
     { "title_contains": "recon 1 of",                "max_standing": 0.5,       "comment": "Recon part 1 (spaced format)"  },
     { "title_contains": "recon1of3",                 "max_standing": 0.5,         "comment": "Recon part 1 (spaced format)"  },
     { "title_contains": "recon (1 of",                 "max_standing": 0.5,       "comment": "Recon part 1 (paren format)"   },
-    { "title_contains": "scarlet",          "max_standing": 0.5, "comment": "Scarlet — only if agent standing < 0.5" }],
+    { "title_contains": "scarlet",          "max_standing": 0.5, "comment": "Scarlet — only if agent standing < 0.5" },
+    { "title_contains": "pot and kettle",   "max_standing": -0.7, "comment": "Pot and Kettle — only if agent standing < -0.7" },
+    { "title_contains": "kettle",           "max_standing": -0.7, "comment": "Pot and Kettle (title fallback)" },
+    { "objective_contains": "prophecy",     "max_standing": -0.7, "comment": "Pot and Kettle (Prophecy objective fallback)" }],
   "decline": [
     { "title_contains": "anomic base",    "comment": "Burner base missions"   },
     { "title_contains": "base",    "comment": "Burner base missions"   },

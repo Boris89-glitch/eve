@@ -193,6 +193,12 @@ public class ClientState {
      *  work until the bot is restarted. Like standingsLocked, NOT reset by setState. */
     private boolean parked = false;
 
+    /** TEMPORARILY paused because agent standing dropped below the pause floor. Unlike
+     *  standingsLocked/parked this is not for the session: while set, the client yields to the
+     *  partner and does no work; the partner turning in a mission clears it (resume checking), and
+     *  the next completion re-sets it if standing is still below the floor. NOT reset by setState. */
+    private boolean standingsPaused = false;
+
     /** Last agent standing read at mission completion, used to gate standings-restricted
      *  missions (recon 1, scarlet, pot-and-kettle — accepted only when standing &lt; 1).
      *  NaN until the first completion populates it. NOT reset by setState.
@@ -505,6 +511,9 @@ public class ClientState {
     public void    setStandingsLocked(boolean v)     { this.standingsLocked = v; }
     public boolean isParked()                        { return parked; }
     public void    setParked(boolean v)              { this.parked = v; }
+
+    public boolean isStandingsPaused()               { return standingsPaused; }
+    public void    setStandingsPaused(boolean v)     { this.standingsPaused = v; }
 
     public boolean isFactionLocked()                 { return factionLocked; }
     public void    setFactionLocked(boolean v)       { this.factionLocked = v; }

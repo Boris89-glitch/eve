@@ -193,6 +193,7 @@ TEMPLATE_FILES = {
     "mission_infested": "mission_infested",  # → ship_infested  (Infested Ruins)
     "mission_scarlet": "mission_scarlet",  # → ship_infested  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
+    "pot": "pot",  # Pot and Kettle offer dialog → ship_garmur  (standings-gated: standing < -0.7)
     "mission_evolution": "evolution",  # evolution.png → never run: leave for manual handling, lock faction agent
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
@@ -228,6 +229,8 @@ TEMPLATE_FILES = {
     "target_sansha": "target_sansha",    # Sansha burner — overview row
     "target_angel": "target_angel",      # Angel burner — overview row
     "target_worm": "target_worm",        # Worm burner — overview row
+    "prophecy": "prophecy",              # Pot and Kettle — Prophecy overview row (target)
+    "locked_prophecy": "locked_prophecy",  # Pot and Kettle — Prophecy locked bracket (gone = destroyed)
     "alt_target": "alt_target",          # Generic fallback overview row — used when target_{angel,worm,sansha} can't be found
     "target_hive": "target_hive",        # Infested Ruins — overview row
     "target_hive1": "target_hive1",
@@ -291,6 +294,7 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_angel",     "ship_angel",   None),
     ("mission_infested",  "ship_infested", ["infested", "hive", "ruins"]),
     ("mission_scarlet",   "ship_infested", None),
+    ("pot",               "ship_garmur",   None),  # Pot and Kettle — Garmur, EM rockets vs the Prophecy
 ]
 
 # -----------------------------------------------------------------------------

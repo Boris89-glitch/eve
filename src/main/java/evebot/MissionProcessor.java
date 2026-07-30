@@ -1397,6 +1397,8 @@ public class MissionProcessor {
         if (lower.contains("recon"))                         return "recon1";
         // Dread Pirate Scarlet (boss "Anire") — also flies ship_infested.
         if (lower.contains("scarlet") || lower.contains("anire"))  return "scarlet";
+        // Pot and Kettle — Garmur vs the Prophecy.
+        if (lower.contains("pot") || lower.contains("kettle") || lower.contains("prophecy")) return "pot";
         return null;
     }
 

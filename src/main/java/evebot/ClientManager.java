@@ -225,6 +225,23 @@ public class ClientManager {
             return;
         }
 
+        // Temporary standings pause (unlike the permanent block above): this client's standing
+        // dropped below the pause floor, so it yields to the partner and does no work until the
+        // partner turns in a mission — that clears the flag (see handleCompleting). If no partner
+        // can carry (solo, or the partner is also paused/parked), don't wait for a completion that
+        // will never come: clear the pause and work, so the pair can't deadlock.
+        ClientState pausedCs = stateManager.getState(clientId);
+        if (pausedCs.isStandingsPaused()) {
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null && !isParkedOrLocked(other.getClientId())
+                    && !stateManager.getState(other.getClientId()).isStandingsPaused()) {
+                bringToForeground(other);
+                return;
+            }
+            log(clientId, "standings-paused but no partner can carry — resuming to avoid a stall.");
+            pausedCs.setStandingsPaused(false);
+        }
+
         ClientState.State state = stateManager.getStateEnum(clientId);
 
         // Graceful session end (Ctrl+Shift+R): stop taking on NEW work. Clients mid-mission
@@ -1456,6 +1473,20 @@ public class ClientManager {
             return;
         }
 
+        // Pot and Kettle: identified by its own 'pot' dialog template. Set the title ourselves
+        // and run the standings gate (config rule: title_contains "pot and kettle", max_standing
+        // -0.7 — accept only when standing < -0.7). shipTarget "pot" routes IN_COMBAT to
+        // handleCombatPot; the Garmur is resolved from the "pot" lookup via ship_mission_map.json.
+        if ("pot".equals(missionTemplate)) {
+            Mission pot = new Mission();
+            pot.setTitle("pot and kettle");
+            pot.setShipTarget("pot"); // so IN_COMBAT routes to handleCombatPot
+            cs.setCurrentMission(pot);
+            log(clientId, "Pot and Kettle template matched — evaluating against standings (accept only if < -0.7).");
+            applyDecision(clientId, pot, missionConfig.evaluate(pot, cs.getLastKnownStanding()));
+            return;
+        }
+
         // Wanted type matched — OCR now (only here) to check distance / nuances.
         log(clientId, "Mission template matched: " + missionTemplate + " — OCR for distance check.");
         Rectangle missionArea = getMissionAreaForClient(clientId);
@@ -1613,12 +1644,23 @@ public class ClientManager {
             log(clientId, "DECLINING: standings re-check due — reading agent standings.");
             missionProcessor.clickAgentStandings();
             double standings = missionProcessor.readAgentStandings();
+            boolean pauseNow = false;
             if (!Double.isNaN(standings)) {
                 stateManager.recordStanding(clientId, standings);
                 log(clientId, "DECLINING: tracked agent standing updated for mission gating.");
+                // Standing dropped below the pause floor mid-decline-streak (no completion to
+                // trigger the check in handleCompleting): yield to the partner now instead of
+                // requesting/accepting the next mission. The partner turning in clears the pause.
+                if (standings < STANDINGS_PAUSE_FLOOR) {
+                    cs.setStandingsPaused(true);
+                    pauseNow = true;
+                    log(clientId, "DECLINING: standing below " + STANDINGS_PAUSE_FLOOR
+                            + " — pausing until the partner completes a mission.");
+                }
             }
             missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X')
             missionProcessor.doubleClickAgentIcon(); // refocus agent dialog after the standings window
+            if (pauseNow) return;   // yield; the pause gate hands focus to the partner next tick
         }
 
         log(clientId, "Dialog closed — requesting new mission.");
@@ -2097,6 +2139,10 @@ public class ClientManager {
                 break;
             case "scarlet":
                 handleCombatScarlet(clientId, cs);
+                break;
+            case "pot":
+            case "prophecy":
+                handleCombatPot(clientId, cs);
                 break;
             case "angel":
                 handleCombatAngel(clientId, cs);
@@ -3120,6 +3166,103 @@ public class ClientManager {
             }
             default:
                 log(clientId, "COMBAT[Hawk] unexpected step " + step + " — resetting.");
+                cs.setCombatStep(0);
+        }
+    }
+
+    /**
+     * Pot and Kettle — single-target Prophecy kill (Garmur, EM rockets). No support frigates.
+     *
+     * Steps:
+     *   0 → switch ammo → em_damage (EM rockets)
+     *   1 → settle
+     *   2 → right-click 'prophecy' → click 'orbit'
+     *   3 → press 's' (activate prop mod), start 15s approach wait
+     *   4 → SAFE WAIT 15s
+     *   5 → Ctrl+click 'prophecy' (lock)
+     *   6 → WAIT 3s → confirm 'locked_prophecy'; not found → relock (back to 5); found → select, overload (shift+a), fire 'adc'
+     *   7 → stay on this client (no switch, like Scarlet) and watch for set_destination/dock — mission
+     *       complete → RETURNING (same-system dock → WARPING); pod-check backstop on a long silence
+     */
+    private void handleCombatPot(String clientId, ClientState cs) {
+        int step = cs.getCombatStep();
+
+        switch (step) {
+            case 0: {
+                log(clientId, "COMBAT[Pot] Step 0: switch ammo → em_damage (EM rockets).");
+                switchAmmo(clientId, "em_damage");
+                cs.setCombatStep(1);
+                break;
+            }
+            case 1: {
+                // Ammo loaded+verified in step 0 — this tick just lets the selection settle.
+                log(clientId, "COMBAT[Pot] Step 1: EM rockets loaded — settling.");
+                cs.setCombatStep(2);
+                break;
+            }
+            case 2: {
+                String tk = awaitCombatTarget(clientId, cs, "prophecy");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[Pot] Step 2: right-click " + tk + " → click orbit.");
+                missionProcessor.rightClickTemplate(tk);
+                missionProcessor.clickTemplate("orbit");
+                cs.setCombatStep(3);
+                break;
+            }
+            case 3: {
+                // From here on stay on this client and kill the Prophecy — no focus hand-offs.
+                log(clientId, "COMBAT[Pot] Step 3: press 's' (activate prop mod) — staying to kill.");
+                missionProcessor.keyPress("s");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                // WAIT 15s (orbit/approach to range) — stay on this client, no switching.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 15) {
+                    log(clientId, "COMBAT[Pot] approach wait: " + elapsed + "s / 15s.");
+                    return;
+                }
+                log(clientId, "COMBAT[Pot] 15s approach complete — locking Prophecy.");
+                cs.setCombatStep(5);
+                break;
+            }
+            case 5: {
+                log(clientId, "COMBAT[Pot] Step 5: Ctrl+click prophecy (lock).");
+                missionProcessor.ctrlClickTemplateOnce("prophecy");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(6);
+                break;
+            }
+            case 6: {
+                // WAIT 3s for lock animation, then confirm locked_prophecy.
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 3) return;
+                if (missionProcessor.findTemplate("locked_prophecy") != null) {
+                    log(clientId, "COMBAT[Pot] Step 6: locked_prophecy confirmed — select, overload (shift+a), fire 'adc'.");
+                    missionProcessor.clickTemplate("locked_prophecy");
+                    missionProcessor.shiftKeyPress("a");   // overload first
+                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                    missionProcessor.keyPress("adc");       // fire a, d, c
+                    cs.setCombatWaitStart(LocalDateTime.now());
+                    cs.setCombatStep(7);
+                } else {
+                    log(clientId, "COMBAT[Pot] Step 6: locked_prophecy NOT found — retrying lock.");
+                    cs.setCombatStep(5);
+                }
+                break;
+            }
+            case 7: {
+                // Shooting — stay on this client (no switch, like Scarlet's final step) and watch for
+                // the mission-complete set_destination (or same-system dock) prompt. The overloaded
+                // 'adc' volley kills the Prophecy; this poller nudges the view to reveal the prompt,
+                // routes dock→WARPING / set_destination→RETURNING, and pod-checks on a long silence.
+                pollSetDestinationOrCapsule(clientId, cs, "Pot", false);
+                break;
+            }
+            default:
+                log(clientId, "COMBAT[Pot] unexpected step " + step + " — resetting.");
                 cs.setCombatStep(0);
         }
     }
@@ -4292,6 +4435,21 @@ public class ClientManager {
         }
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
 
+        // Standings pause: turning in a mission is the partner's cue to resume — clear its pause so
+        // it checks again. Then, if OUR standing is still below the pause floor, pause ourselves and
+        // let the partner carry the next mission; we resume when it completes and hands focus back.
+        ClientState selfCs    = stateManager.getState(clientId);
+        ClientState partnerCs = stateManager.getOtherState(clientId);
+        if (partnerCs != null && partnerCs.isStandingsPaused()) {
+            partnerCs.setStandingsPaused(false);
+            log(clientId, "COMPLETING: turned in — clearing partner's standings pause (resume checking).");
+        }
+        if (!Double.isNaN(standings) && standings < STANDINGS_PAUSE_FLOOR) {
+            selfCs.setStandingsPaused(true);
+            log(clientId, "COMPLETING: standing below " + STANDINGS_PAUSE_FLOOR
+                    + " — pausing until the partner completes a mission.");
+        }
+
         // Mission turned in — record reward for the end-of-session summary.
         Mission done = stateManager.getState(clientId).getCurrentMission();
         String missionTitle = (done != null && done.getTitle() != null) ? done.getTitle() : "mission";
@@ -4346,6 +4504,10 @@ public class ClientManager {
      *  standing) when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours,
      *  so the lagging client catches up. The same gap drives the leader's forced share. */
     private static final double PARTNER_STANDING_GAP = 0.6;
+
+    /** A client whose standing is below this at completion pauses (yields to the partner) until the
+     *  partner turns in a mission, then resumes; re-pauses if still below on its next completion. */
+    private static final double STANDINGS_PAUSE_FLOOR = -1.5;
 
     /**
      * Pick the fleet reward (share vs take-all) from the agent's standing and click it.

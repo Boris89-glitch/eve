@@ -43,6 +43,7 @@ __pycache__/
 
 ### Bot state ###
 config/bot_state.json
+config/pod_avoid.json
 /.claude/worktrees/exciting-dirac/
 /.claude/worktrees/lucid-taussig/
 events.log
