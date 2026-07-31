@@ -164,6 +164,7 @@ TEMPLATE_FILES = {
     "agent_portrait": "agent_portrait",          # opportunities screen agent portrait — right-click target
     "agent_lara_mesi": "agent_lara_mesi",        # "Agent: Lara Mesi" submenu entry — hover target
     "agent_set_destination": "agent_set_destination",  # "Set Destination" context menu item — click target
+    "location_lanngisi": "location_lanngisi",    # "Lanngisi" location submenu entry — hover before Set Destination
     "active": "active",  # 'Active' tab in the Agency window (alt+J) — click before right-clicking the agent portrait
     "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
     "enemy2": "enemy2",        # alternate enemy icon in local chat
@@ -172,6 +173,8 @@ TEMPLATE_FILES = {
     "bubble_text": "bubble_text",    # warp disruption bubble text — checked on warp/jump initiation
     "locations": "locations",  # locations submenu in right-click context menu (hover target)
     "general": "general",      # 'General' overview tab — clicked periodically in space to reset the preset
+    "container": "container",  # Scarlet loot container on the overview — double-click to open
+    "loot_all": "loot_all",    # 'Loot All' button in the open container window
     # Safe-spot & system-detection templates for enemy evasion
     "jcv_spot": "jcv_spot",      # JCV safe spot bookmark in Locations submenu
     "kly_spot": "kly_spot",      # KLY safe spot bookmark in Locations submenu

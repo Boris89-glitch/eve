@@ -249,6 +249,11 @@ public class ClientState {
     /** True after the first re-click of decline in DECLINING — next failure triggers agent double-click. */
     private boolean declineRetried = false;
 
+    /** Set when a chain mission (Recon 1 of 3, Pot and Kettle) was just turned in: the agent's very
+     *  next offer is the follow-up part (Recon 2 of 3 etc.), which we never run. Decline it outright —
+     *  no template match, no OCR, no rules — then clear the flag. One-shot. */
+    private boolean declineNextOffer = false;
+
     /** True only when CHECKING_MISSIONS was entered as a cold inspection of the agent dialog
      *  (startup / IDLE opened the agent itself), where a NOT_COMPLETE reading may be a mission
      *  accepted before the bot took control and should be recovered + flown. In the normal
@@ -581,6 +586,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public boolean isDeclineRetried()              { return declineRetried; }
     public void    setDeclineRetried(boolean v)    { this.declineRetried = v; }
+
+    public boolean isDeclineNextOffer()            { return declineNextOffer; }
+    public void    setDeclineNextOffer(boolean v)  { this.declineNextOffer = v; }
 
     public boolean isAllowNotCompleteRecovery()           { return allowNotCompleteRecovery; }
     public void    setAllowNotCompleteRecovery(boolean v) { this.allowNotCompleteRecovery = v; }

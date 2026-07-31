@@ -432,6 +432,8 @@ public class StateManager {
      * SystemMap.avoidMinutes — 0 there means it lasts the rest of the session).
      */
     public String getAvoidedSystem() {
+        // High sec: the null-sec route map and its pod avoidance no longer apply.
+        if (Environment.isHighSec()) return null;
         String system = poddedSystem;
         if (system == null) return null;
         int minutes = SystemMap.avoidMinutes();

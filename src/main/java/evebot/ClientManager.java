@@ -87,7 +87,7 @@ public class ClientManager {
     /** Scarlet lock-confirm: seconds to wait for 'locked_anire' before re-attempting the ctrl-click. */
     private static final long SCARLET_LOCK_RETRY_SECS  = 2;
     /** Re-read agent standings after this many declined missions (keeps gating current). */
-    private static final int  STANDINGS_RECHECK_DECLINES = 5;
+    private static final int  STANDINGS_RECHECK_DECLINES = 4;
     /** Consecutive WARPING dock re-issues that found no DOCK button and no station before we
      *  stop re-issuing and drop the client back to IDLE. */
     private static final int  DOCK_REISSUE_MISS_LIMIT = 3;
@@ -514,6 +514,19 @@ public class ClientManager {
         missionProcessor.clickTemplate("general"); // reset overview to the General preset (no-op if not visible)
     }
 
+    /**
+     * In-space pod probe (the invasive right-click-centre → look-for-eject check). Disabled in
+     * high sec: there is nothing to camp us out here, the probe right-clicks our own ship mid-flight,
+     * and a false positive used to trigger a self-destruct. A real pod in high sec is still caught by
+     * the passive signals (capsule template / pod_station in the hangar). The docked "undocked in a
+     * pod" check in {@link #handleUndocking} is separate and still runs — it's what stops us flying a
+     * pod to a mission gate.
+     */
+    private boolean podCheckInSpace() {
+        if (Environment.isHighSec()) return false;
+        return missionProcessor.isFlyingPod();
+    }
+
     private boolean handlePodDeath(String clientId, boolean inSpace) {
         return handlePodDeath(clientId, inSpace, false);
     }
@@ -557,6 +570,19 @@ public class ClientManager {
         // in), and only confirmed gate jumps move it, so this now reads as an actual distance
         // rather than "jumps this leg". Past 2 the exact number doesn't matter — logged as ">2".
         String jumpsLabel = jumps <= 2 ? String.valueOf(jumps) : ">2";
+        if (inSpace && Environment.isHighSec()) {
+            // High sec: no self-destruct. The pod can fly home safely, so do what the combat
+            // sequences do on completion — set destination back to the agent (RETURNING) and ride
+            // the pod home, dock, and re-ship. No cooldown either: nothing camped us out here.
+            log(clientId, "*** CAPSULE DETECTED — high sec: no self-destruct, setting destination back to the agent to re-ship.");
+            EventLog.log("POD_DEATH", clientId + " — ship destroyed in space, high sec: flying the pod home to re-ship (mission: "
+                    + missionName + ", " + phase + ", jumps: " + jumpsLabel + ", " + deathWindow + ")");
+            soundAlert(POD_ALERT);
+            cs.setPendingKillReportAdd(true);
+            cs.setTravelPhase(ClientState.TravelPhase.NONE);
+            stateManager.setState(clientId, ClientState.State.RETURNING);
+            return true;
+        }
         if (inSpace) {
             log(clientId, "*** CAPSULE DETECTED — ship destroyed! Self-destructing...");
             if (!missionProcessor.clickDestruct()) {
@@ -1114,8 +1140,12 @@ public class ClientManager {
             return;
         }
 
-        // Standard mission dialog logic.
-        MissionProcessor.DialogState dialogState = missionProcessor.detectDialog();
+        // Standard mission dialog logic. The first agent-dialog sighting of the run is the leftover
+        // check — prefer the 'completed' template there so a genuinely-completed leftover mission is
+        // turned in rather than misread as NOT_COMPLETE (the two templates look alike) and re-flown.
+        boolean mayBeFirstCheck = !agentDialogChecked.contains(clientId)
+                && cs.getCurrentMission() == null;
+        MissionProcessor.DialogState dialogState = missionProcessor.detectDialog(mayBeFirstCheck);
 
         // First time this run we actually SEE an agent mission dialog? Only then is a COMPLETED /
         // NOT_COMPLETE dialog with no accepted mission on record trusted as a real leftover from a
@@ -1295,6 +1325,26 @@ public class ClientManager {
         }
 
         agentRetries.put(clientId, 0);
+
+        // --- Chain follow-up: decline outright --------------------------------
+        // We just turned in Recon 1 of 3 / Pot and Kettle, so this offer is the next part of the
+        // chain. Decline it with no template match, no OCR and no rules — its title OCRs too
+        // inconsistently to gate on. Only acts on a live OFFER; the flag is cleared either way so
+        // it can never leak into a later, unrelated offer.
+        if (cs.isDeclineNextOffer()) {
+            if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
+                log(clientId, "CHECKING_MISSIONS: chain follow-up expected but no live OFFER dialog yet — waiting.");
+                return;
+            }
+            cs.setDeclineNextOffer(false);
+            System.out.println(">>> [" + clientId + "] DECLINE — chain follow-up mission (no checks)");
+            log(clientId, "CHECKING_MISSIONS: chain follow-up offer — declining outright (no checks).");
+            cs.setCurrentMission(null);
+            countDeclineForStandings(clientId, cs);
+            missionProcessor.clickDeclineButton();
+            stateManager.setState(clientId, ClientState.State.DECLINING);
+            return;
+        }
 
         // If a mission was already OCR'd by another entry path, evaluate it
         // directly with the full rule set (rare — most offers take the fast path).
@@ -1650,7 +1700,10 @@ public class ClientManager {
                 }
             }
             missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X')
-            missionProcessor.doubleClickAgentIcon(); // refocus agent dialog after the standings window
+            // Closing the standings window uncovers the agent window that was already open behind it,
+            // and the offer has just been declined — so what's showing is Request Mission, not View
+            // Mission. Don't re-double-click the agent (that would hunt for a View Mission that isn't
+            // there); fall straight through to the clickRequestMission below.
             if (pauseNow) return;   // yield; the pause gate hands focus to the partner next tick
         }
 
@@ -1727,8 +1780,17 @@ public class ClientManager {
             missionProcessor.clickUndock();
             stateManager.getState(clientId).setUndockStartTime(LocalDateTime.now());
             stateManager.setState(clientId, ClientState.State.UNDOCKING);
-            // Stay on this client through the undock animation so it can jump out as
-            // fast as possible — no switching to the other client during undock.
+            // Null sec: stay on this client through the undock animation so it can jump out as
+            // fast as possible. High sec: nothing to babysit during undock (can't insta-dock back
+            // on this station anyway), so hand focus to the other client the moment undock is
+            // clicked — UNDOCKING resumes for this client when it's refocused.
+            if (Environment.isHighSec()) {
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "Undock clicked — switching focus to " + other.getClientId() + ".");
+                    bringToForeground(other);
+                }
+            }
         } else if (MissionProcessor.UNDOCK_SHIP_NOT_FOUND.equals(result)) {
             String mTitle = mission != null ? mission.getTitle() : "unknown";
             log(clientId, "*** ALERT: no ship for this mission — sounding alarm (may be stuck).");
@@ -2021,7 +2083,7 @@ public class ClientManager {
             // ship is sitting still at the gate, so the HUD is stable and isFlyingPod is accurate.
             if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 2) {
                 log(clientId, "IN_COMBAT: gate not firing — running 2-minute no_ship check.");
-                if (missionProcessor.isFlyingPod()) {
+                if (podCheckInSpace()) {
                     log(clientId, "IN_COMBAT: no_ship while stuck at gate — podded, self-destructing.");
                     if (handlePodDeath(clientId, true)) {
                         return; // real pod death — handled (self-destruct/respawn), overrides the loop
@@ -2056,7 +2118,7 @@ public class ClientManager {
         //    to the other client, so this client stops spinning and yields. ──
         if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 2) {
             log(clientId, "IN_COMBAT: 2-minute no_ship check.");
-            if (missionProcessor.isFlyingPod()) {
+            if (podCheckInSpace()) {
                 log(clientId, "IN_COMBAT: no_ship — podded mid-combat, self-destructing.");
                 // Leave lastPodCheck at the previous clean check so handlePodDeath can
                 // bound the death window (the kill happened sometime since that check).
@@ -2246,7 +2308,7 @@ public class ClientManager {
         // before assuming the mission completed.
         int backstopSecs = "Jaguar".equals(combatLabel) ? 300 : 120;
         if (elapsed >= backstopSecs) {
-            if (missionProcessor.isFlyingPod()) {
+            if (podCheckInSpace()) {
                 handlePodDeath(clientId, true);
                 return;
             }
@@ -2413,12 +2475,13 @@ public class ClientManager {
      *   7  → SAFE WAIT 90s (one-shot 30s drift re-check), then poll every 5s until only ONE 'locked_inquisitor' bracket is left (first kill, 150s failsafe)
      *   8  → Second inquisitor already locked from step 4 — only re-lock if it drifted
      *   9  → WAIT 3s → click 'locked_inquisitor' (select) + press 'ad'
-     *   10 → SAFE WAIT 60s (drift re-lock + re-fire), then poll until ZERO 'locked_inquisitor' brackets and no 'target_inquisitor' left to lock (no timeout — both must be confirmed dead)
+     *   10 → SAFE WAIT 40s (drift re-lock + re-fire), then poll until ZERO 'locked_inquisitor' brackets and no 'target_inquisitor' left to lock (no timeout — both must be confirmed dead)
      *   11 → Right-click 'launcher' (ammo switch)
      *   12 → Click 'inf_damage' (load infernal/thermal ammo)
      *   13 → SAFE WAIT 10s
      *   14 → Ctrl+click 'target_vengeance' (lock)
-     *   15 → check 'locked_vengeance' — if not found, relock (3s between attempts); if found, click + press 'a', 'd' (no overload)
+     *   13 → SAFE WAIT 10s (ammo load), then overload rockets (shift+a)
+     *   15 → check 'locked_vengeance' — if not found, relock (3s between attempts); if found, click + press 'a', 'd'
      *   16 → SAFE WAIT for set_destination (mission complete → RETURNING)
      */
     private void handleCombatVengeance(String clientId, ClientState cs) {
@@ -2607,16 +2670,16 @@ public class ClientManager {
                 cs.setCombatStep(10);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Vengeance] 60s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Vengeance] 40s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 10: {
-                // SAFE WAIT: 60 seconds
+                // SAFE WAIT: 40 seconds.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 60) {
-                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 60s.");
+                if (elapsed < 40) {
+                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 40s.");
                     // Second inquisitor still locked but launcher confirmed idle → re-fire (select + 'ad').
                     if (Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds() >= TEAM_REFIRE_THROTTLE_SECS) {
                         cs.setCombatPollStart(LocalDateTime.now());
@@ -2648,7 +2711,7 @@ public class ClientManager {
                     }
                     return;
                 }
-                // 60s up — the second inquisitor should be dead. Confirm NO inquisitors are left on
+                // 40s up — the second inquisitor should be dead. Confirm NO inquisitors are left on
                 // screen before moving to the vengeance; if one is still up, re-lock + re-fire.
                 long sincePoll10 = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
                 if (sincePoll10 < 5) return;
@@ -2656,7 +2719,7 @@ public class ClientManager {
                 int inqs10 = missionProcessor.countTemplate("locked_inquisitor");
                 if (inqs10 == 0 && missionProcessor.confirmTemplateCountAtMost("locked_inquisitor", 0, 4, 300)
                         && missionProcessor.findTemplate("target_inquisitor") == null) {
-                    log(clientId, "COMBAT[Vengeance] 60s wait complete — no locked inquisitors and none left to lock (confirmed) — switching ammo.");
+                    log(clientId, "COMBAT[Vengeance] 40s wait complete — no locked inquisitors and none left to lock (confirmed) — switching ammo.");
                     cs.setCombatStep(11);
                     break;
                 }
@@ -2695,7 +2758,8 @@ public class ClientManager {
                     log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 10s.");
                     return;
                 }
-                log(clientId, "COMBAT[Vengeance] 10s wait complete — activating modules.");
+                log(clientId, "COMBAT[Vengeance] 10s wait complete — overloading rockets (shift+a), activating modules.");
+                missionProcessor.shiftKeyPress("a");
                 cs.setCombatStep(14);
                 break;
             }
@@ -2711,7 +2775,7 @@ public class ClientManager {
             case 15: {
                 String lockedV = missionProcessor.findTemplate("locked_vengeance");
                 if (lockedV != null) {
-                    log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance confirmed — click + press 'a', 'd' (no overload).");
+                    log(clientId, "COMBAT[Vengeance] Step 15: locked_vengeance confirmed — click + press 'a', 'd' (rockets overloaded after the ammo load).");
                     missionProcessor.clickTemplate("locked_vengeance");
                     missionProcessor.keyPress("a");
                     missionProcessor.keyPress("d");
@@ -3458,7 +3522,7 @@ public class ClientManager {
                 // deactivate + return (step 11 → RETURNING clicks the set_destination
                 // coords fallback).
                 if (elapsed >= 180) {
-                    if (missionProcessor.isFlyingPod()) {
+                    if (podCheckInSpace()) {
                         handlePodDeath(clientId, true);
                         return;
                     }
@@ -3652,7 +3716,7 @@ public class ClientManager {
                 // otherwise go to RETURNING — which clicks set_destination (template,
                 // or the hardcoded coords as fallback) so the route home is always set.
                 if (elapsed7 >= 120) {
-                    if (missionProcessor.isFlyingPod()) {
+                    if (podCheckInSpace()) {
                         handlePodDeath(clientId, true);
                         return;
                     }
@@ -3704,7 +3768,7 @@ public class ClientManager {
      * Entry: IDLE[TO_MISSION] already activated the first gate (right-click activate_gate
      *        → mission_start). The 20s IN_COMBAT grace period covers the gate load.
      *
-     *   0  → right-click activate_gate → click mission_start (second gate) → press 's' twice
+     *   0  → right-click activate_gate → click mission_start (second gate) → press 's' once
      *   1  → SAFE WAIT 40s (gate load — the gate is further away) + switch to other client
      *   2  → look for dock → click dock → WARPING → COMPLETING
      */
@@ -3715,7 +3779,6 @@ public class ClientManager {
             case 0: {
                 log(clientId, "COMBAT[Recon] Step 0: right-click activate_gate → mission_start (second gate), press 's'.");
                 missionProcessor.rightClickAndSelect("activate_gate", "mission_start");
-                missionProcessor.keyPress("s");
                 missionProcessor.keyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(1);
@@ -3765,6 +3828,18 @@ public class ClientManager {
         return "recon1".equalsIgnoreCase(t);
     }
 
+    /**
+     * True if the client's current mission is part of a chain whose NEXT part we never run —
+     * Recon 1 of 3 (followed by Recon 2 of 3) and Pot and Kettle. Used to auto-decline the
+     * follow-up offer after the turn-in.
+     */
+    private boolean isChainMission(ClientState cs) {
+        Mission m = cs.getCurrentMission();
+        if (m == null) return false;
+        String t = m.getShipTarget() != null ? m.getShipTarget() : m.getTarget();
+        return "recon1".equalsIgnoreCase(t) || "pot".equalsIgnoreCase(t);
+    }
+
     /** True if the client's current mission is the Dread Pirate Scarlet run. */
     private boolean isScarletMission(ClientState cs) {
         Mission m = cs.getCurrentMission();
@@ -3781,9 +3856,10 @@ public class ClientManager {
      * Steps (combat starts at step 1 — the warp-to-location landing already settled the grid):
      *   1 → activate gate the usual way (right-click activate_gate → "mission_start" menu entry),
      *       press 's' twice (turn off the warp module).
-     *   2 → set destination home via the agent (alt+J → 'active' → right-click portrait → set
-     *       destination), so the route is ready before we engage. Safe-wait switch to the other client.
-     *   3 → SAFE WAIT 25s (gate load).
+     *   2 → set destination home via the agent (alt+J → 'active' → right-click portrait → hover the
+     *       agent entry → hover 'location_lanngisi' → Set Destination), so the route is ready before
+     *       we engage. Safe-wait switch to the other client.
+     *   3 → SAFE WAIT 20s (gate load).
      *   4 → activate the next gate (right-click activate_gate → "mission_start"), press 's' twice. Switch.
      *   5 → SAFE WAIT 25s, then confirm warp has ended (warp_active gone) before locking.
      *   6 → ctrl-click 'anire' (lock). NO client switching from here — dedicate this client until she dies.
@@ -3791,10 +3867,12 @@ public class ClientManager {
      *       ctrl-click missed → back to step 6 to re-attempt.
      *   8 → right-click 'locked_anire' → 'approach', press 's' twice.
      *   9 → shift+ad (overload modules).
-     *  10 → WAIT 2s, then press 'adc' (activate modules).
-     *  11 → WAIT 20s (from activating modules), then poll 'locked_anire'; when it's gone (Anire
-     *       destroyed) → just jump the stargate (destination already set) → WARPING/RETURNING_HOME,
-     *       which flies home and turns the mission in at the agent. No client switching.
+     *  10 → WAIT 3s, then press 'ad' (activate modules).
+     *  11 → WAIT 17s (rep is deliberately delayed), then shift+c (overload rep) + 'c' (activate it).
+     *  12 → poll 'locked_anire' (no wait); when it's gone (Anire destroyed) → step 13. No client switching.
+     *  13 → loot the drop (double-click 'container' → 'loot_all' → close 'X' twice), jump the
+     *       stargate (destination already set), press 'c' to shut the rep off → WARPING/
+     *       RETURNING_HOME, which flies home and turns the mission in at the agent.
      *
      * NOTE: the on-screen set_destination prompt is intentionally ignored for Scarlet — the
      *       alt+J agent method is used instead, in step 1 (location-independent).
@@ -3821,17 +3899,17 @@ public class ClientManager {
                 cs.setCombatStep(3);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Scarlet] destination set — gate loading, safe wait 25s, switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Scarlet] destination set — gate loading, safe wait 20s, switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 3: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 25) {
+                if (elapsed < 20) {
                     return;
                 }
-                log(clientId, "COMBAT[Scarlet] 25s gate load complete — activating next gate.");
+                log(clientId, "COMBAT[Scarlet] 20s gate load complete — activating next gate.");
                 cs.setCombatStep(4);
                 break;
             }
@@ -3905,56 +3983,64 @@ public class ClientManager {
             case 9: {
                 log(clientId, "COMBAT[Scarlet] Step 9: shift+ad (overload modules).");
                 missionProcessor.shiftKeyPress("ad");
-                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the 2s wait before 'adc'
+                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the 3s wait before 'ad'
                 cs.setCombatStep(10);
                 break;
             }
             case 10: {
-                // Wait 2s after the overload, then press 'ad' (activate the first modules).
+                // Wait 3s after the overload, then press 'ad' (activate the first modules).
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 2) {
-                    log(clientId, "COMBAT[Scarlet] Step 10: wait before 'ad' (" + elapsed + "s / 2s).");
+                if (elapsed < 3) {
+                    log(clientId, "COMBAT[Scarlet] Step 10: wait before 'ad' (" + elapsed + "s / 3s).");
                     return;
                 }
                 log(clientId, "COMBAT[Scarlet] Step 10: press 'ad' (activate modules).");
                 missionProcessor.keyPress("ad");
-                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the wait before 'c'
+                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the 17s rep delay
                 cs.setCombatStep(11);
                 break;
             }
             case 11: {
-                // Wait a bit before pressing 'c' — don't fire every module at once right after the
-                // lock; give 'ad' a moment first.
+                // Hold 17s after 'ad' before the rep goes up — it isn't needed early in the fight
+                // and shouldn't burn cap from the start. Once it's up, step 12 polls straight away.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 10) {
-                    log(clientId, "COMBAT[Scarlet] Step 11: wait before 'c' (" + elapsed + "s / 10s).");
+                if (elapsed < 17) {
+                    log(clientId, "COMBAT[Scarlet] Step 11: delaying rep activation (" + elapsed + "s / 17s).");
                     return;
                 }
-                log(clientId, "COMBAT[Scarlet] Step 11: press 'c' (activate remaining module).");
+                log(clientId, "COMBAT[Scarlet] Step 11: 17s up — shift+c (overload rep) + 'c' (activate it).");
+                missionProcessor.shiftKeyPress("c");
                 missionProcessor.keyPress("c");
-                cs.setCombatWaitStart(LocalDateTime.now()); // anchors the 10s death-watch
                 cs.setCombatStep(12);
                 break;
             }
             case 12: {
-                // No client switching — stay and wait for Anire to die. Hold off polling until
-                // 10s after 'c' (the 10s pre-'c' wait already elapsed, so ~20s of module time total),
-                // then watch for the locked_anire bracket to disappear.
+                // No client switching — stay and watch for the locked_anire bracket to disappear.
+                // No wait here: the 17s rep delay in step 11 already covered the module ramp-up.
                 // Destination is already set (step 2), so on death we just jump and head home.
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 10) {
-                    log(clientId, "COMBAT[Scarlet] waiting for Anire to die (" + elapsed + "s / 10s before checking).");
-                    return;
-                }
                 if (missionProcessor.findTemplate("locked_anire") == null) {
-                    log(clientId, "COMBAT[Scarlet] locked_anire gone — Anire destroyed, jumping stargate (destination already set).");
-                    missionProcessor.rightClickAndSelect("stargate", "jump");
-                    cs.setWarpStartTime(LocalDateTime.now());
-                    cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
-                    stateManager.setState(clientId, ClientState.State.WARPING); // wait out the jump-warp → IDLE[RETURNING_HOME]
+                    log(clientId, "COMBAT[Scarlet] locked_anire gone — Anire destroyed, looting the container before warping out.");
+                    cs.setCombatStep(13);
                     break;
                 }
-                log(clientId, "COMBAT[Scarlet] Anire still locked (" + elapsed + "s) — waiting (no client switch).");
+                log(clientId, "COMBAT[Scarlet] Anire still locked — waiting (no client switch).");
+                break;
+            }
+            case 13: {
+                // Loot the drop before leaving: double-click 'container' → 'loot_all' → close 'X'.
+                // Nothing here is fatal — a missing container or Loot All just means no loot, so we
+                // warp out either way rather than stranding the client in the pocket.
+                log(clientId, "COMBAT[Scarlet] Step 13: looting the container.");
+                missionProcessor.lootContainer();
+                log(clientId, "COMBAT[Scarlet] Step 13: loot done — jumping stargate (destination already set).");
+                missionProcessor.rightClickAndSelect("stargate", "jump");
+                // Out of the fight — shut the rep back off ('c' is a toggle) so it isn't left
+                // burning cap and overloaded for the trip home.
+                log(clientId, "COMBAT[Scarlet] Step 13: warping out — press 'c' to shut the rep off.");
+                missionProcessor.keyPress("c");
+                cs.setWarpStartTime(LocalDateTime.now());
+                cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
+                stateManager.setState(clientId, ClientState.State.WARPING); // wait out the jump-warp → IDLE[RETURNING_HOME]
                 break;
             }
             default:
@@ -4078,7 +4164,7 @@ public class ClientManager {
                 // deactivate + return (step 7 → RETURNING clicks the set_destination
                 // coords fallback).
                 if (elapsed >= 60) {
-                    if (missionProcessor.isFlyingPod()) {
+                    if (podCheckInSpace()) {
                         handlePodDeath(clientId, true);
                         return;
                     }
@@ -4270,7 +4356,7 @@ public class ClientManager {
 
                 // 120s hardcap: no completion signal seen — pod check, then finish up.
                 if (elapsed >= 120) {
-                    if (missionProcessor.isFlyingPod()) {
+                    if (podCheckInSpace()) {
                         handlePodDeath(clientId, true);
                         return;
                     }
@@ -4400,7 +4486,9 @@ public class ClientManager {
         }
 
         missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X', fixed-loc fallback)
-        missionProcessor.doubleClickAgentIcon(); // refocus agent dialog (standings covers complete_mission)
+        // Closing the standings window uncovers the mission dialog that was already open behind it, so
+        // go straight for the COMPLETE MISSION button — no need to double-click the agent and re-view
+        // the mission again. The retry loop below re-opens the agent only if this first click misses.
 
         // Turn in and confirm it took, the same way ACCEPT is confirmed: no OK dialog, or a
         // COMPLETE MISSION button still on screen, means the turn-in didn't go through (the
@@ -4427,6 +4515,14 @@ public class ClientManager {
             EventLog.log("COMPLETE_UNCONFIRMED", clientId + " — mission turn-in not confirmed after 3 attempts");
         }
         stateManager.getState(clientId).setTravelPhase(ClientState.TravelPhase.NONE);
+
+        // Chain missions: the offer that follows Recon 1 of 3 / Pot and Kettle is the next part of
+        // the chain, which we never run. Flag it so the next offer is declined outright — the title
+        // OCRs inconsistently ("Recon2of3" vs "Recon 2 of 3"), so a decline rule can't be relied on.
+        if (isChainMission(stateManager.getState(clientId))) {
+            stateManager.getState(clientId).setDeclineNextOffer(true);
+            log(clientId, "COMPLETING: chain mission turned in — the agent's next offer is the follow-up part, will decline it outright.");
+        }
 
         // Standings pause: turning in a mission is the partner's cue to resume — clear its pause so
         // it checks again. Then, if OUR standing is still below the pause floor, pause ourselves and
@@ -4605,7 +4701,8 @@ public class ClientManager {
         if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
             missionProcessor.clickRequestMissionPlain();
             if (!missionProcessor.waitForNewOffer()) {
-                log(clientId, "FACTION_CHECK: no offer from faction agent — resuming (leaving dialogs as-is).");
+                log(clientId, "FACTION_CHECK: no offer from faction agent — closing the faction dialog and resuming.");
+                missionProcessor.clickAllCloseButtons();
                 stateManager.setState(clientId, ClientState.State.IDLE);
                 return;
             }
@@ -4655,7 +4752,12 @@ public class ClientManager {
             stateManager.recordFactionDecline(clientId, LocalDateTime.now());
         } else {
             log(clientId, "FACTION_CHECK: unwanted faction mission but declined < " + FACTION_DECLINE_HOURS
-                    + "h ago (" + sinceDecline + "h) — leaving offer, will retry in " + FACTION_CHECK_HOURS + "h.");
+                    + "h ago (" + sinceDecline + "h) — pressing Delay + close, will retry in " + FACTION_CHECK_HOURS + "h.");
+            // Can't decline yet without taking a standings hit. 'Delay' clears the offer out of the
+            // dialog without declining it (so the next detectDialog doesn't re-see OFFER and bounce
+            // us straight back in), then close the dialog.
+            missionProcessor.clickTemplate("delay");
+            missionProcessor.clickTemplate("close");
         }
         stateManager.setState(clientId, ClientState.State.IDLE);
     }
@@ -4841,16 +4943,6 @@ public class ClientManager {
 
         log(clientId, "UNDOCKING: agent_icon gone after " + elapsed + "s — undocked, proceeding to TRAVEL.");
         stateManager.setState(clientId, ClientState.State.TRAVEL);
-        // High sec: nothing to babysit after undock — we can't insta-dock back on this station
-        // anyway (session-change timer), so hand focus to the other client now; TRAVEL resumes
-        // for this client when it's refocused.
-        if (Environment.isHighSec()) {
-            ClientWindowInfo other = findOtherClient(clientId);
-            if (other != null) {
-                log(clientId, "UNDOCKING: switching focus to " + other.getClientId() + " on undock.");
-                bringToForeground(other);
-            }
-        }
     }
 
     // -----------------------------------------------------------------------
@@ -5082,7 +5174,7 @@ public class ClientManager {
                 finishDockArrival(clientId, cs, "agent_icon in station, no pod");
                 return;
             }
-            if (missionProcessor.isFlyingPod()) {
+            if (podCheckInSpace()) {
                 log(clientId, "WARPING: " + why + " while docking — podded in space, self-destructing.");
                 handlePodDeath(clientId, true);
                 return;
@@ -5287,7 +5379,7 @@ public class ClientManager {
                 long sinceActive = Duration.between(cs.getLastCombatOrCheck(), LocalDateTime.now()).toMinutes();
                 if (sinceActive >= 10 && !cs.isDockingToStation()) {   // skip while dock-warping — HUD hidden, false pod reads
                     log(clientId, "WARPING[POST-MISS]: " + sinceActive + "m without combat/mission-check — running warp-entry pod check.");
-                    if (missionProcessor.isFlyingPod()) {
+                    if (podCheckInSpace()) {
                         log(clientId, "WARPING[POST-MISS]: no_ship on warp entry — podded, self-destructing.");
                         handlePodDeath(clientId, true);
                         return;
@@ -5357,7 +5449,7 @@ public class ClientManager {
                             // Don't spin on the escape — after 2 tries, pod-check then resume travel.
                             log(clientId, "WARPING[BUBBLE]: escape failed after 2 attempts — pod check, then resuming travel.");
                             cs.setBubbleEscapeStep(0);
-                            if (missionProcessor.isFlyingPod()) {
+                            if (podCheckInSpace()) {
                                 log(clientId, "WARPING[BUBBLE]: no_ship — podded, self-destructing.");
                                 handlePodDeath(clientId, true);
                                 return;
@@ -5444,7 +5536,7 @@ public class ClientManager {
                 long sinceActive = Duration.between(cs.getLastCombatOrCheck(), LocalDateTime.now()).toMinutes();
                 if (sinceActive >= 10 && !cs.isDockingToStation()) {
                     log(clientId, "WARPING: " + sinceActive + "m without combat/mission-check — running warp-entry pod check.");
-                    if (missionProcessor.isFlyingPod()) {
+                    if (podCheckInSpace()) {
                         log(clientId, "WARPING: no_ship on warp entry — podded, self-destructing.");
                         handlePodDeath(clientId, true);
                         return;

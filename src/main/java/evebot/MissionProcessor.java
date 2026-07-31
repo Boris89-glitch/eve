@@ -77,23 +77,45 @@ public class MissionProcessor {
      * true if a button was clicked.
      */
     private boolean clickRequestOrViewMission() {
-        String btn = ocrBridge.findAnyTemplate("request_mission", "view_mission");
+        return clickMissionButton("request_mission", "view_mission");
+    }
+
+    /**
+     * Scan for the first of {@code keys} that is on screen and click it. The agent window can still
+     * be rendering right after a double-click, so a single scan can miss and leave us with just an
+     * open agent and no dialog — re-scan for a few seconds so the click actually lands.
+     */
+    private boolean clickMissionButton(String... keys) {
+        String btn = null;
+        for (int attempt = 0; attempt < 6 && btn == null; attempt++) {
+            btn = ocrBridge.findAnyTemplate(keys);
+            if (btn == null) sleep(500);
+        }
         if (btn == null) {
-            log("Neither request_mission nor view_mission visible.");
+            log("None of " + String.join(" / ", keys) + " visible.");
             return false;
         }
-        return ocrBridge.waitAndClickTemplate(btn, 1);
+        // Click it directly at the position we just matched. Re-scanning via wait_click can miss on
+        // the second look (threshold jitter) and would silently do nothing.
+        boolean clicked = ocrBridge.clickTemplateChecked(btn);
+        log("Clicked '" + btn + "' — " + (clicked ? "ok" : "CLICK FAILED (template gone on re-scan)"));
+        return clicked;
     }
 
     /**
      * High-sec only: a bare double-click of the agent portrait opens the agent window but no
-     * longer the mission dialog itself — you must then click View/Request Mission. In null sec
-     * the double-click opens the dialog directly, so this is a no-op there.
+     * longer the mission dialog itself — you must then click View Mission. In null sec the
+     * double-click opens the dialog directly, so this is a no-op there.
+     *
+     * View Mission only: right after opening the agent there is nothing to request yet, and
+     * including request_mission here lets it false-match and click a button that surfaces no
+     * dialog. Requesting a new mission is the explicit {@link #clickRequestMission} call's job,
+     * made once the dialog is already up.
      */
     private void surfaceMissionDialogIfHighSec() {
         if (!Environment.isHighSec()) return;
-        log("High sec — clicking View/Request Mission to surface the dialog.");
-        clickRequestOrViewMission();
+        log("High sec — clicking View Mission to surface the dialog.");
+        clickMissionButton("view_mission");
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -111,14 +133,28 @@ public class MissionProcessor {
      *   NONE             — nothing recognisable found
      */
     public DialogState detectDialog() {
-        log("Detecting dialog state (single template scan)...");
+        return detectDialog(false);
+    }
+
+    /**
+     * As {@link #detectDialog()}, but when {@code preferCompleted} is set the status scan checks
+     * 'completed' BEFORE 'not_complete'. The two templates are visually similar and normally we
+     * trust not_complete so a false 'completed' match can't turn in an unfinished mission — but the
+     * very first agent-dialog check of the run is looking for a leftover mission to turn in, where a
+     * genuinely-completed one otherwise reads as NOT_COMPLETE and gets flown again. Use it only there.
+     */
+    public DialogState detectDialog(boolean preferCompleted) {
+        log("Detecting dialog state (single template scan" + (preferCompleted ? ", prefer completed" : "") + ")...");
+        String[] statusOrder = preferCompleted
+                ? new String[]{"completed", "not_complete"}
+                : new String[]{"not_complete", "completed"};
         // Check accept/decline first so an offer dialog is never mistaken for ALREADY_ACCEPTED.
         String found = ocrBridge.findAnyTemplate("accept", "decline", "complete_mission");
         if (found == null) {
-            // No dialog buttons — check status indicators. not_complete FIRST: the tiny 'completed'
-            // checkmark false-matches easily, so if both are 'found' (an in-progress mission whose
-            // objective dot is on screen) we must trust not_complete and never read it as done.
-            String status = ocrBridge.findAnyTemplate("not_complete", "completed");
+            // No dialog buttons — check status indicators. not_complete FIRST (unless preferCompleted):
+            // the tiny 'completed' checkmark false-matches easily, so if both are 'found' (an
+            // in-progress mission whose objective dot is on screen) we must trust not_complete.
+            String status = ocrBridge.findAnyTemplate(statusOrder);
             if ("not_complete".equals(status)) {
                 log("Dialog state: NOT_COMPLETE (not_complete template visible)");
                 return DialogState.NOT_COMPLETE;
@@ -132,8 +168,9 @@ public class MissionProcessor {
         }
         if ("complete_mission".equals(found)) {
             // complete_mission button visible — check if mission is actually done or still in progress.
-            // not_complete FIRST so a false 'completed' match can't turn in an unfinished mission.
-            String status = ocrBridge.findAnyTemplate("not_complete", "completed");
+            // not_complete FIRST (unless preferCompleted) so a false 'completed' match can't turn in an
+            // unfinished mission.
+            String status = ocrBridge.findAnyTemplate(statusOrder);
             if ("not_complete".equals(status)) {
                 log("Dialog state: NOT_COMPLETE (complete_mission + not_complete visible)");
                 return DialogState.NOT_COMPLETE;
@@ -698,7 +735,7 @@ public class MissionProcessor {
      * agent entry → clicks Set Destination. Location-independent, so it can run at any point.
      */
     public void setDestinationViaAgent() {
-        log("Set destination via agent: alt+J → 'active' → right-click agent_portrait → hover lara_mesi → set destination.");
+        log("Set destination via agent: alt+J → 'active' → right-click agent_portrait → hover lara_mesi → hover location_lanngisi → set destination.");
         ocrBridge.altKeyPress("j");          // open the Agency / opportunities window
         sleep(800);
         // Click the 'Active' tab (must precede the portrait right-click), wait 1s for the
@@ -716,10 +753,45 @@ public class MissionProcessor {
         sleep(800);
         ocrBridge.hoverTemplate("agent_lara_mesi");
         sleep(800);
+        // The agent entry now opens a location submenu ('Lanngisi') that has to be hovered before
+        // Set Destination is reachable.
+        ocrBridge.hoverTemplate("location_lanngisi");
+        sleep(800);
         ocrBridge.clickTemplate("agent_set_destination");
         sleep(800);
         ocrBridge.clickTemplate("close_active_window");  // close the agency window once, now that destination is set
         sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /**
+     * Loot the mission container: double-click 'container' → click 'loot_all' → close with its 'X'
+     * twice (the container window and the cargo window behind it). 'loot_all' is usually up
+     * instantly but the window can take a moment, so it's waited for briefly. Returns true if Loot
+     * All was clicked.
+     *
+     * A missing container (already looted, not on screen) is not an error — the caller carries on.
+     */
+    public boolean lootContainer() {
+        if (ocrBridge.findAnyTemplate("container") == null) {
+            log("Loot: no 'container' on screen — nothing to loot.");
+            return false;
+        }
+        log("Loot: double-clicking 'container' to open it.");
+        ocrBridge.doubleClickTemplate("container");
+        sleep(1200);
+        if (!ocrBridge.waitAndClickTemplate("loot_all", 5)) {
+            log("Loot: 'loot_all' never appeared within 5s — closing and moving on.");
+            ocrBridge.clickTemplate("close_active_window");
+            sleep(POST_CLICK_DELAY_MS);
+            return false;
+        }
+        log("Loot: 'loot_all' clicked — closing the container window ('X', twice).");
+        sleep(1000);
+        ocrBridge.clickTemplate("close_active_window");
+        sleep(800);
+        ocrBridge.clickTemplate("close_active_window");
+        sleep(POST_CLICK_DELAY_MS);
+        return true;
     }
 
     public void clickWarpToLocation() {
@@ -954,6 +1026,7 @@ public class MissionProcessor {
 
     public void clickAgentStandings() {
         log("Clicking agent standings button");
+        sleep(800); // let the agent dialog settle before clicking — a click too early misses
         ocrBridge.clickTemplate("agent_standings");
         sleep(1200); // wait for standings window to open
     }

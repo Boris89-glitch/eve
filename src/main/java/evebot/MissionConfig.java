@@ -57,6 +57,17 @@ public class MissionConfig {
 
     public enum Decision { ACCEPT, DECLINE }
 
+    /** Recon is skipped once agent standing climbs above this, in high sec as well as null sec. */
+    private static final double RECON_MAX_STANDING = 2.0;
+
+    /** True if this offer is a Recon mission. The title wraps and OCRs inconsistently
+     *  ("Recon 1 of 3" / "Recon1of3"), so the raw dialog text is checked too. */
+    private static boolean isRecon(Mission m) {
+        String title = m.getTitle()   == null ? "" : m.getTitle().toLowerCase();
+        String raw   = m.getRawText() == null ? "" : m.getRawText().toLowerCase();
+        return title.contains("recon") || raw.contains("recon");
+    }
+
     /**
      * Evaluate a mission and return ACCEPT or DECLINE, printing the reason
      * to the terminal.
@@ -72,6 +83,19 @@ public class MissionConfig {
             if (rule.matches(mission)) {
                 System.out.printf("[DECISION] DECLINE — %s  (rule: %s)%n",
                         mission.getTitle(), rule.comment);
+                return Decision.DECLINE;
+            }
+        }
+
+        // 1b. Recon has a hard standings ceiling that applies everywhere, including high sec
+        //     (where gatedDecision drops the usual max_standing gate). Above it the mission isn't
+        //     worth running, so refuse before any accept rule can match. An unknown standing (NaN)
+        //     passes — same "when unsure, accept" direction as the gated rules.
+        if (isRecon(mission)) {
+            double s = normalizeStanding(standing);
+            if (!Double.isNaN(s) && s > RECON_MAX_STANDING) {
+                System.out.printf("[DECISION] DECLINE — %s  (recon: standing > %.1f)%n",
+                        mission.getTitle(), RECON_MAX_STANDING);
                 return Decision.DECLINE;
             }
         }
