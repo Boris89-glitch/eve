@@ -60,12 +60,23 @@ public class MissionConfig {
     /** Recon is skipped once agent standing climbs above this, in high sec as well as null sec. */
     private static final double RECON_MAX_STANDING = 2.0;
 
+    /** Pot and Kettle is skipped once agent standing reaches this, in high sec as well as null sec. */
+    private static final double POT_MAX_STANDING = 0.0;
+
     /** True if this offer is a Recon mission. The title wraps and OCRs inconsistently
      *  ("Recon 1 of 3" / "Recon1of3"), so the raw dialog text is checked too. */
     private static boolean isRecon(Mission m) {
         String title = m.getTitle()   == null ? "" : m.getTitle().toLowerCase();
         String raw   = m.getRawText() == null ? "" : m.getRawText().toLowerCase();
         return title.contains("recon") || raw.contains("recon");
+    }
+
+    /** True if this offer is Pot and Kettle. Same OCR caveat as Recon — the title merges with
+     *  neighbouring lines, so the raw dialog text is checked too. */
+    private static boolean isPot(Mission m) {
+        String title = m.getTitle()   == null ? "" : m.getTitle().toLowerCase();
+        String raw   = m.getRawText() == null ? "" : m.getRawText().toLowerCase();
+        return title.contains("kettle") || raw.contains("kettle");
     }
 
     /**
@@ -96,6 +107,17 @@ public class MissionConfig {
             if (!Double.isNaN(s) && s > RECON_MAX_STANDING) {
                 System.out.printf("[DECISION] DECLINE — %s  (recon: standing > %.1f)%n",
                         mission.getTitle(), RECON_MAX_STANDING);
+                return Decision.DECLINE;
+            }
+        }
+
+        // 1c. Same hard ceiling for Pot and Kettle: only run it while standing is below 0,
+        //     high sec included. NaN (standing not yet known) passes, as above.
+        if (isPot(mission)) {
+            double s = normalizeStanding(standing);
+            if (!Double.isNaN(s) && s >= POT_MAX_STANDING) {
+                System.out.printf("[DECISION] DECLINE — %s  (pot and kettle: standing ≥ %.1f)%n",
+                        mission.getTitle(), POT_MAX_STANDING);
                 return Decision.DECLINE;
             }
         }

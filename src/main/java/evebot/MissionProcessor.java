@@ -841,7 +841,26 @@ public class MissionProcessor {
             rightClickAndSelect(station, "dock");
             return true;
         }
-        log("No DOCK button or station visible — cannot dock.");
+        // Nothing found — usually a context menu left open by the previous right-click sitting on
+        // top of the station / DOCK button, or a stale frame. Left-click empty space to clear it
+        // (never Escape), then re-scan once before reporting failure.
+        log("No DOCK button or station visible — clicking empty space to clear any menu, then re-checking.");
+        clickEmptySpace();
+        sleep(POST_CLICK_DELAY_MS);
+        if (isDockVisible()) {
+            log("DOCK button visible after clearing the menu — docking.");
+            clickDockTwice();
+            return true;
+        }
+        station = isStationVisible("soe_station")  ? "soe_station"
+                : isStationVisible("home_station") ? "home_station"
+                : null;
+        if (station != null) {
+            log(station + " visible after clearing the menu — right-click → Dock.");
+            rightClickAndSelect(station, "dock");
+            return true;
+        }
+        log("No DOCK button or station visible after clearing the menu — cannot dock.");
         return false;
     }
 
@@ -1498,7 +1517,7 @@ public class MissionProcessor {
         if (lower.contains("recon"))                         return "recon1";
         // Dread Pirate Scarlet (boss "Anire") — also flies ship_infested.
         if (lower.contains("scarlet") || lower.contains("anire"))  return "scarlet";
-        // Pot and Kettle — Garmur vs the Prophecy.
+        // Pot and Kettle — Infested hull vs the Prophecy.
         if (lower.contains("pot") || lower.contains("kettle") || lower.contains("prophecy")) return "pot";
         return null;
     }

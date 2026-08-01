@@ -131,8 +131,10 @@ class EVEMissionReader:
         upper = self.clean_line(raw).upper()
         # Strip noise words and security decimal.
         # No \b boundaries — OCR often merges words (e.g. "T2ILOWSECWARNING").
+        # The "Location" label itself OCRs a dozen ways (LACATIAN, LOCATIAN, L0CATION...) —
+        # match it fuzzily so it never survives as the "system name".
         upper = re.sub(
-            r"(LOW|NULL|HIGH|SEC|WARNING|LOCATION|LACATION|DIVISION|SECURITY)",
+            r"(LOW|NULL|HIGH|SEC|WARNING|L[A4O0@]C[A4O0@]T[I1][A4O0@]N|DIVISION|SECURITY)",
             " ", upper,
         )
         upper = re.sub(r"-?\d+\.\d+", " ", upper)
@@ -144,7 +146,13 @@ class EVEMissionReader:
             return null_match.group(1)
         # Named system: e.g. JITA, AMARR
         named_match = re.search(r"\b([A-Z]{3,})\b", upper)
-        return named_match.group(1) if named_match else "Unknown"
+        if named_match:
+            return named_match.group(1)
+        # OCR routinely glues the security value onto the name and drops the spaces
+        # ("45URIOK", "05BEI"), leaving no word boundary for the match above. Drop the digits
+        # and take the LAST letter run — the line reads "Location <sec> <System>".
+        runs = re.findall(r"[A-Z]{3,}", re.sub(r"\d+", " ", upper))
+        return runs[-1] if runs else "Unknown"
 
     def extract_ship_target(self, text: str) -> Optional[str]:
         pattern = re.compile(r"(?i)des[a-z]{0,5}(?:\s+the\s+|\s+|the)([A-Z][a-zA-Z]+)")

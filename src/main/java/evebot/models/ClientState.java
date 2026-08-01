@@ -309,6 +309,24 @@ public class ClientState {
     /** True after evading to a safe spot — next landing jumps out instead of re-evading. Cleared on stargate jump. */
     private boolean warpedToSafeSpot = false;
 
+    /** Team combats: times the final completion backstop was extended because the main's locked
+     *  bracket was still on screen (the fight is simply taking longer than the backstop window). */
+    private int completionBackstopExtensions = 0;
+
+    /** Scarlet: the step-2 alt+J set-destination ran but the info panel showed no route. The retry
+     *  is deliberately deferred — Anire is waiting, so we fly the mission and re-set the route after
+     *  the gate jump on the way out (combat steps 14/15) rather than fiddling with menus mid-fight. */
+    private boolean scarletRouteUnconfirmed = false;
+
+    /** Scarlet: post-mission alt+J set-destination runs whose route the info panel never confirmed.
+     *  Bounds that retry loop so a route that can't be read doesn't strand the client at the gate. */
+    private int scarletRouteAttempts = 0;
+
+    /** Ticks spent at 0 jumps from home with neither the dock button nor home_station on screen.
+     *  Bounds the "we're home, dock on the station instead of jumping a gate" hold: if the station
+     *  never shows, the count is off and we fall back to the stargate. Cleared once we dock. */
+    private int homeDockMissCount = 0;
+
     /** Last time a view-nudge (camera drag) was issued to refresh the frame before a
      *  detection retry — throttles the nudge so it doesn't fire every tick. */
     private LocalDateTime lastViewNudge = LocalDateTime.MIN;
@@ -401,6 +419,7 @@ public class ClientState {
             this.windowsClosedAfterJump1 = false;
             this.podRerouteTemplate = null;
             this.pendingGateJump  = false;
+            this.homeDockMissCount = 0;
             // A fresh outbound/return leg is never a completion dock. Clear any stale
             // dockingToStation left set by a WARPING that ended without finishDockArrival
             // (e.g. a pod death mid-dock-warp) — otherwise this leg's warp landing is
@@ -435,6 +454,9 @@ public class ClientState {
             this.combatWarpLanded = false;
             this.combatWarpSeen = false;
             this.warpEndMisses = 0;
+            this.scarletRouteAttempts = 0;
+            this.scarletRouteUnconfirmed = false;
+            this.completionBackstopExtensions = 0;
             this.lastViewNudge = LocalDateTime.MIN;
             this.frigateLockRechecked = false;
         }
@@ -603,6 +625,18 @@ public boolean isDockingToStation()             { return dockingToStation; }
     public void incrementJumpCount()    { this.jumpCount++; }
     /** Floors at 0 — the station itself. An extra jump home can't drive the distance negative. */
     public void decrementJumpCount()    { if (this.jumpCount > 0) this.jumpCount--; }
+
+    public int  getCompletionBackstopExtensions()      { return completionBackstopExtensions; }
+    public void setCompletionBackstopExtensions(int v) { this.completionBackstopExtensions = v; }
+
+    public boolean isScarletRouteUnconfirmed()      { return scarletRouteUnconfirmed; }
+    public void    setScarletRouteUnconfirmed(boolean v) { this.scarletRouteUnconfirmed = v; }
+
+    public int  getScarletRouteAttempts()      { return scarletRouteAttempts; }
+    public void setScarletRouteAttempts(int v) { this.scarletRouteAttempts = v; }
+
+    public int  getHomeDockMissCount()      { return homeDockMissCount; }
+    public void setHomeDockMissCount(int v) { this.homeDockMissCount = v; }
 
     public boolean isPendingGateJump()           { return pendingGateJump; }
     public void    setPendingGateJump(boolean v) { this.pendingGateJump = v; }

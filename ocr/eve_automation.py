@@ -182,6 +182,7 @@ TEMPLATE_FILES = {
     "7rm_gate": "7rm_gate",      # 7RM stargate template
     "kly_system": "kly_system",  # KLY-C0 system name in UI
     "jcv_system": "jcv_system",  # J-CIJV system name in UI
+    "bei": "bei",                # "Bei 0.6" in the info panel — worm fights there also overload the rep
     "kly_next": "kly_next",      # KLY-C0 next-system indicator on route
     "jcv_next": "jcv_next",      # J-CIJV next-system indicator on route
     # Mission dialog detection templates — crop these from the mission dialog window.
@@ -197,7 +198,7 @@ TEMPLATE_FILES = {
     "mission_infested": "mission_infested",  # → ship_infested  (Infested Ruins)
     "mission_scarlet": "mission_scarlet",  # → ship_infested  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
-    "pot": "pot",  # Pot and Kettle offer dialog → ship_garmur  (standings-gated: standing < -0.7)
+    "pot": "pot",  # Pot and Kettle offer dialog → ship_infested  (standings-gated: standing < -0.7)
     "mission_evolution": "evolution",  # evolution.png → never run: leave for manual handling, lock faction agent
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
@@ -244,6 +245,7 @@ TEMPLATE_FILES = {
     "lock_target": "lock_target",
     "jamed": "jamed",  # ECM jam indicator — Angel combat
     # Dread Pirate Scarlet — boss "Anire"
+    "scarlet": "scarlet",            # Scarlet overview row — double-click to approach, ctrl-click to lock
     "anire": "anire",                # Anire overview/target row — double-click to select, ctrl-click to lock
     "locked_anire": "locked_anire",  # Anire locked-target bracket — gone = destroyed
     "approach": "approach",          # right-click menu "Approach" item — used on locked_anire
@@ -298,7 +300,7 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_angel",     "ship_angel",   None),
     ("mission_infested",  "ship_infested", ["infested", "hive", "ruins"]),
     ("mission_scarlet",   "ship_infested", None),
-    ("pot",               "ship_garmur",   None),  # Pot and Kettle — Garmur, EM rockets vs the Prophecy
+    ("pot",               "ship_infested", None),  # Pot and Kettle — Infested hull vs the Prophecy
 ]
 
 # -----------------------------------------------------------------------------
