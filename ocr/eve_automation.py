@@ -1227,9 +1227,11 @@ def read_route_panel(img: "Image.Image") -> dict:
     text = pytesseract.image_to_string(gray, config=cfg).strip()
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
 
-    # The route list is in travel order, so the destination is its last entry. Stop at the
-    # Opportunities section below it — its body text names systems the same way.
+    # The route list is in travel order — first row is the next system, last row the destination
+    # ("Nakugard 0.0 < Ani < Metropolis" then "Lanngisi 0.5 < Ani < Metropolis" = 2 jumps left).
+    # Stop at the Opportunities section below it — its body text names systems the same way.
     destination = None
+    waypoints = 0
     for line in lines:
         if "pportun" in line:
             break
@@ -1238,6 +1240,7 @@ def read_route_panel(img: "Image.Image") -> dict:
         m = _SYSTEM_RE.search(line)
         if m:
             destination = m.group(1)
+            waypoints += 1
 
     jumps, route_set = -1, destination is not None
     # Cheap path first: the header often survives whole ("Route 1jump", "Route 12 Jumps"),
@@ -1245,7 +1248,8 @@ def read_route_panel(img: "Image.Image") -> dict:
     inline = _JUMPS_INLINE_RE.search(text)
     if inline:
         jumps, route_set = int(inline.group(1)), True
-        return {"route_set": route_set, "jumps": jumps, "destination": destination, "raw": text}
+        return {"route_set": route_set, "jumps": jumps, "waypoints": waypoints,
+                "destination": destination, "raw": text}
 
     data = pytesseract.image_to_data(gray, config=cfg, output_type=pytesseract.Output.DICT)
     for i, word in enumerate(data["text"]):
@@ -1265,7 +1269,8 @@ def read_route_panel(img: "Image.Image") -> dict:
             jumps = int(found)
         break
 
-    return {"route_set": route_set, "jumps": jumps, "destination": destination, "raw": text}
+    return {"route_set": route_set, "jumps": jumps, "waypoints": waypoints,
+            "destination": destination, "raw": text}
 
 
 def read_kill_system(img: "Image.Image") -> dict:
@@ -2423,7 +2428,8 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         img = reader_box["reader"].capture_region(
             int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"]))
         if img is None:
-            return {"ok": True, "value": {"route_set": False, "jumps": -1, "destination": None}}
+            return {"ok": True, "value": {"route_set": False, "jumps": -1, "waypoints": 0,
+                                          "destination": None}}
         return {"ok": True, "value": read_route_panel(img)}
 
     if cmd == "read_kill_system":

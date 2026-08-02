@@ -107,15 +107,14 @@ public class MissionProcessor {
      * longer the mission dialog itself — you must then click View Mission. In null sec the
      * double-click opens the dialog directly, so this is a no-op there.
      *
-     * View Mission only: right after opening the agent there is nothing to request yet, and
-     * including request_mission here lets it false-match and click a button that surfaces no
-     * dialog. Requesting a new mission is the explicit {@link #clickRequestMission} call's job,
-     * made once the dialog is already up.
+     * Whichever of View / Request Mission is showing: with a mission in progress the agent
+     * window has View Mission, on the first open of a run (no mission yet) it has Request
+     * Mission instead. View Mission is checked first so it wins when both somehow match.
      */
     private void surfaceMissionDialogIfHighSec() {
         if (!Environment.isHighSec()) return;
-        log("High sec — clicking View Mission to surface the dialog.");
-        clickMissionButton("view_mission");
+        log("High sec — clicking View/Request Mission to surface the dialog.");
+        clickMissionButton("view_mission", "request_mission");
         sleep(POST_CLICK_DELAY_MS);
     }
 
@@ -1176,13 +1175,18 @@ public class MissionProcessor {
         public final int jumps;
         /** Last waypoint system read (e.g. "S-MDYI"), or null. */
         public final String destination;
+        /** How many waypoint rows the panel listed. The rows are the systems left on the route
+         *  (first = next system, last = destination), so this is a floor for the jumps remaining
+         *  when the jump digit doesn't OCR — rows past the bottom of the crop aren't counted. */
+        public final int waypoints;
         /** Raw OCR text of the panel — what the bot actually saw, for diagnosing misreads. */
         public final String raw;
 
-        RouteInfo(boolean routeSet, int jumps, String destination, String raw) {
+        RouteInfo(boolean routeSet, int jumps, String destination, int waypoints, String raw) {
             this.routeSet = routeSet;
             this.jumps = jumps;
             this.destination = destination;
+            this.waypoints = waypoints;
             this.raw = raw == null ? "" : raw;
         }
 
@@ -1206,11 +1210,14 @@ public class MissionProcessor {
     public RouteInfo readRoute() {
         Rectangle r = Layout.routePanel();
         com.google.gson.JsonObject v = ocrBridge.readRoute(r.x, r.y, r.width, r.height);
-        if (v == null) return new RouteInfo(false, -1, null, null);
+        if (v == null) return new RouteInfo(false, -1, null, 0, null);
         String dest = v.has("destination") && !v.get("destination").isJsonNull()
                 ? v.get("destination").getAsString() : null;
         String raw = v.has("raw") && !v.get("raw").isJsonNull() ? v.get("raw").getAsString() : null;
-        return new RouteInfo(v.get("route_set").getAsBoolean(), v.get("jumps").getAsInt(), dest, raw);
+        int waypoints = v.has("waypoints") && !v.get("waypoints").isJsonNull()
+                ? v.get("waypoints").getAsInt() : 0;
+        return new RouteInfo(v.get("route_set").getAsBoolean(), v.get("jumps").getAsInt(),
+                dest, waypoints, raw);
     }
 
     /**

@@ -147,6 +147,12 @@ public class ClientState {
      *  client sets it, so the other client sharing the global cooldown doesn't run the add. */
     private boolean pendingKillReportAdd = false;
 
+    /** Set when the pod death happened in the mission fight itself and the pod is still flying home
+     *  (high sec — no self-destruct, so the death is handled a second time on arrival at the
+     *  station). Tells that second handling it was a combat death: keep the mission and re-ship,
+     *  no camp cooldown. Cleared as soon as it's consumed. */
+    private boolean poddedInCombat = false;
+
     /** One-shot: has the focus-away click been done for this combat? Reset on entering IN_COMBAT. */
     private boolean combatFocusClicked = false;
 
@@ -515,6 +521,9 @@ public class ClientState {
     public boolean isPendingKillReportAdd()         { return pendingKillReportAdd; }
     public void setPendingKillReportAdd(boolean v)  { this.pendingKillReportAdd = v; }
 
+    public boolean isPoddedInCombat()          { return poddedInCombat; }
+    public void    setPoddedInCombat(boolean v) { this.poddedInCombat = v; }
+
     public String getCombatTargetKey()          { return combatTargetKey; }
     public void   setCombatTargetKey(String k)  { this.combatTargetKey = k; }
 
@@ -623,6 +632,10 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public int  getJumpCount()          { return jumpCount; }
     public void incrementJumpCount()    { this.jumpCount++; }
+    /** Overwrite the counter from the info-panel route on the way home, where "jumps to the
+     *  destination" IS our distance from home — the panel outranks the gate-jump tally, which
+     *  drifts across restarts and cross-system mission warps. */
+    public void setJumpCount(int v)     { this.jumpCount = Math.max(0, v); }
     /** Floors at 0 — the station itself. An extra jump home can't drive the distance negative. */
     public void decrementJumpCount()    { if (this.jumpCount > 0) this.jumpCount--; }
 

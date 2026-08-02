@@ -200,7 +200,11 @@ public class ClientManager {
                 lastClientSwitch = LocalDateTime.now();
             } else if (sinceSwitch >= FORCE_SWITCH_SECS) {
                 ClientWindowInfo other = findOtherClient(fg.getClientId());
-                if (other != null) {
+                // A parked client (session end, standings) does no work — handing it the
+                // foreground would just bounce back next tick, so leave focus where it is.
+                if (other != null && isParkedOrLocked(other.getClientId())) {
+                    lastClientSwitch = LocalDateTime.now();
+                } else if (other != null) {
                     log("[ClientManager] Force-switch watchdog: " + sinceSwitch + "s without a switch — handing foreground to " + other.getClientId() + ".");
                     bringToForeground(other);
                     processClient(other.getClientId(), other);
@@ -328,8 +332,10 @@ public class ClientManager {
 
     /**
      * Park a client for a graceful session end (Ctrl+Shift+R). Resets it to a clean docked
-     * IDLE state (persisted, so the next launch starts cleanly from the agent) and marks it
-     * parked so it does no further work and yields the foreground for the rest of the session.
+     * IDLE state (persisted, so the next launch starts cleanly from the agent), marks it parked
+     * so it does no further work, hands the foreground to whoever is still working, and minimizes
+     * its window so it is out of the rotation for good. Once every client has parked there is
+     * nothing left to drive, so the bot shuts itself down (same path as Ctrl+C).
      */
     private void parkForSessionEnd(String clientId, String reason) {
         ClientState cs = stateManager.getState(clientId);
@@ -341,6 +347,39 @@ public class ClientManager {
         EventLog.log("SESSION_END", clientId + " — " + reason);
         ClientWindowInfo other = findOtherClient(clientId);
         if (other != null && !isParkedOrLocked(other.getClientId())) bringToForeground(other);
+        minimizeClient(clientId);
+        if (allClientsParked()) {
+            log("[ClientManager] SESSION END: every client is parked and docked — shutting down.");
+            EventLog.log("SESSION_END", "all clients parked — bot exiting");
+            System.exit(0); // runs Main's shutdown hook: session summary, state save, cleanup
+        }
+    }
+
+    /**
+     * Minimize a parked client's window. Minimized windows are skipped by
+     * {@link #refreshClientWindows()}, so this also drops the client out of the discovery map —
+     * nothing switches to it or ticks it again for the rest of the session.
+     */
+    private void minimizeClient(String clientId) {
+        ClientWindowInfo w = clientWindows.get(clientId);
+        if (w == null || w.getHandle() == 0L) return;
+        try {
+            com.sun.jna.platform.win32.WinDef.HWND hwnd =
+                    new com.sun.jna.platform.win32.WinDef.HWND(new com.sun.jna.Pointer(w.getHandle()));
+            com.sun.jna.platform.win32.User32.INSTANCE.ShowWindow(
+                    hwnd, com.sun.jna.platform.win32.WinUser.SW_MINIMIZE);
+            log(clientId, "SESSION END: window minimized — out of the client rotation.");
+        } catch (Exception e) {
+            log(clientId, "SESSION END: could not minimize the window (" + e + ") — parked anyway.");
+        }
+    }
+
+    /** True when no discovered client is still able to work (all parked / standings-locked). */
+    private boolean allClientsParked() {
+        for (ClientWindowInfo w : clientWindows.values()) {
+            if (!isParkedOrLocked(w.getClientId())) return false;
+        }
+        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -540,15 +579,13 @@ public class ClientManager {
     }
 
     /**
-     * In-space pod probe (the invasive right-click-centre → look-for-eject check). Disabled in
-     * high sec: there is nothing to camp us out here, the probe right-clicks our own ship mid-flight,
-     * and a false positive used to trigger a self-destruct. A real pod in high sec is still caught by
-     * the passive signals (capsule template / pod_station in the hangar). The docked "undocked in a
-     * pod" check in {@link #handleUndocking} is separate and still runs — it's what stops us flying a
-     * pod to a mission gate.
+     * In-space pod probe: passive no_ship sliver first, then the right-click-HUD → look-for-eject
+     * confirmation. Runs in high sec too — the passive hangar signals only catch a pod once we're
+     * back at the station, so without this probe a pod death mid-mission leaves the combat step
+     * machine looping forever (relocking a target from a capsule). A false positive in high sec is
+     * cheap: {@link #handlePodDeath} flies home to re-ship there instead of self-destructing.
      */
     private boolean podCheckInSpace() {
-        if (Environment.isHighSec()) return false;
         return missionProcessor.isFlyingPod();
     }
 
@@ -603,7 +640,15 @@ public class ClientManager {
             EventLog.log("POD_DEATH", clientId + " — ship destroyed in space, high sec: flying the pod home to re-ship (mission: "
                     + missionName + ", " + phase + ", jumps: " + jumpsLabel + ", " + deathWindow + ")");
             soundAlert(POD_ALERT);
-            cs.setPendingKillReportAdd(true);
+            // Docking home in the capsule re-detects this same death (agent_icon + capsule in the
+            // hangar). Remember it happened in the mission fight so that second pass keeps the
+            // mission and re-ships instead of running the camp flow — no cooldown, and no killer to
+            // flag either: high-sec burner NPCs killed us, not a player, so no kill-report add.
+            if (stateManager.getStateEnum(clientId) == ClientState.State.IN_COMBAT) {
+                cs.setPoddedInCombat(true);
+            } else {
+                cs.setPendingKillReportAdd(true);
+            }
             cs.setTravelPhase(ClientState.TravelPhase.NONE);
             stateManager.setState(clientId, ClientState.State.RETURNING);
             return true;
@@ -652,11 +697,19 @@ public class ClientManager {
         // Any death OUTSIDE combat — bubble camp, gate gank, AFK in space while travelling — must
         // NOT return to whatever killed us: quit the mission, add the killer as a bad contact, and
         // pick a different one. jumps only decides whether we wait out the camp first.
-        boolean inCombat = stateManager.getStateEnum(clientId) == ClientState.State.IN_COMBAT;
+        // The high-sec pod flies itself home, so by the time the capsule is spotted in the hangar we
+        // are back in IDLE — poddedInCombat carries the "died in the fight" verdict across that trip.
+        boolean carriedFromCombat = cs.isPoddedInCombat();
+        boolean inCombat = stateManager.getStateEnum(clientId) == ClientState.State.IN_COMBAT
+                || carriedFromCombat;
+        cs.setPoddedInCombat(false);
         if (inCombat) {
             // Died in the mission fight itself — keep the mission and go finish it. Resume at once.
             // Clear the travel phase so the next IDLE tick doesn't re-read the station agent_icon
             // as another pod death (TO_MISSION + agent_icon loops back into handlePodDeath forever).
+            // Same audible heads-up as any other pod death — but not twice for the high-sec death we
+            // already alarmed on when the capsule was spotted in space.
+            if (!carriedFromCombat) soundAlert(POD_ALERT);
             cs.setTravelPhase(ClientState.TravelPhase.NONE);
             if (cs.getCurrentMission() != null) {
                 // Re-board the correct ship (REPAIRING → UNDOCKING → TRAVEL re-flies to the site).
@@ -1250,8 +1303,11 @@ public class ClientManager {
                 // Before assuming a turn-in is needed, look for the request-mission button. If it's
                 // on screen the agent is ready to hand out a new mission (nothing left to turn in —
                 // the 'completed' template is stale), so request one and proceed via CHECKING_MISSIONS
-                // instead of running the COMPLETING turn-in flow.
-                if (missionProcessor.findTemplate("request_mission") != null) {
+                // instead of running the COMPLETING turn-in flow. COMPLETE MISSION on screen beats
+                // that: there IS a finished mission sitting in the dialog to turn in, so ignore the
+                // request/view buttons next to it and go turn it in.
+                if (missionProcessor.findTemplate("complete_mission") == null
+                        && missionProcessor.findTemplate("request_mission") != null) {
                     log(clientId, "COMPLETED template visible but request-mission is available — requesting a new mission instead of turning in.");
                     missionProcessor.clickRequestMission();
                     stateManager.getState(clientId).setCurrentMission(null);
@@ -2602,8 +2658,7 @@ public class ClientManager {
                 String tk = awaitCombatTarget(clientId, cs, "target_vengeance");
                 if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 log(clientId, "COMBAT[Vengeance] Step 0: right-click " + tk + " → click orbit.");
-                missionProcessor.rightClickTemplate(tk);
-                missionProcessor.clickTemplate("orbit");
+                missionProcessor.rightClickAndSelect(tk, "orbit");
                 cs.setCombatStep(1);
                 break;
             }
@@ -2865,8 +2920,7 @@ public class ClientManager {
                 String tk = awaitCombatTarget(clientId, cs, "target_enyo");
                 if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 log(clientId, "COMBAT[Enyo] Step 2: right-click " + tk + " → click orbit.");
-                missionProcessor.rightClickTemplate(tk);
-                missionProcessor.clickTemplate("orbit");
+                missionProcessor.rightClickAndSelect(tk, "orbit");
                 cs.setCombatStep(3);
                 break;
             }
@@ -3077,8 +3131,7 @@ public class ClientManager {
                 String tk = awaitCombatTarget(clientId, cs, "target_hawk");
                 if (tk == null) return; // target not visible — nudged, hold step and retry next tick
                 log(clientId, "COMBAT[Hawk] Step 2: right-click " + tk + " → click orbit.");
-                missionProcessor.rightClickTemplate(tk);
-                missionProcessor.clickTemplate("orbit");
+                missionProcessor.rightClickAndSelect(tk, "orbit");
                 cs.setCombatStep(3);
                 break;
             }
@@ -3949,11 +4002,9 @@ public class ClientManager {
      *  10 → WAIT 3s, then press 'ad' (activate modules).
      *  11 → WAIT 17s (rep is deliberately delayed), then shift+c (overload rep) + 'c' (activate it).
      *  12 → poll 'locked_anire' (no wait); when it's gone (Anire destroyed) → step 13. No client switching.
-     *  13 → loot the drop (double-click 'container' → 'loot_all' → close 'X' twice), jump the
-     *       stargate (destination already set), press 'c' to shut the rep off → WARPING/
+     *  13 → jump the stargate (destination already set), press 'c' to shut the rep off → WARPING/
      *       RETURNING_HOME, which flies home and turns the mission in at the agent.
-     *       If step 2's route never confirmed, go to 14 instead of WARPING.
-     *  14 → WAIT 25s for the gate jump / session change to finish.
+     *       If step 2's route never confirmed, go to 15 instead of WARPING.
      *  15 → re-run the alt+J set-destination until the Route panel reads a route (bounded by
      *       SCARLET_ROUTE_ATTEMPT_LIMIT), then hand the return leg to IDLE[RETURNING_HOME].
      *
@@ -4119,7 +4170,7 @@ public class ClientManager {
                 // No wait here: the 17s rep delay in step 11 already covered the module ramp-up.
                 // Destination is already set (step 2), so on death we just jump and head home.
                 if (missionProcessor.findTemplate("locked_anire") == null) {
-                    log(clientId, "COMBAT[Scarlet] locked_anire gone — Anire destroyed, looting the container before warping out.");
+                    log(clientId, "COMBAT[Scarlet] locked_anire gone — Anire destroyed, jumping the gate.");
                     cs.setCombatStep(13);
                     break;
                 }
@@ -4127,12 +4178,7 @@ public class ClientManager {
                 break;
             }
             case 13: {
-                // Loot the drop before leaving: double-click 'container' → 'loot_all' → close 'X'.
-                // Nothing here is fatal — a missing container or Loot All just means no loot, so we
-                // warp out either way rather than stranding the client in the pocket.
-                log(clientId, "COMBAT[Scarlet] Step 13: looting the container.");
-                missionProcessor.lootContainer();
-                log(clientId, "COMBAT[Scarlet] Step 13: loot done — jumping stargate"
+                log(clientId, "COMBAT[Scarlet] Step 13: jumping stargate"
                         + (cs.isScarletRouteUnconfirmed() ? " (no route yet — re-setting it after the jump)."
                                                           : " (destination already set)."));
                 missionProcessor.rightClickAndSelect("stargate", "jump");
@@ -4141,29 +4187,15 @@ public class ClientManager {
                 log(clientId, "COMBAT[Scarlet] Step 13: warping out — press 'c' to shut the rep off.");
                 missionProcessor.keyPress("c");
                 if (cs.isScarletRouteUnconfirmed()) {
-                    // Step 2's alt+J never produced a route. Now that the fight is over and we're
-                    // through the gate, re-set it properly before handing the leg to the normal
-                    // returning navigation, which flies the autopilot route home.
-                    cs.setCombatWaitStart(LocalDateTime.now());
-                    cs.setCombatStep(14);
+                    // Step 2's alt+J never produced a route. Now that the fight is over, re-set it
+                    // properly before handing the leg to the normal returning navigation, which
+                    // flies the autopilot route home.
+                    cs.setCombatStep(15);
                     break;
                 }
                 cs.setWarpStartTime(LocalDateTime.now());
                 cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
                 stateManager.setState(clientId, ClientState.State.WARPING); // wait out the jump-warp → IDLE[RETURNING_HOME]
-                break;
-            }
-            case 14: {
-                // Wait out the gate jump (warp + session change) before touching any menus —
-                // alt+J during the tunnel lands on a client that's still loading.
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 25) {
-                    log(clientId, "COMBAT[Scarlet] Step 14: waiting out the gate jump before re-setting the route ("
-                            + elapsed + "s / 25s).");
-                    return;
-                }
-                log(clientId, "COMBAT[Scarlet] Step 14: through the gate — re-setting the route.");
-                cs.setCombatStep(15);
                 break;
             }
             case 15: {
@@ -4612,7 +4644,6 @@ public class ClientManager {
                 // view has no set_destination and no dock. Pod-check first; if we're still alive,
                 // stop hunting the route and fly home on whatever IDLE can find, so the run starts
                 // over from the station instead of looping here forever.
-                // (podCheckInSpace is a no-op in high sec — the pod flies itself home there.)
                 if (podCheckInSpace()) {
                     log(clientId, "RETURNING: no route/dock for " + stuck + "s and no_ship — podded, handling pod death.");
                     handlePodDeath(clientId, true);
@@ -4621,8 +4652,36 @@ public class ClientManager {
                 log(clientId, "RETURNING: no route/dock for " + stuck + "s — giving up on set_destination, heading home to start over.");
             }
         }
+        applyRouteDistance(clientId, cs, route);
         cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
         stateManager.setState(clientId, ClientState.State.IDLE);
+    }
+
+    /**
+     * Re-anchor "how far from home are we" on the route panel, which on the way in is the same
+     * number as the jumps to the destination. The internal jumpCount only moves on confirmed gate
+     * jumps, so it drifts (restart mid-trip, a mission warp that crossed a system) — and a stale 0
+     * makes IDLE[RETURNING_HOME] hunt for a home_station that is systems away, then take a stargate
+     * "because the count is off". The jump digit is tiny and often doesn't OCR; when it doesn't, the
+     * waypoint rows still do, and each row is a system left on the route, so their count is a floor
+     * for the real distance — used to raise a too-low counter, never to lower it.
+     */
+    private void applyRouteDistance(String clientId, ClientState cs, MissionProcessor.RouteInfo route) {
+        if (route == null || !route.isSet()) return;
+        String dest = route.destination != null ? route.destination : "destination";
+        if (route.jumps >= 0) {
+            if (route.jumps == cs.getJumpCount()) return;
+            log(clientId, "RETURNING: route panel reads " + route.jumps + " jump(s) to " + dest
+                    + " — distance from home was " + cs.getJumpCount() + ", correcting.");
+            cs.setJumpCount(route.jumps);
+            return;
+        }
+        if (route.waypoints > cs.getJumpCount()) {
+            log(clientId, "RETURNING: jump count didn't OCR, but the panel lists " + route.waypoints
+                    + " system(s) left to " + dest + " — distance from home was " + cs.getJumpCount()
+                    + ", raising it (we are not home yet).");
+            cs.setJumpCount(route.waypoints);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4754,9 +4813,14 @@ public class ClientManager {
         // instead of IDLE — avoids stale complete_mission being misdetected.
         missionProcessor.clickRequestMission();
 
-        // Switch to other client after requesting — gives the dialog time to load
+        // Switch to other client after requesting — gives the dialog time to load. Exception: if
+        // the other client is RETURNING (flying its mission back), don't hand it the foreground —
+        // keep checking missions here so we bank more standings before it turns its own in.
         ClientWindowInfo other = findOtherClient(clientId);
-        if (other != null) {
+        if (other != null && stateManager.getStateEnum(other.getClientId()) == ClientState.State.RETURNING) {
+            log(clientId, "COMPLETING: mission turned in — " + other.getClientId()
+                    + " is RETURNING, holding focus and proceeding with mission checking.");
+        } else if (other != null) {
             log(clientId, "COMPLETING: mission turned in — switching focus to " + other.getClientId());
             bringToForeground(other);
         }
