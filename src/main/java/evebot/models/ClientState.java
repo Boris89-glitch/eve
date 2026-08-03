@@ -208,6 +208,12 @@ public class ClientState {
      *  the next completion re-sets it if standing is still below the floor. NOT reset by setState. */
     private boolean standingsPaused = false;
 
+    /** Set when the standings pause came from the PERSISTED standing at startup (not a live OCR
+     *  read). A persisted value is stale by nature — partner turn-ins boost our standing without
+     *  us re-reading it — so the pause gate verifies it once with a live read before honoring the
+     *  pause for the session. Cleared after that verification. NOT reset by setState. */
+    private boolean standingsPauseFromPersisted = false;
+
     /** Last agent standing read at mission completion, used to gate standings-restricted
      *  missions (recon 1, scarlet, pot-and-kettle — accepted only when standing &lt; 1).
      *  NaN until the first completion populates it. NOT reset by setState.
@@ -553,6 +559,8 @@ public class ClientState {
 
     public boolean isStandingsPaused()               { return standingsPaused; }
     public void    setStandingsPaused(boolean v)     { this.standingsPaused = v; }
+    public boolean isStandingsPauseFromPersisted()           { return standingsPauseFromPersisted; }
+    public void    setStandingsPauseFromPersisted(boolean v) { this.standingsPauseFromPersisted = v; }
 
     public boolean isFactionLocked()                 { return factionLocked; }
     public void    setFactionLocked(boolean v)       { this.factionLocked = v; }

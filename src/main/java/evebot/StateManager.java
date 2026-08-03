@@ -210,9 +210,22 @@ public class StateManager {
             if (fd != null) cs.setLastFactionDecline(fd);   // survives bot_state.json wipe
             Double st = standings.get(id);
             if (st != null) cs.setLastKnownStanding(st);     // survives bot_state.json wipe
+            applyStartupStandingsPause(cs);
             log("[StateManager] New client '" + id + "' starting in " + DEFAULT_START_STATE);
             return cs;
         });
+    }
+
+    /** Startup gate: the persisted standing survives restarts, but the pause flag doesn't — without
+     *  this a client restarted below the pause floor happily checks/declines until the next re-read.
+     *  NaN (unknown) standing never pauses. If both clients start below the floor, the pause gate's
+     *  no-partner-can-carry fallback un-pauses one of them, so the pair can't deadlock. */
+    private void applyStartupStandingsPause(ClientState cs) {
+        if (cs.getLastKnownStanding() < ClientManager.STANDINGS_PAUSE_FLOOR) {
+            cs.setStandingsPaused(true);
+            cs.setStandingsPauseFromPersisted(true);   // stale value — pause gate verifies with a live read
+            log("[StateManager] '" + cs.getClientId() + "' persisted standing below pause floor — starting standings-paused until the partner completes a mission.");
+        }
     }
 
     /** Returns another client's state (any client whose id differs from {@code clientId}),
@@ -271,6 +284,7 @@ public class StateManager {
                     cs.setLastKnownStanding(dto.lastKnownStanding != null ? dto.lastKnownStanding : Double.NaN);
                     Double st = standings.get(id);
                     if (st != null) cs.setLastKnownStanding(st);   // dedicated file wins — survives bot_state.json wipe
+                    applyStartupStandingsPause(cs);
                     LocalDateTime fd = factionDeclines.get(id);
                     if (fd != null) cs.setLastFactionDecline(fd);
                     if (dto.missionTitle != null || dto.missionTarget != null || dto.missionShipTarget != null) {

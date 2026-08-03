@@ -266,6 +266,30 @@ public class ClientManager {
         // will never come: clear the pause and work, so the pair can't deadlock.
         ClientState pausedCs = stateManager.getState(clientId);
         if (pausedCs.isStandingsPaused()) {
+            // Startup pause rests on the PERSISTED standing, which is stale by nature — the
+            // partner's turn-ins boost our standing without us ever re-reading it. Verify once
+            // with a live read at the agent (we start docked there) before honoring the pause:
+            // recovered above the floor → resume; still below (or unreadable) → stay paused.
+            if (pausedCs.isStandingsPauseFromPersisted()
+                    && missionProcessor.findTemplate("agent_icon") != null) {
+                pausedCs.setStandingsPauseFromPersisted(false);
+                log(clientId, "standings-paused (persisted) — verifying with a live standings read at the agent.");
+                missionProcessor.doubleClickAgentIcon();
+                missionProcessor.clickAgentStandings();
+                double standings = missionProcessor.readAgentStandings();
+                missionProcessor.closeStandingsDialog();
+                if (!Double.isNaN(standings)) {
+                    stateManager.recordStanding(clientId, standings);
+                    if (standings >= STANDINGS_PAUSE_FLOOR) {
+                        pausedCs.setStandingsPaused(false);
+                        log(clientId, "standings verified: back above the pause floor — resuming normal checking.");
+                        return;   // resume next tick from the top with a clean gate pass
+                    }
+                    log(clientId, "standings verified: still below the pause floor — staying paused.");
+                } else {
+                    log(clientId, "standings read failed — keeping the persisted pause.");
+                }
+            }
             ClientWindowInfo other = findOtherClient(clientId);
             if (other != null && !isParkedOrLocked(other.getClientId())
                     && !stateManager.getState(other.getClientId()).isStandingsPaused()) {
@@ -333,9 +357,9 @@ public class ClientManager {
     /**
      * Park a client for a graceful session end (Ctrl+Shift+R). Resets it to a clean docked
      * IDLE state (persisted, so the next launch starts cleanly from the agent), marks it parked
-     * so it does no further work, hands the foreground to whoever is still working, and minimizes
-     * its window so it is out of the rotation for good. Once every client has parked there is
-     * nothing left to drive, so the bot shuts itself down (same path as Ctrl+C).
+     * so it does no further work, and hands the foreground to whoever is still working. Windows
+     * are left as they are (not minimized). Once every client has parked there is nothing left
+     * to drive, so the bot shuts itself down (same path as Ctrl+C).
      */
     private void parkForSessionEnd(String clientId, String reason) {
         ClientState cs = stateManager.getState(clientId);
@@ -347,7 +371,6 @@ public class ClientManager {
         EventLog.log("SESSION_END", clientId + " — " + reason);
         ClientWindowInfo other = findOtherClient(clientId);
         if (other != null && !isParkedOrLocked(other.getClientId())) bringToForeground(other);
-        minimizeClient(clientId);
         if (allClientsParked()) {
             log("[ClientManager] SESSION END: every client is parked and docked — shutting down.");
             EventLog.log("SESSION_END", "all clients parked — bot exiting");
@@ -3993,7 +4016,7 @@ public class ClientManager {
      *   3 → SAFE WAIT 20s (gate load).
      *   4 → activate the next gate (right-click activate_gate → "mission_start"), press 's' twice. Switch.
      *   5 → SAFE WAIT 25s, then confirm warp has ended (warp_active gone) before locking.
-     *   6 → right-click 'scarlet' → approach, press 's' twice (1s gap). NO client switching from here — dedicate
+     *   6 → double-click 'scarlet' (approach), press 's' twice (1s gap). NO client switching from here — dedicate
      *       this client until she dies.
      *   7 → ctrl-click 'scarlet' (lock).
      *   8 → confirm the lock: poll 'locked_anire'; if not seen within SCARLET_LOCK_RETRY_SECS the
@@ -4089,7 +4112,7 @@ public class ClientManager {
                 break;
             }
             case 6: {
-                // Approach first: right-click the 'scarlet' overview row → Approach, then press 's'
+                // Approach first: double-click the 'scarlet' overview row (approach), then press 's'
                 // (prop mod) and 's' again after a beat to switch it back off.
                 // Dedicating this client until Anire dies — no switching from here. Don't click
                 // blind: if 'scarlet' isn't on screen (off-camera / stale frame), nudge the view and
@@ -4100,8 +4123,8 @@ public class ClientManager {
                     missionProcessor.nudgeView();
                     return;
                 }
-                log(clientId, "COMBAT[Scarlet] Step 6: right-click 'scarlet' → approach, press 's' twice (1s gap). No client switching from here.");
-                missionProcessor.rightClickAndSelect("scarlet", "approach");
+                log(clientId, "COMBAT[Scarlet] Step 6: double-click 'scarlet' (approach), press 's' twice (1s gap). No client switching from here.");
+                missionProcessor.doubleClickTemplate("scarlet");
                 missionProcessor.keyPressTwice("s", 1000);
                 cs.setCombatStep(7);
                 break;
@@ -4746,6 +4769,23 @@ public class ClientManager {
             }
         }
         if (!turnedIn) {
+            // The turn-in can be failing because the mission genuinely isn't completed — e.g.
+            // Scarlet warped home without the kill. The dialog then has no blue 'completed'
+            // checkmark and no fleet yes/no; the complete click only spawns an OK info popup, so
+            // it can never turn in. Quit it and go pick a new mission instead of proceeding on a
+            // mission still open. Checked only after the 3 retries so a flaky click/scan on a
+            // genuinely completed mission can't quit it.
+            if (missionProcessor.detectDialog(true) != MissionProcessor.DialogState.COMPLETED) {
+                log(clientId, "COMPLETING: turn-in failed and the dialog shows the mission NOT completed — quitting it and checking for a new mission.");
+                EventLog.log("COMPLETE_IMPOSSIBLE", clientId + " — mission not completed at turn-in (target still alive?), quit and re-checking");
+                ClientState failCs = stateManager.getState(clientId);
+                missionProcessor.quitMission();   // quit → Yes → Request Mission
+                failCs.setCurrentMission(null);
+                failCs.setTravelPhase(ClientState.TravelPhase.NONE);
+                failCs.setMissionCheckStartTime(LocalDateTime.MIN);
+                stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
+                return;
+            }
             log(clientId, "COMPLETING: turn-in never confirmed after 3 attempts — proceeding anyway.");
             EventLog.log("COMPLETE_UNCONFIRMED", clientId + " — mission turn-in not confirmed after 3 attempts");
         }
@@ -4814,12 +4854,12 @@ public class ClientManager {
         missionProcessor.clickRequestMission();
 
         // Switch to other client after requesting — gives the dialog time to load. Exception: if
-        // the other client is RETURNING (flying its mission back), don't hand it the foreground —
+        // the other client is flying its mission back to turn in, don't hand it the foreground —
         // keep checking missions here so we bank more standings before it turns its own in.
         ClientWindowInfo other = findOtherClient(clientId);
-        if (other != null && stateManager.getStateEnum(other.getClientId()) == ClientState.State.RETURNING) {
+        if (other != null && isReturningMission(other.getClientId())) {
             log(clientId, "COMPLETING: mission turned in — " + other.getClientId()
-                    + " is RETURNING, holding focus and proceeding with mission checking.");
+                    + " is returning its mission, holding focus and proceeding with mission checking.");
         } else if (other != null) {
             log(clientId, "COMPLETING: mission turned in — switching focus to " + other.getClientId());
             bringToForeground(other);
@@ -4829,6 +4869,13 @@ public class ClientManager {
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
+    /** True when the client is bringing a finished mission home to turn in: the one-shot RETURNING
+     *  setup state, or any later leg (WARPING/IDLE gate hops) flown with TravelPhase.RETURNING_HOME. */
+    private boolean isReturningMission(String clientId) {
+        return stateManager.getStateEnum(clientId) == ClientState.State.RETURNING
+                || stateManager.getState(clientId).getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME;
+    }
+
     /** Take-all standings threshold is normally 0.0, forced to take-all (regardless of our own
      *  standing) when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours,
      *  so the lagging client catches up. The same gap drives the leader's forced share. */
@@ -4836,7 +4883,7 @@ public class ClientManager {
 
     /** A client whose standing is below this at completion pauses (yields to the partner) until the
      *  partner turns in a mission, then resumes; re-pauses if still below on its next completion. */
-    private static final double STANDINGS_PAUSE_FLOOR = -1.5;
+    static final double STANDINGS_PAUSE_FLOOR = -1.2;
 
     /**
      * Pick the fleet reward (share vs take-all) from the agent's standing and click it.
@@ -5984,6 +6031,19 @@ public class ClientManager {
      * "eve_Meeshayl_Lancer" → "meeshayl_lancer".
      */
     private void bringToForeground(ClientWindowInfo window) {
+        // Never hand the foreground to a standings-paused client: it does no work and its pause
+        // gate would bounce focus straight back next tick — a constant, unnatural alt-tab
+        // ping-pong. It stays parked in the background until the partner's turn-in clears the
+        // pause. Exception: when the current foreground client can't work either (parked/locked),
+        // let the switch through so the paused client gets a tick and its no-partner-can-carry
+        // fallback can un-pause it.
+        if (stateManager.getState(window.getClientId()).isStandingsPaused()) {
+            ClientWindowInfo fg = getForegroundClient();
+            if (fg != null && !fg.getClientId().equals(window.getClientId())
+                    && !isParkedOrLocked(fg.getClientId())) {
+                return;
+            }
+        }
         String templateKey = window.getClientId()
                 .replaceFirst("^eve_", "")
                 .toLowerCase();
