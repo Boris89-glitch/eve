@@ -432,15 +432,21 @@ class TemplateMatcher:
         # templates dir is loaded under its filename stem, no registry entry
         # needed. classify_offer matches these to decline an offer immediately
         # (no OCR). Drop a PNG in to add another unwanted mission.
+        # 'lowsec_*' templates are conditional blocks (not hard rejects): classify_offer
+        # signals them to Java with a 'lowsec:' prefix so it can accept the offer when
+        # standing has gone negative and the destination system is quiet (ESI kill check).
         for ext in (".png", ".jpg", ".bmp"):
-            for path in sorted(directory.glob("mission_reject_*" + ext)):
-                key = path.stem
-                if key in self.templates:
-                    continue
-                img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-                if img is not None:
-                    self.templates[key] = img
-                    log.debug("Loaded auto-reject template '%s' (%s)", key, path.name)
+            for prefix in ("mission_reject_", "lowsec_"):
+                for path in sorted(directory.glob(prefix + "*" + ext)):
+                    key = path.stem
+                    if key in self.templates:
+                        continue
+                    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+                    if img is not None:
+                        self.templates[key] = img
+                        log.debug("Loaded %s template '%s' (%s)",
+                                  "auto-reject" if prefix == "mission_reject_" else "lowsec",
+                                  key, path.name)
 
     def status(self) -> str:
         loaded = sorted(self.templates.keys())
@@ -2389,6 +2395,15 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
                 hit = matcher.find(reject_key, screen=screen)  # crop smaller than template
             if hit:
                 return {"ok": True, "value": "reject:" + reject_key}
+        # Conditional low-sec blocks: normally declined, but Java may accept when
+        # standing is negative and the destination system is quiet (see ESI check).
+        for lowsec_key in sorted(k for k in matcher.templates if k.startswith("lowsec_")):
+            try:
+                hit = matcher.find(lowsec_key, screen=search)
+            except Exception:
+                hit = matcher.find(lowsec_key, screen=screen)
+            if hit:
+                return {"ok": True, "value": "lowsec:" + lowsec_key}
         # Evolution — never decline, never run. Signalled to Java so it leaves the
         # offer for manual handling, closes the dialog, and locks the faction agent.
         if "mission_evolution" in matcher.templates:

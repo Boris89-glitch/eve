@@ -25,6 +25,14 @@ public class ClientManager {
     private final MissionConfig    missionConfig;
     private final Gson             gson;
 
+    /** Max last-hour ship kills (ESI) that still counts a gated low-sec system as "quiet"
+     *  enough to accept its offer when standing is negative. */
+    private static final int LOWSEC_MAX_SHIP_KILLS = 1;
+    /** 'lowsec_*' offer template stem -> ESI solar-system id whose last-hour ship_kills gates
+     *  acceptance. Loaded once (lazily) from config/lowsec_systems.json. */
+    private Map<String, Integer> lowsecSystems = null;
+    private int lowsecDefaultSystemId = 30002050; // Hagilur
+
     private final Map<String, Rectangle>        clientMissionAreas = new ConcurrentHashMap<>();
     private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
     private final Map<String, Integer>          agentRetries       = new ConcurrentHashMap<>();
@@ -101,7 +109,7 @@ public class ClientManager {
     private static final java.util.Set<String> KNOWN_COMBAT_TARGETS = new java.util.HashSet<>(
             java.util.Arrays.asList("jaguar", "vengeance", "enyo", "enya", "hawk", "sansha",
                     "infested", "recon1", "scarlet", "pot", "prophecy", "angel", "worm",
-                    "guristas", "guristasbumer"));
+                    "guristas", "guristasbumer", "serpentis"));
     /** Team combats: how many times the final completion backstop may be extended while the main
      *  is still locked (fight running long) before we stop waiting anyway. */
     private static final int  COMPLETION_BACKSTOP_MAX_EXTENSIONS = 4;
@@ -1557,6 +1565,76 @@ public class ClientManager {
             return;
         }
 
+        // --- Low-sec conditional block (e.g. Hagilur) --------------------
+        // A 'lowsec_*' template matched. Default is to decline like a hard reject,
+        // BUT once our standing has gone negative we accept the offer if the gated
+        // system is quiet: ESI last-hour ship_kills <= LOWSEC_MAX_SHIP_KILLS (a rough
+        // "no gate camp" check). ESI failure or too many kills -> safe default (decline).
+        if (missionTemplate != null && missionTemplate.startsWith("lowsec:")) {
+            String lowsecKey = missionTemplate.substring("lowsec:".length());
+            MissionProcessor.DialogState lsDialog = missionProcessor.detectDialog();
+            if (lsDialog != MissionProcessor.DialogState.OFFER) {
+                if (lsDialog == MissionProcessor.DialogState.NOT_COMPLETE
+                        || lsDialog == MissionProcessor.DialogState.ALREADY_ACCEPTED) {
+                    log(clientId, "Low-sec template '" + lowsecKey
+                            + "' matched on an accepted mission — quitting it and requesting a new one.");
+                    cs.setCurrentMission(null);
+                    missionProcessor.quitMission();
+                    return;
+                }
+                log(clientId, "Low-sec template '" + lowsecKey
+                        + "' matched but no live OFFER dialog — requesting new mission.");
+                missionProcessor.clickRequestMission();
+                return;
+            }
+
+            double standing = cs.getLastKnownStanding();
+            if (standing >= 0) {
+                System.out.println(">>> [" + clientId + "] DECLINE — low-sec block "
+                        + lowsecKey + " (standing " + standing + " >= 0)");
+                log(clientId, "Low-sec offer '" + lowsecKey + "' declined — standing "
+                        + standing + " not negative.");
+                countDeclineForStandings(clientId, cs);
+                missionProcessor.clickDeclineButton();
+                stateManager.setState(clientId, ClientState.State.DECLINING);
+                return;
+            }
+
+            int systemId  = lowsecSystemId(lowsecKey);
+            int shipKills = EsiKills.shipKillsLastHour(systemId);
+            if (shipKills >= 0 && shipKills <= LOWSEC_MAX_SHIP_KILLS) {
+                Mission ls = missionProcessor.readMission(getMissionAreaForClient(clientId));
+                if (ls == null) {
+                    log(clientId, "Low-sec accept: OCR returned null on the offer — retrying next tick.");
+                    return;
+                }
+                cs.setCurrentMission(ls);
+                seedRouteDestinationFromOffer(clientId, cs, ls);
+                stampTextIdentifiedTarget(clientId, cs, ls);
+                System.out.println(">>> [" + clientId + "] ACCEPT — low-sec " + lowsecKey
+                        + " (standing " + standing + " < 0, system " + systemId
+                        + " ship_kills=" + shipKills + " <= " + LOWSEC_MAX_SHIP_KILLS + ")");
+                EventLog.log("LOWSEC_ACCEPT", clientId + " — " + lowsecKey + " accepted; system "
+                        + systemId + " ship_kills=" + shipKills + ", standing=" + standing);
+                if (!missionProcessor.clickAcceptButton()) {
+                    log(clientId, "Low-sec ACCEPT failed — offer still on screen, retrying next tick.");
+                    return;
+                }
+                stateManager.setState(clientId, ClientState.State.ACCEPTED);
+                return;
+            }
+
+            System.out.println(">>> [" + clientId + "] DECLINE — low-sec " + lowsecKey
+                    + " (standing " + standing + " < 0 but system " + systemId + " ship_kills="
+                    + shipKills + (shipKills < 0 ? ", ESI lookup failed)" : " > " + LOWSEC_MAX_SHIP_KILLS + ")"));
+            log(clientId, "Low-sec offer '" + lowsecKey + "' declined — system " + systemId
+                    + " ship_kills=" + shipKills + (shipKills < 0 ? " (ESI lookup failed)" : "") + ".");
+            countDeclineForStandings(clientId, cs);
+            missionProcessor.clickDeclineButton();
+            stateManager.setState(clientId, ClientState.State.DECLINING);
+            return;
+        }
+
         // --- Evolution fast path -----------------------------------------
         // The 'evolution' template matched: never decline. Confirm a live OFFER
         // first so a stale match doesn't act, then park it (leave + close + lock).
@@ -1776,6 +1854,37 @@ public class ClientManager {
     }
 
     /** Click accept/decline for a decided mission and transition state. */
+    /** ESI system id gated by a 'lowsec_*' offer template, falling back to the configured
+     *  default (Hagilur) when the template isn't listed. */
+    private int lowsecSystemId(String templateKey) {
+        if (lowsecSystems == null) loadLowsecSystems();
+        Integer id = lowsecSystems.get(templateKey);
+        return id != null ? id : lowsecDefaultSystemId;
+    }
+
+    private void loadLowsecSystems() {
+        lowsecSystems = new HashMap<>();
+        for (Path p : new Path[]{Paths.get("config", "lowsec_systems.json"),
+                                 Paths.get("lowsec_systems.json")}) {
+            try {
+                if (!Files.exists(p)) continue;
+                JsonObject json = gson.fromJson(new String(Files.readAllBytes(p)), JsonObject.class);
+                if (json.has("default_system_id")) {
+                    lowsecDefaultSystemId = json.get("default_system_id").getAsInt();
+                }
+                if (json.has("systems")) {
+                    for (Map.Entry<String, com.google.gson.JsonElement> e
+                            : json.getAsJsonObject("systems").entrySet()) {
+                        lowsecSystems.put(e.getKey(), e.getValue().getAsInt());
+                    }
+                }
+                return;
+            } catch (Exception e) {
+                System.out.println("Failed to load " + p + ": " + e.getMessage());
+            }
+        }
+    }
+
     private void applyDecision(String clientId, Mission mission, MissionConfig.Decision decision) {
         if (decision == MissionConfig.Decision.ACCEPT) {
             System.out.println(">>> [" + clientId + "] ACCEPT — " + mission.getTitle());
@@ -2301,7 +2410,8 @@ public class ClientManager {
         // "Unknown", null). Re-resolve the two missions we identify by text before treating the
         // target as unknown, so they run their sequence instead of the completion-poll fallback.
         if (resolvedTarget == null || !KNOWN_COMBAT_TARGETS.contains(resolvedTarget.toLowerCase())) {
-            String recovered = isPotMission(cs) ? "pot" : isScarletMission(cs) ? "scarlet" : null;
+            String recovered = isPotMission(cs) ? "pot" : isScarletMission(cs) ? "scarlet"
+                    : isSerpentisMission(cs) ? "serpentis" : null;
             if (recovered != null) {
                 log(clientId, "IN_COMBAT: target '" + resolvedTarget + "' doesn't name a combat sequence — "
                         + "mission text identifies it as '" + recovered + "'.");
@@ -2377,6 +2487,9 @@ public class ClientManager {
             case "guristasbumer":
                 handleCombatWorm(clientId, cs);
                 break;
+            case "serpentis":
+                handleCombatSerpentis(clientId, cs);
+                break;
             default:
                 // Unresolved target — we have no combat sequence to run for it. Poll for completion
                 // in case the mission ends on its own, but never spin here forever: a recognised
@@ -2400,6 +2513,80 @@ public class ClientManager {
                     parkClient(clientId, "IN_COMBAT unresolved target '" + target + "'");
                 }
                 break;
+        }
+    }
+
+    /**
+     * Serpentis burner combat sequence (manual recipe from the user). Dormant until
+     * acceptance is enabled — Serpentis is still auto-declined by config, so shipTarget
+     * 'serpentis' only occurs once the accept path is wired and templates/target_serpentis.png
+     * exists.
+     *
+     * Steps:
+     *   0 → make target_serpentis visible (nudge), Ctrl+click to lock it
+     *   1 → 3s lock settle, then press 'asdx' (activate modules)
+     *   2 → 15s wait, then press 'c'
+     *   3 → 20s wait, then Alt+F1 (cap booster) + Shift+a (overload rockets)
+     *   4 → poll for mission complete (set_destination / dock / pod check)
+     */
+    private void handleCombatSerpentis(String clientId, ClientState cs) {
+        int step = cs.getCombatStep();
+        switch (step) {
+            case 0: {
+                String tk = awaitCombatTarget(clientId, cs, "target_serpentis");
+                if (tk == null) return; // not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[Serpentis] Step 0: Ctrl+click " + tk + " (lock target).");
+                missionProcessor.ctrlClickTemplate("target_serpentis");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(1);
+                break;
+            }
+            case 1: {
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 3) return; // lock animation
+                log(clientId, "COMBAT[Serpentis] Step 1: press 'asdx' (activate modules).");
+                missionProcessor.keyPress("asdx");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(2);
+                break;
+            }
+            case 2: {
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 15) {
+                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 15s (before 'c').");
+                    return;
+                }
+                log(clientId, "COMBAT[Serpentis] Step 2: press 'c'.");
+                missionProcessor.keyPress("c");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(3);
+                break;
+            }
+            case 3: {
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 20) {
+                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 20s (before cap booster + overload).");
+                    return;
+                }
+                log(clientId, "COMBAT[Serpentis] Step 3: Alt+F1 (cap booster) + Shift+a (overload rockets).");
+                missionProcessor.altKeyPress("f1");
+                missionProcessor.shiftKeyPress("a");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(4);
+                ClientWindowInfo other = findOtherClient(clientId);
+                if (other != null) {
+                    log(clientId, "COMBAT[Serpentis] waiting for mission complete — switching to: " + other.getClientId());
+                    bringToForeground(other);
+                }
+                break;
+            }
+            case 4: {
+                pollSetDestinationOrCapsule(clientId, cs, "Serpentis", true);
+                break;
+            }
+            default:
+                log(clientId, "COMBAT[Serpentis] unexpected step " + step + " — resetting.");
+                cs.setCombatStep(0);
         }
     }
 
@@ -4029,7 +4216,8 @@ public class ClientManager {
         if (m == null) return;
         String t = m.getShipTarget() != null ? m.getShipTarget() : m.getTarget();
         if (t != null && KNOWN_COMBAT_TARGETS.contains(t.toLowerCase())) return;
-        String kind = isPotMission(cs) ? "pot" : isScarletMission(cs) ? "scarlet" : null;
+        String kind = isPotMission(cs) ? "pot" : isScarletMission(cs) ? "scarlet"
+                : isSerpentisMission(cs) ? "serpentis" : null;
         if (kind == null) return;
         m.setShipTarget(kind);
         log(clientId, "Mission text identifies '" + kind + "' — combat target set (OCR target was '" + t + "').");
@@ -4062,6 +4250,15 @@ public class ClientManager {
         // hides inside ordinary words), so only the distinctive forms are used.
         String text = missionText(cs);
         return text.contains("pot and kettle") || text.contains("kettle") || text.contains("prophecy");
+    }
+
+    /** True if the client's current mission is a Serpentis burner. */
+    private boolean isSerpentisMission(ClientState cs) {
+        Mission m = cs.getCurrentMission();
+        if (m == null) return false;
+        String t = m.getShipTarget() != null ? m.getShipTarget() : m.getTarget();
+        if ("serpentis".equalsIgnoreCase(t)) return true;
+        return missionText(cs).contains("serpentis");
     }
 
     /** Missions where warp_to_location drops us straight into the pocket — there is no

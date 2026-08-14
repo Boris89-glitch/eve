@@ -33,6 +33,12 @@
       "comment": "Angel target solo burner"
     },
     {
+      "ship_template": "ship_serpentis",
+      "ship_display": "ship_serpentis",
+      "title_contains": ["serpentis"],
+      "comment": "Serpentis target solo burner — needs templates/ship_serpentis.png"
+    },
+    {
       "ship_template": "ship_infested",
       "ship_display": "ship_infested (Daredevil hull)",
       "title_contains": ["infested", "ruins", "recon (1 of", "recon 1 of"],
