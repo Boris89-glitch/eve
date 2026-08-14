@@ -28,6 +28,8 @@ public class ClientManager {
     /** Max last-hour ship kills (ESI) that still counts a gated low-sec system as "quiet"
      *  enough to accept its offer when standing is negative. */
     private static final int LOWSEC_MAX_SHIP_KILLS = 1;
+    /** Only consider accepting a low-sec offer once standing has dropped below this. */
+    private static final double LOWSEC_MIN_STANDING = -0.5;
     /** 'lowsec_*' offer template stem -> ESI solar-system id whose last-hour ship_kills gates
      *  acceptance. Loaded once (lazily) from config/lowsec_systems.json. */
     private Map<String, Integer> lowsecSystems = null;
@@ -1589,11 +1591,11 @@ public class ClientManager {
             }
 
             double standing = cs.getLastKnownStanding();
-            if (standing >= 0) {
+            if (standing >= LOWSEC_MIN_STANDING) {
                 System.out.println(">>> [" + clientId + "] DECLINE — low-sec block "
-                        + lowsecKey + " (standing " + standing + " >= 0)");
+                        + lowsecKey + " (standing " + standing + " >= " + LOWSEC_MIN_STANDING + ")");
                 log(clientId, "Low-sec offer '" + lowsecKey + "' declined — standing "
-                        + standing + " not negative.");
+                        + standing + " not below " + LOWSEC_MIN_STANDING + ".");
                 countDeclineForStandings(clientId, cs);
                 missionProcessor.clickDeclineButton();
                 stateManager.setState(clientId, ClientState.State.DECLINING);
@@ -1612,7 +1614,7 @@ public class ClientManager {
                 seedRouteDestinationFromOffer(clientId, cs, ls);
                 stampTextIdentifiedTarget(clientId, cs, ls);
                 System.out.println(">>> [" + clientId + "] ACCEPT — low-sec " + lowsecKey
-                        + " (standing " + standing + " < 0, system " + systemId
+                        + " (standing " + standing + " < " + LOWSEC_MIN_STANDING + ", system " + systemId
                         + " ship_kills=" + shipKills + " <= " + LOWSEC_MAX_SHIP_KILLS + ")");
                 EventLog.log("LOWSEC_ACCEPT", clientId + " — " + lowsecKey + " accepted; system "
                         + systemId + " ship_kills=" + shipKills + ", standing=" + standing);
@@ -1625,7 +1627,7 @@ public class ClientManager {
             }
 
             System.out.println(">>> [" + clientId + "] DECLINE — low-sec " + lowsecKey
-                    + " (standing " + standing + " < 0 but system " + systemId + " ship_kills="
+                    + " (standing " + standing + " < " + LOWSEC_MIN_STANDING + " but system " + systemId + " ship_kills="
                     + shipKills + (shipKills < 0 ? ", ESI lookup failed)" : " > " + LOWSEC_MAX_SHIP_KILLS + ")"));
             log(clientId, "Low-sec offer '" + lowsecKey + "' declined — system " + systemId
                     + " ship_kills=" + shipKills + (shipKills < 0 ? " (ESI lookup failed)" : "") + ".");
