@@ -198,7 +198,6 @@ TEMPLATE_FILES = {
     "mission_infested": "mission_infested",  # → ship_infested  (Infested Ruins)
     "mission_scarlet": "mission_scarlet",  # → ship_infested  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
-    "pot": "pot",  # Pot and Kettle offer dialog → ship_infested  (standings-gated: standing < -0.7)
     "mission_evolution": "evolution",  # evolution.png → never run: leave for manual handling, lock faction agent
     # Ship templates — one per ship icon in your hangar
     "ship_garmur": "ship_garmur",
@@ -300,7 +299,6 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_angel",     "ship_angel",   None),
     ("mission_infested",  "ship_infested", ["infested", "hive", "ruins"]),
     ("mission_scarlet",   "ship_infested", None),
-    ("pot",               "ship_infested", None),  # Pot and Kettle — Infested hull vs the Prophecy
 ]
 
 # -----------------------------------------------------------------------------

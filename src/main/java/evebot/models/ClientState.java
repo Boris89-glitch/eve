@@ -334,6 +334,10 @@ public class ClientState {
      *  Bounds that retry loop so a route that can't be read doesn't strand the client at the gate. */
     private int scarletRouteAttempts = 0;
 
+    /** Scarlet: step-6 view nudges issued while the 'scarlet' overview row stayed off screen.
+     *  Bounds that hold — after 2 nudges the approach is abandoned and the client heads home. */
+    private int scarletFindAttempts = 0;
+
     /** Ticks spent at 0 jumps from home with neither the dock button nor home_station on screen.
      *  Bounds the "we're home, dock on the station instead of jumping a gate" hold: if the station
      *  never shows, the count is off and we fall back to the stargate. Cleared once we dock. */
@@ -467,6 +471,7 @@ public class ClientState {
             this.combatWarpSeen = false;
             this.warpEndMisses = 0;
             this.scarletRouteAttempts = 0;
+            this.scarletFindAttempts = 0;
             this.scarletRouteUnconfirmed = false;
             this.completionBackstopExtensions = 0;
             this.lastViewNudge = LocalDateTime.MIN;
@@ -655,6 +660,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public int  getScarletRouteAttempts()      { return scarletRouteAttempts; }
     public void setScarletRouteAttempts(int v) { this.scarletRouteAttempts = v; }
+
+    public int  getScarletFindAttempts()       { return scarletFindAttempts; }
+    public void setScarletFindAttempts(int v)  { this.scarletFindAttempts = v; }
 
     public int  getHomeDockMissCount()      { return homeDockMissCount; }
     public void setHomeDockMissCount(int v) { this.homeDockMissCount = v; }

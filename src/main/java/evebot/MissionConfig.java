@@ -60,23 +60,12 @@ public class MissionConfig {
     /** Recon is skipped once agent standing climbs above this, in high sec as well as null sec. */
     private static final double RECON_MAX_STANDING = 2.0;
 
-    /** Pot and Kettle is skipped once agent standing reaches this, in high sec as well as null sec. */
-    private static final double POT_MAX_STANDING = 0.0;
-
     /** True if this offer is a Recon mission. The title wraps and OCRs inconsistently
      *  ("Recon 1 of 3" / "Recon1of3"), so the raw dialog text is checked too. */
     private static boolean isRecon(Mission m) {
         String title = m.getTitle()   == null ? "" : m.getTitle().toLowerCase();
         String raw   = m.getRawText() == null ? "" : m.getRawText().toLowerCase();
         return title.contains("recon") || raw.contains("recon");
-    }
-
-    /** True if this offer is Pot and Kettle. Same OCR caveat as Recon — the title merges with
-     *  neighbouring lines, so the raw dialog text is checked too. */
-    private static boolean isPot(Mission m) {
-        String title = m.getTitle()   == null ? "" : m.getTitle().toLowerCase();
-        String raw   = m.getRawText() == null ? "" : m.getRawText().toLowerCase();
-        return title.contains("kettle") || raw.contains("kettle");
     }
 
     /**
@@ -107,17 +96,6 @@ public class MissionConfig {
             if (!Double.isNaN(s) && s > RECON_MAX_STANDING) {
                 System.out.printf("[DECISION] DECLINE — %s  (recon: standing > %.1f)%n",
                         mission.getTitle(), RECON_MAX_STANDING);
-                return Decision.DECLINE;
-            }
-        }
-
-        // 1c. Same hard ceiling for Pot and Kettle: only run it while standing is below 0,
-        //     high sec included. NaN (standing not yet known) passes, as above.
-        if (isPot(mission)) {
-            double s = normalizeStanding(standing);
-            if (!Double.isNaN(s) && s >= POT_MAX_STANDING) {
-                System.out.printf("[DECISION] DECLINE — %s  (pot and kettle: standing ≥ %.1f)%n",
-                        mission.getTitle(), POT_MAX_STANDING);
                 return Decision.DECLINE;
             }
         }
@@ -162,11 +140,24 @@ public class MissionConfig {
      * when we have a reading that is at/above the max.
      */
     private Decision gatedDecision(Mission mission, Rule rule, double standing) {
-        // High sec: we always run the standings-gated missions (Scarlet, Recon 1) regardless of
-        // standing — drop the gate entirely. Null sec keeps it (accept only while standing is low).
+        // High sec: the standings-gated missions (Recon 1) run regardless of standing — the
+        // gate is dropped. Scarlet is the exception: it keeps a gate of 0 even here, so it
+        // only runs while the standing is negative. Null sec keeps the rules' own gates.
         if (Environment.isHighSec()) {
-            System.out.printf("[DECISION] ACCEPT  — %s  (rule: %s; high sec → standing gate ignored)%n",
-                    mission.getTitle(), rule.comment);
+            String title = mission.getTitle() == null ? "" : mission.getTitle().toLowerCase();
+            if (!(title.contains("scarlet") || title.contains("anire"))) {
+                System.out.printf("[DECISION] ACCEPT  — %s  (rule: %s; high sec → standing gate ignored)%n",
+                        mission.getTitle(), rule.comment);
+                return Decision.ACCEPT;
+            }
+            if (!Double.isNaN(standing) && normalizeStanding(standing) >= 0) {
+                System.out.printf("[DECISION] DECLINE — %s  (rule: %s; high sec Scarlet gate: standing ≥ 0)%n",
+                        mission.getTitle(), rule.comment);
+                return Decision.DECLINE;
+            }
+            System.out.printf("[DECISION] ACCEPT  — %s  (rule: %s; high sec Scarlet gate: %s)%n",
+                    mission.getTitle(), rule.comment,
+                    Double.isNaN(standing) ? "standing not yet known → accept" : "standing < 0");
             return Decision.ACCEPT;
         }
         if (Double.isNaN(standing)) {

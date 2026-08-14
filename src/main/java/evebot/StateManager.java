@@ -47,6 +47,10 @@ public class StateManager {
      *  (which is cleared every restart). Maps clientId → last faction-decline time. */
     private static final Path FACTION_FILE = Paths.get("config", "faction_decline.json");
     private final Map<String, LocalDateTime> factionDeclines = new ConcurrentHashMap<>();
+    /** Last faction-agent check times, same scheme as the declines: their own file so the 2h
+     *  check cadence survives restarts — otherwise every restart checks the agent immediately. */
+    private static final Path FACTION_CHECK_FILE = Paths.get("config", "faction_check.json");
+    private final Map<String, LocalDateTime> factionChecks = new ConcurrentHashMap<>();
     /** Last known agent standings live in their own file so they survive a bot_state.json wipe
      *  (which is cleared every restart) — otherwise every restart re-starts with unknown standings.
      *  Maps clientId → last read standing. */
@@ -73,6 +77,7 @@ public class StateManager {
                 .create();
 
         loadFactionDeclines();   // before loadStates so loaded clients pick up their decline time
+        loadFactionChecks();     // same — so a restart doesn't re-check the faction agent early
         loadStandings();         // before loadStates so loaded clients pick up their standing
         loadPodAvoid();
         loadStates();
@@ -208,6 +213,8 @@ public class StateManager {
             cs.setState(DEFAULT_START_STATE);
             LocalDateTime fd = factionDeclines.get(id);
             if (fd != null) cs.setLastFactionDecline(fd);   // survives bot_state.json wipe
+            LocalDateTime fc = factionChecks.get(id);
+            if (fc != null) cs.setLastFactionCheck(fc);      // survives bot_state.json wipe
             Double st = standings.get(id);
             if (st != null) cs.setLastKnownStanding(st);     // survives bot_state.json wipe
             applyStartupStandingsPause(cs);
@@ -287,6 +294,8 @@ public class StateManager {
                     applyStartupStandingsPause(cs);
                     LocalDateTime fd = factionDeclines.get(id);
                     if (fd != null) cs.setLastFactionDecline(fd);
+                    LocalDateTime fc = factionChecks.get(id);
+                    if (fc != null) cs.setLastFactionCheck(fc);
                     if (dto.missionTitle != null || dto.missionTarget != null || dto.missionShipTarget != null) {
                         Mission m = new Mission();
                         m.setTitle(dto.missionTitle);
@@ -357,6 +366,35 @@ public class StateManager {
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
         } catch (Exception e) {
             System.err.println("[StateManager] Failed to save faction declines: " + e.getMessage());
+        }
+    }
+
+    private void loadFactionChecks() {
+        if (!Files.exists(FACTION_CHECK_FILE)) return;
+        try {
+            String json = new String(Files.readAllBytes(FACTION_CHECK_FILE));
+            Type t = new TypeToken<Map<String, LocalDateTime>>(){}.getType();
+            Map<String, LocalDateTime> m = gson.fromJson(json, t);
+            if (m != null) {
+                factionChecks.putAll(m);
+                log("[StateManager] Loaded " + factionChecks.size() + " faction check time(s) from disk.");
+            }
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to load faction checks: " + e.getMessage());
+        }
+    }
+
+    /** Record a faction-agent check for a client — updates the in-memory state and persists so
+     *  the 2h check cadence survives restarts (no more checking the agent on every restart). */
+    public void recordFactionCheck(String clientId, LocalDateTime when) {
+        factionChecks.put(clientId, when);
+        getState(clientId).setLastFactionCheck(when);
+        try {
+            Files.createDirectories(FACTION_CHECK_FILE.getParent());
+            Files.write(FACTION_CHECK_FILE, gson.toJson(factionChecks).getBytes(),
+                    StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
+        } catch (Exception e) {
+            System.err.println("[StateManager] Failed to save faction checks: " + e.getMessage());
         }
     }
 
