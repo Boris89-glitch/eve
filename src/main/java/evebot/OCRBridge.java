@@ -532,6 +532,17 @@ public class OCRBridge {
     }
 
     /**
+     * Blood Raider prep: pull cap charges out of the 'giant_freighter' in the ship hangar and
+     * drop them into {@code shipTemplate}. Returns true if the drag completed, false on any miss.
+     */
+    public boolean loadCapCharges(String shipTemplate) {
+        dbg("[%s] [" + activeClient + "] loadCapCharges -> %s%n", ts(), shipTemplate);
+        JsonObject c = cmd("load_cap_charges");
+        c.addProperty("ship", shipTemplate);
+        return sendBool(c);
+    }
+
+    /**
      * E+left-click: hold the E key while left-clicking the template centre.
      * Used for stargate jumps and activate-gate interactions.
      */
@@ -635,6 +646,13 @@ public class OCRBridge {
     public void altKeyPress(String key) {
         dbg("[%s] [" + activeClient + "] altKeyPress: %s%n", ts(), key);
         JsonObject c = cmd("alt_key_press");
+        c.addProperty("key", key);
+        sendAction(c);
+    }
+
+    public void altShiftKeyPress(String key) {
+        dbg("[%s] [" + activeClient + "] altShiftKeyPress: %s%n", ts(), key);
+        JsonObject c = cmd("alt_shift_key_press");
         c.addProperty("key", key);
         sendAction(c);
     }

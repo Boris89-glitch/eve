@@ -902,6 +902,32 @@ class TemplateMatcher:
             log.info("pyautogui Alt+%s sent", key)
         time.sleep(delay)
 
+    def _do_alt_shift_key_press(self, key: str, delay: float = 0.3):
+        """Hold Alt+Shift and press a key (e.g. 'f1' for Alt+Shift+F1)."""
+        VK_MENU = 0x12   # Alt
+        VK_SHIFT = 0x10  # Shift
+        VK_MAP = {"f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73}
+        try:
+            import win32api, win32con
+
+            vk = VK_MAP.get(key.lower())
+            if vk is None:
+                vk = ord(key.upper())
+            win32api.keybd_event(VK_MENU, 0, 0, 0)    # Alt down
+            win32api.keybd_event(VK_SHIFT, 0, 0, 0)   # Shift down
+            time.sleep(0.05)
+            win32api.keybd_event(vk, 0, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(vk, 0, win32con.KEYEVENTF_KEYUP, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(VK_SHIFT, 0, win32con.KEYEVENTF_KEYUP, 0)  # Shift up
+            win32api.keybd_event(VK_MENU, 0, win32con.KEYEVENTF_KEYUP, 0)   # Alt up
+            log.info("win32 Alt+Shift+%s sent", key)
+        except ImportError:
+            pyautogui.hotkey('alt', 'shift', key)
+            log.info("pyautogui Alt+Shift+%s sent", key)
+        time.sleep(delay)
+
     # -- click helpers ---------------------------------------------------------
 
     def click(self, key: str, screen=None, threshold=None, delay: float = 0.3) -> bool:
@@ -2256,6 +2282,43 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         time.sleep(0.3)
         return {"ok": True, "value": True}
 
+    if cmd == "load_cap_charges":
+        # Blood Raider prep: pull cap charges out of the 'giant_freighter' (in the ship
+        # hangar) and drop them into our ship. Runs after ship select + repair, before undock.
+        # If the freighter isn't visible, find_ship_with_scroll hovers the hangar scroll point
+        # (HANGAR_SCROLL_XY) and scrolls down to reveal lower rows. Returns False on any miss.
+        ship_template = msg.get("ship", "ship_bloodraider")
+        freighter = find_ship_with_scroll(matcher, "giant_freighter")
+        if not freighter:
+            log.warning("load_cap_charges: giant_freighter not found (even after scrolling).")
+            return {"ok": True, "value": False}
+        fcx, fcy = matcher.center(freighter)
+        log.info("load_cap_charges: clicking giant_freighter at (%d,%d) to reveal its cargo.", fcx, fcy)
+        matcher._do_click(fcx, fcy, button="left", delay=0.5)
+        charges = matcher.wait_for("cap_charges", timeout=3.0)
+        if not charges:
+            log.warning("load_cap_charges: cap_charges not visible after opening the freighter.")
+            return {"ok": True, "value": False}
+        ship = matcher.wait_for(ship_template, timeout=2.0) or find_ship_with_scroll(matcher, ship_template)
+        if not ship:
+            log.warning("load_cap_charges: drop-target ship '%s' not found.", ship_template)
+            return {"ok": True, "value": False}
+        scx, scy = matcher.center(charges)
+        dcx, dcy = matcher.center(ship)
+        log.info("load_cap_charges: dragging cap_charges (%d,%d) -> %s (%d,%d).",
+                 scx, scy, ship_template, dcx, dcy)
+        pyautogui.moveTo(scx, scy, duration=0.1)
+        pyautogui.mouseDown(button="left")
+        time.sleep(0.25)
+        pyautogui.moveTo(dcx, dcy, duration=0.4)
+        time.sleep(0.25)
+        pyautogui.mouseUp(button="left")
+        time.sleep(0.3)
+        # Confirm the item-move dialog (quantity / capacity prompt) if one appears.
+        if matcher.click("ok"):
+            log.info("load_cap_charges: clicked 'ok' to confirm the move.")
+        return {"ok": True, "value": True}
+
     if cmd == "key_press":
         matcher._do_key_press(msg["keys"], delay=DAEMON_CLICK_DELAY)
         return {"ok": True, "value": True}
@@ -2267,6 +2330,10 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         return {"ok": True, "value": True}
     if cmd == "alt_key_press":
         matcher._do_alt_key_press(msg["key"], delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+
+    if cmd == "alt_shift_key_press":
+        matcher._do_alt_shift_key_press(msg["key"], delay=DAEMON_CLICK_DELAY)
         return {"ok": True, "value": True}
 
     if cmd == "ctrl_r":

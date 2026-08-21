@@ -721,6 +721,18 @@ public class MissionProcessor {
         sleep(POST_CLICK_DELAY_MS);
     }
 
+    public void altShiftKeyPress(String key) {
+        log("Alt+Shift+pressing key: " + key);
+        ocrBridge.altShiftKeyPress(key);
+        sleep(POST_CLICK_DELAY_MS);
+    }
+
+    /** Blood Raider prep: drag cap charges out of the Giant Freighter into our ship. */
+    public boolean loadCapCharges(String shipTemplate) {
+        log("Loading cap charges from Giant Freighter into " + shipTemplate);
+        return ocrBridge.loadCapCharges(shipTemplate);
+    }
+
     public void clickTemplateBelow(String key, int offsetY) {
         log("Clicking template: " + key + " (+" + offsetY + "px below centre)");
         ocrBridge.clickTemplateBelow(key, offsetY);

@@ -111,7 +111,7 @@ public class ClientManager {
     private static final java.util.Set<String> KNOWN_COMBAT_TARGETS = new java.util.HashSet<>(
             java.util.Arrays.asList("jaguar", "vengeance", "enyo", "enya", "hawk", "sansha",
                     "infested", "recon1", "scarlet", "pot", "prophecy", "angel", "worm",
-                    "guristas", "guristasbumer", "serpentis"));
+                    "guristas", "guristasbumer", "serpentis", "bloodraider"));
     /** Team combats: how many times the final completion backstop may be extended while the main
      *  is still locked (fight running long) before we stop waiting anyway. */
     private static final int  COMPLETION_BACKSTOP_MAX_EXTENSIONS = 4;
@@ -2044,6 +2044,17 @@ public class ClientManager {
         String result = missionProcessor.performUndockStart(mission);
 
         if (MissionProcessor.UNDOCK_OK.equals(result)) {
+            // Blood Raider: load cap charges from the Giant Freighter before leaving station.
+            // Undocking under-equipped would lose the mission, so a hard miss parks the client.
+            if (isBloodRaiderMission(stateManager.getState(clientId))) {
+                log(clientId, "Blood Raider — loading cap charges from Giant Freighter before undock.");
+                if (!missionProcessor.loadCapCharges("ship_bloodraider")) {
+                    EventLog.log("CAP_LOAD_FAILED", clientId + " — Giant Freighter / cap charges not loaded");
+                    soundAlert(NO_SHIP_ALERT);
+                    parkClient(clientId, "cap charge load failed (Blood Raider)");
+                    return;
+                }
+            }
             log(clientId, "Clicking undock.");
             missionProcessor.clickUndock();
             stateManager.getState(clientId).setUndockStartTime(LocalDateTime.now());
@@ -2413,7 +2424,8 @@ public class ClientManager {
         // target as unknown, so they run their sequence instead of the completion-poll fallback.
         if (resolvedTarget == null || !KNOWN_COMBAT_TARGETS.contains(resolvedTarget.toLowerCase())) {
             String recovered = isPotMission(cs) ? "pot" : isScarletMission(cs) ? "scarlet"
-                    : isSerpentisMission(cs) ? "serpentis" : null;
+                    : isSerpentisMission(cs) ? "serpentis"
+                    : isBloodRaiderMission(cs) ? "bloodraider" : null;
             if (recovered != null) {
                 log(clientId, "IN_COMBAT: target '" + resolvedTarget + "' doesn't name a combat sequence — "
                         + "mission text identifies it as '" + recovered + "'.");
@@ -2492,6 +2504,9 @@ public class ClientManager {
             case "serpentis":
                 handleCombatSerpentis(clientId, cs);
                 break;
+            case "bloodraider":
+                handleCombatBloodRaider(clientId, cs);
+                break;
             default:
                 // Unresolved target — we have no combat sequence to run for it. Poll for completion
                 // in case the mission ends on its own, but never spin here forever: a recognised
@@ -2527,9 +2542,10 @@ public class ClientManager {
      * Steps:
      *   0 → make target_serpentis visible (nudge), Ctrl+click to lock it
      *   1 → 3s lock settle, then press 'asdx' (activate modules)
-     *   2 → 15s wait, then press 'c'
-     *   3 → 20s wait, then Alt+F1 (cap booster) + Shift+a (overload rockets)
-     *   4 → poll for mission complete (set_destination / dock / pod check)
+     *   2 → 10s wait, then press 'c'
+     *   3 → 15s wait, then Shift+a (overload rockets)
+     *   4 → 5s wait, then Alt+F1 (cap booster)
+     *   5 → poll for mission complete (set_destination / dock / pod check)
      */
     private void handleCombatSerpentis(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -2554,8 +2570,8 @@ public class ClientManager {
             }
             case 2: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 15s (before 'c').");
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 10s (before 'c').");
                     return;
                 }
                 log(clientId, "COMBAT[Serpentis] Step 2: press 'c'.");
@@ -2566,15 +2582,26 @@ public class ClientManager {
             }
             case 3: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 20) {
-                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 20s (before cap booster + overload).");
+                if (elapsed < 15) {
+                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 15s (before overload).");
                     return;
                 }
-                log(clientId, "COMBAT[Serpentis] Step 3: Alt+F1 (cap booster) + Shift+a (overload rockets).");
-                missionProcessor.altKeyPress("f1");
+                log(clientId, "COMBAT[Serpentis] Step 3: Shift+a (overload rockets).");
                 missionProcessor.shiftKeyPress("a");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+                if (elapsed < 5) {
+                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 5s (before cap booster).");
+                    return;
+                }
+                log(clientId, "COMBAT[Serpentis] Step 4: Alt+F1 (cap booster).");
+                missionProcessor.altKeyPress("f1");
+                cs.setCombatWaitStart(LocalDateTime.now());
+                cs.setCombatStep(5);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
                     log(clientId, "COMBAT[Serpentis] waiting for mission complete — switching to: " + other.getClientId());
@@ -2582,12 +2609,97 @@ public class ClientManager {
                 }
                 break;
             }
-            case 4: {
+            case 5: {
                 pollSetDestinationOrCapsule(clientId, cs, "Serpentis", true);
                 break;
             }
             default:
                 log(clientId, "COMBAT[Serpentis] unexpected step " + step + " — resetting.");
+                cs.setCombatStep(0);
+        }
+    }
+
+    /**
+     * Blood Raider burner combat sequence (manual recipe from the user). Dormant until
+     * acceptance is enabled — Blood Raider is still auto-declined by config, so shipTarget
+     * 'bloodraider' only occurs once the accept path is wired and templates/target_bloodraider.png
+     * (+ set_range, ship_bloodraider) exist.
+     *
+     * Steps:
+     *   0 → Shift+x + Shift+c (overload modules)
+     *   1 → make target_bloodraider visible (nudge), Ctrl+click to lock it
+     *   2 → double-click target (approach) + press 'asdxc' (activate modules)
+     *   3 → right-click target → 'set_range'
+     *   4 → loop: every 20s press Alt+Shift+F1 + Alt+F1 (cap); complete ONLY on a real
+     *       dock/set_destination signal (no 120s assume-complete — this fight runs long;
+     *       the upstream 2-minute no_ship check still handles podding)
+     */
+    private void handleCombatBloodRaider(String clientId, ClientState cs) {
+        int step = cs.getCombatStep();
+        switch (step) {
+            case 0: {
+                log(clientId, "COMBAT[BloodRaider] Step 0: Shift+x + Shift+c (overload modules).");
+                missionProcessor.shiftKeyPress("xc");
+                cs.setCombatStep(1);
+                break;
+            }
+            case 1: {
+                String tk = awaitCombatTarget(clientId, cs, "target_bloodraider");
+                if (tk == null) return; // not visible — nudged, hold step and retry next tick
+                log(clientId, "COMBAT[BloodRaider] Step 1: Ctrl+click " + tk + " (lock target).");
+                missionProcessor.ctrlClickTemplate("target_bloodraider");
+                cs.setCombatStep(2);
+                break;
+            }
+            case 2: {
+                log(clientId, "COMBAT[BloodRaider] Step 2: double-click target (approach) + press 'asdxc'.");
+                missionProcessor.doubleClickTemplate("target_bloodraider");
+                missionProcessor.keyPress("asdxc");
+                cs.setCombatStep(3);
+                break;
+            }
+            case 3: {
+                log(clientId, "COMBAT[BloodRaider] Step 3: right-click target → 'set_range'.");
+                missionProcessor.rightClickTemplate("target_bloodraider");
+                missionProcessor.clickTemplate("set_range");
+                cs.setCombatPollStart(LocalDateTime.now()); // 20s cap-injection cadence
+                cs.setCombatStep(4);
+                break;
+            }
+            case 4: {
+                // Every 20s inject cap: Alt+Shift+F1 then Alt+F1.
+                long sinceCap = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
+                if (sinceCap >= 20) {
+                    log(clientId, "COMBAT[BloodRaider] Step 4: cap inject — Alt+Shift+F1 + Alt+F1.");
+                    missionProcessor.altShiftKeyPress("f1");
+                    missionProcessor.altKeyPress("f1");
+                    cs.setCombatPollStart(LocalDateTime.now());
+                }
+                // Completion: only a real dock/set_destination ends it — no timeout assume-complete
+                // (this fight passes 120s). Nudge the camera when idle so a dimmed frame can't hide
+                // the prompt. Podding is caught by the upstream 2-minute no_ship check.
+                String done = missionProcessor.detectCombatComplete();
+                if (done == null
+                        && Duration.between(cs.getLastViewNudge(), LocalDateTime.now()).getSeconds() >= VIEW_NUDGE_THROTTLE_SECS) {
+                    cs.setLastViewNudge(LocalDateTime.now());
+                    missionProcessor.nudgeView();
+                    done = missionProcessor.detectCombatComplete();
+                }
+                if ("dock".equals(done)) {
+                    log(clientId, "COMBAT[BloodRaider] dock detected — same system, docking.");
+                    missionProcessor.clickTemplate("dock");
+                    cs.setDockingToStation(true);
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                } else if (done != null) {
+                    log(clientId, "COMBAT[BloodRaider] set_destination detected — mission complete!");
+                    stateManager.setState(clientId, ClientState.State.RETURNING);
+                }
+                break;
+            }
+            default:
+                log(clientId, "COMBAT[BloodRaider] unexpected step " + step + " — resetting.");
                 cs.setCombatStep(0);
         }
     }
@@ -4219,7 +4331,8 @@ public class ClientManager {
         String t = m.getShipTarget() != null ? m.getShipTarget() : m.getTarget();
         if (t != null && KNOWN_COMBAT_TARGETS.contains(t.toLowerCase())) return;
         String kind = isPotMission(cs) ? "pot" : isScarletMission(cs) ? "scarlet"
-                : isSerpentisMission(cs) ? "serpentis" : null;
+                : isSerpentisMission(cs) ? "serpentis"
+                : isBloodRaiderMission(cs) ? "bloodraider" : null;
         if (kind == null) return;
         m.setShipTarget(kind);
         log(clientId, "Mission text identifies '" + kind + "' — combat target set (OCR target was '" + t + "').");
@@ -4261,6 +4374,16 @@ public class ClientManager {
         String t = m.getShipTarget() != null ? m.getShipTarget() : m.getTarget();
         if ("serpentis".equalsIgnoreCase(t)) return true;
         return missionText(cs).contains("serpentis");
+    }
+
+    /** True if the client's current mission is a Blood Raider burner. */
+    private boolean isBloodRaiderMission(ClientState cs) {
+        Mission m = cs.getCurrentMission();
+        if (m == null) return false;
+        String t = m.getShipTarget() != null ? m.getShipTarget() : m.getTarget();
+        if ("bloodraider".equalsIgnoreCase(t)) return true;
+        String text = missionText(cs);
+        return text.contains("blood raider") || text.contains("blaad") || text.contains("bload");
     }
 
     /** Missions where warp_to_location drops us straight into the pocket — there is no

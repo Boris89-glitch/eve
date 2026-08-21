@@ -39,6 +39,12 @@
       "comment": "Serpentis target solo burner — needs templates/ship_serpentis.png"
     },
     {
+      "ship_template": "ship_bloodraider",
+      "ship_display": "ship_bloodraider",
+      "title_contains": ["blood raider", "blood", "blaad", "bload"],
+      "comment": "Blood Raider target solo burner — needs templates/ship_bloodraider.png"
+    },
+    {
       "ship_template": "ship_infested",
       "ship_display": "ship_infested (Daredevil hull)",
       "title_contains": ["infested", "ruins", "recon (1 of", "recon 1 of"],
