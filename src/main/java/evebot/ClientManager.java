@@ -213,11 +213,16 @@ public class ClientManager {
             boolean fgUndocking = stateManager.getStateEnum(fg.getClientId()) == ClientState.State.UNDOCKING;
             boolean fgScarlet = stateManager.getStateEnum(fg.getClientId()) == ClientState.State.IN_COMBAT
                     && isScarletMission(stateManager.getState(fg.getClientId()));
-            if (sinceSwitch >= FORCE_SWITCH_SECS && (fgUndocking || fgScarlet)) {
+            // Blood Raider, like Scarlet, is flown start-to-finish on one client — the fight runs
+            // long and needs the grid in the foreground the whole time.
+            boolean fgBloodRaider = stateManager.getStateEnum(fg.getClientId()) == ClientState.State.IN_COMBAT
+                    && isBloodRaiderMission(stateManager.getState(fg.getClientId()));
+            if (sinceSwitch >= FORCE_SWITCH_SECS && (fgUndocking || fgScarlet || fgBloodRaider)) {
                 // Reset the timer so the watchdog re-arms after the hold.
                 log("[ClientManager] Force-switch watchdog held: " + fg.getClientId()
                         + (fgUndocking ? " is UNDOCKING — not interrupting the undock animation."
-                                       : " is mid-Scarlet — no switching during the Scarlet run."));
+                           : fgScarlet ? " is mid-Scarlet — no switching during the Scarlet run."
+                                       : " is mid-Blood Raider — no switching during the Blood Raider run."));
                 lastClientSwitch = LocalDateTime.now();
             } else if (sinceSwitch >= FORCE_SWITCH_SECS) {
                 ClientWindowInfo other = findOtherClient(fg.getClientId());
@@ -1656,7 +1661,8 @@ public class ClientManager {
             // matching can also miss a frame for missions that normally do match (e.g.
             // Recon 1). OCR the offer and run it through the full rule set so a recognizable
             // title is still accepted; unmatched offers still default to decline.
-            if (missionProcessor.detectDialog() == MissionProcessor.DialogState.OFFER) {
+            MissionProcessor.DialogState noTplDialog = missionProcessor.detectDialog();
+            if (noTplDialog == MissionProcessor.DialogState.OFFER) {
                 Mission noTplMission = missionProcessor.readMission(getMissionAreaForClient(clientId));
                 if (noTplMission == null) {
                     System.out.println(">>> [" + clientId + "] DECLINE — no mission template, OCR failed (unwanted)");
@@ -1686,6 +1692,23 @@ public class ClientManager {
                 MissionConfig.Decision decision = missionConfig.evaluateNoTemplate(
                         noTplMission, cs.getLastKnownStanding());
                 applyDecision(clientId, noTplMission, decision);
+            } else if (cs.isAllowNotCompleteRecovery()
+                    && (noTplDialog == MissionProcessor.DialogState.NOT_COMPLETE
+                     || noTplDialog == MissionProcessor.DialogState.ALREADY_ACCEPTED)) {
+                // Accepted mission in progress that has no dialog template of its own
+                // (Serpentis, Blood Raider, Scarlet, ...). Without this it bounced
+                // IDLE <-> CHECKING_MISSIONS until the agent-icon reset fired. OCR the title
+                // and fly it, exactly like the template NOT_COMPLETE recovery path above.
+                Mission accepted = missionProcessor.readMission(getMissionAreaForClient(clientId));
+                if (accepted == null) {
+                    log(clientId, "No mission template, " + noTplDialog + " dialog, OCR failed — returning to IDLE.");
+                    stateManager.setState(clientId, ClientState.State.IDLE);
+                    return;
+                }
+                cs.setCurrentMission(accepted);
+                stampTextIdentifiedTarget(clientId, cs, accepted);
+                log(clientId, "No mission template but " + noTplDialog + " dialog — accepted mission in progress, read via OCR and flying it.");
+                stateManager.setState(clientId, ClientState.State.ACCEPTED);
             } else {
                 log(clientId, "No mission template and no offer dialog — returning to IDLE.");
                 stateManager.setState(clientId, ClientState.State.IDLE);
@@ -2623,23 +2646,25 @@ public class ClientManager {
      * Blood Raider burner combat sequence (manual recipe from the user). Dormant until
      * acceptance is enabled — Blood Raider is still auto-declined by config, so shipTarget
      * 'bloodraider' only occurs once the accept path is wired and templates/target_bloodraider.png
-     * (+ set_range, ship_bloodraider) exist.
+     * (+ ship_bloodraider) exist.
      *
      * Steps:
-     *   0 → Shift+x + Shift+c (overload modules)
+     *   0 → Shift+a + Shift+x + Shift+c (overload modules)
      *   1 → make target_bloodraider visible (nudge), Ctrl+click to lock it
      *   2 → double-click target (approach) + press 'asdxc' (activate modules)
-     *   3 → right-click target → 'set_range'
+     *   3 → right-click target → 'range' (keep at range)
      *   4 → loop: every 20s press Alt+Shift+F1 + Alt+F1 (cap); complete ONLY on a real
      *       dock/set_destination signal (no 120s assume-complete — this fight runs long;
-     *       the upstream 2-minute no_ship check still handles podding)
+     *       the upstream 2-minute no_ship check still handles podding). The camera is only
+     *       nudged once the 'cruor' template is off the grid, and completion first presses
+     *       'xc' to deactivate. The force-switch watchdog is held for the whole fight.
      */
     private void handleCombatBloodRaider(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[BloodRaider] Step 0: Shift+x + Shift+c (overload modules).");
-                missionProcessor.shiftKeyPress("xc");
+                log(clientId, "COMBAT[BloodRaider] Step 0: Shift+a + Shift+x + Shift+c (overload modules).");
+                missionProcessor.shiftKeyPress("axc");
                 cs.setCombatStep(1);
                 break;
             }
@@ -2659,9 +2684,9 @@ public class ClientManager {
                 break;
             }
             case 3: {
-                log(clientId, "COMBAT[BloodRaider] Step 3: right-click target → 'set_range'.");
+                log(clientId, "COMBAT[BloodRaider] Step 3: right-click target → 'range' (keep at range).");
                 missionProcessor.rightClickTemplate("target_bloodraider");
-                missionProcessor.clickTemplate("set_range");
+                missionProcessor.clickTemplate("range");
                 cs.setCombatPollStart(LocalDateTime.now()); // 20s cap-injection cadence
                 cs.setCombatStep(4);
                 break;
@@ -2679,11 +2704,23 @@ public class ClientManager {
                 // (this fight passes 120s). Nudge the camera when idle so a dimmed frame can't hide
                 // the prompt. Podding is caught by the upstream 2-minute no_ship check.
                 String done = missionProcessor.detectCombatComplete();
-                if (done == null
-                        && Duration.between(cs.getLastViewNudge(), LocalDateTime.now()).getSeconds() >= VIEW_NUDGE_THROTTLE_SECS) {
-                    cs.setLastViewNudge(LocalDateTime.now());
-                    missionProcessor.nudgeView();
-                    done = missionProcessor.detectCombatComplete();
+                if (done == null) {
+                    // While the Cruor (the Blood Raider burner) is still on the overview the fight
+                    // is simply running — don't nudge the camera every few seconds for nothing.
+                    // Only once it's gone does a missing prompt mean a dimmed/stale frame.
+                    if (missionProcessor.findTemplate("cruor") != null) {
+                        log(clientId, "COMBAT[BloodRaider] Cruor still on grid — fight in progress, no nudge.");
+                    } else if (Duration.between(cs.getLastViewNudge(), LocalDateTime.now()).getSeconds() >= VIEW_NUDGE_THROTTLE_SECS) {
+                        cs.setLastViewNudge(LocalDateTime.now());
+                        missionProcessor.nudgeView();
+                        done = missionProcessor.detectCombatComplete();
+                    }
+                }
+                if (done != null) {
+                    // Fight is over — drop the overload/modules before travelling.
+                    log(clientId, "COMBAT[BloodRaider] press 'xc' (deactivate modules).");
+                    missionProcessor.clickEmptySpace();
+                    missionProcessor.keyPress("xc");
                 }
                 if ("dock".equals(done)) {
                     log(clientId, "COMBAT[BloodRaider] dock detected — same system, docking.");

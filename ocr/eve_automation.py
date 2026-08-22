@@ -147,6 +147,8 @@ TEMPLATE_FILES = {
     "abort": "abort",          # abort undock button — visible during undock animation
     "undocking": "undocking",  # undocking text — visible during undock animation
     "ok": "ok",
+    "cargo_ok": "cargo_ok",  # OK button on the cargo/quantity move dialog (its own crop — the
+                             # generic 'ok' template doesn't match this dialog's button)
     "fleet_yes": "fleet_yes",
     "fleet_no": "fleet_no",
     # Capsule / self-destruct (ship destroyed recovery)
@@ -205,6 +207,11 @@ TEMPLATE_FILES = {
     "ship_sansha": "ship_sansha",
     "ship_angel": "ship_angel",
     "ship_infested": "ship_infested",
+    "ship_serpentis": "ship_serpentis",
+    "ship_bloodraider": "ship_bloodraider",
+    "ship_bloodraider_cargo": "ship_bloodraider_cargo",  # the ship's cargo row — cap-charge drop target
+    "giant_freighter": "giant_freighter",  # Giant Freighter in the ship hangar — holds the cap charges
+    "cap_charges": "cap_charges",          # cap booster charges inside the freighter's cargo
     # EVE-O Preview thumbnails — clicked to switch client focus
     "gravitar": "gravitar",
     "meeshayl_lancer": "meeshayl_lancer",
@@ -233,6 +240,9 @@ TEMPLATE_FILES = {
     "target_sansha": "target_sansha",    # Sansha burner — overview row
     "target_angel": "target_angel",      # Angel burner — overview row
     "target_worm": "target_worm",        # Worm burner — overview row
+    "target_serpentis": "target_serpentis",      # Serpentis burner — overview row
+    "target_bloodraider": "target_bloodraider",  # Blood Raider burner — overview row
+    "cruor": "cruor",                    # Cruor on the overview — present = Blood Raider fight still running
     "prophecy": "prophecy",              # Pot and Kettle — Prophecy overview row (target)
     "locked_prophecy": "locked_prophecy",  # Pot and Kettle — Prophecy locked bracket (gone = destroyed)
     "alt_target": "alt_target",          # Generic fallback overview row — used when target_{angel,worm,sansha} can't be found
@@ -276,6 +286,9 @@ HANGAR_FALLBACK_XY = layout_point("hangar_fallback", 380, 680)
 # Point over the ship-hangar item list to place the cursor when mouse-wheel
 # scrolling the hangar to reveal ships below the first row.
 HANGAR_SCROLL_XY = layout_point("hangar_scroll", 800, 500)
+# Two-notch bursts needed to take the ship-hangar list from one end to the other
+# (over-scrolling past the list border is harmless, so this is deliberately generous).
+HANGAR_SCROLL_STEPS = 6
 
 # Empty space in the middle of the screen — left-click here to dismiss context menus.
 EMPTY_SPACE_XY = layout_point("empty_space", 960, 540)
@@ -1406,6 +1419,74 @@ def find_ship_with_scroll(
     return None
 
 
+def win32_drag(sx: int, sy: int, dx: int, dy: int, steps: int = 25) -> None:
+    """Press-move-release drag using raw win32 mouse events.
+
+    EVE drops a pyautogui drag: the button-down and the move arrive too close
+    together for the client to register a grab. So: move, press, jiggle a few pixels
+    to start the drag, glide to the target in small steps, settle, release.
+    """
+    try:
+        import win32api, win32con
+    except ImportError:
+        pyautogui.moveTo(sx, sy, duration=0.1)
+        pyautogui.mouseDown(button="left")
+        time.sleep(0.3)
+        pyautogui.moveTo(dx, dy, duration=0.6)
+        time.sleep(0.3)
+        pyautogui.mouseUp(button="left")
+        return
+
+    win32api.SetCursorPos((sx, sy))
+    time.sleep(0.2)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN, sx, sy, 0, 0)
+    time.sleep(0.3)
+    # Small jiggle first — EVE only treats the press as a drag once the cursor moves.
+    for off in (3, 6, 10):
+        win32api.SetCursorPos((sx + off, sy + off))
+        time.sleep(0.05)
+    for i in range(1, steps + 1):
+        win32api.SetCursorPos((sx + (dx - sx) * i // steps, sy + (dy - sy) * i // steps))
+        time.sleep(0.03)
+    time.sleep(0.4)
+    win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP, dx, dy, 0, 0)
+    time.sleep(0.3)
+
+
+def hangar_scroll_anchor(matcher: "TemplateMatcher") -> Tuple[int, int]:
+    """Point to park the cursor on before wheeling the ship-hangar list.
+
+    Matched off the 'ship_hangar' template so the wheel lands on the real hangar
+    wherever the window sits; HANGAR_SCROLL_XY is only the fallback for a template miss.
+    """
+    m = matcher.find("ship_hangar")
+    if m:
+        cx, cy = matcher.center(m)
+        log.info("Hangar scroll anchor from 'ship_hangar' template at (%d,%d).", cx, cy)
+        return cx, cy
+    log.warning("'ship_hangar' template not matched (best conf=%.3f) — using HANGAR_SCROLL_XY %s.",
+                matcher.match_conf("ship_hangar"), HANGAR_SCROLL_XY)
+    return HANGAR_SCROLL_XY
+
+
+def scroll_hangar_end(matcher: "TemplateMatcher", cx: int, cy: int, up: bool) -> None:
+    """Run the ship-hangar list to one end from (cx, cy).
+
+    EVE ignores a single oversized wheel event, so the travel is issued as several
+    small notch bursts (same size find_ship_with_scroll uses). The cursor is parked
+    on the hangar first — the wheel only scrolls the list it is hovering.
+    """
+    try:
+        import win32api
+        win32api.SetCursorPos((cx, cy))
+    except ImportError:
+        pyautogui.moveTo(cx, cy, duration=0.1)
+    time.sleep(0.2)
+    step = 2 if up else -2
+    for _ in range(HANGAR_SCROLL_STEPS):
+        matcher.scroll(cx, cy, clicks=step, delay=0.15)
+
+
 def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bool = False) -> dict:
     """
     Full ship select + repair flow for the ship matching mission_title, using a
@@ -2285,38 +2366,73 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
     if cmd == "load_cap_charges":
         # Blood Raider prep: pull cap charges out of the 'giant_freighter' (in the ship
         # hangar) and drop them into our ship. Runs after ship select + repair, before undock.
-        # If the freighter isn't visible, find_ship_with_scroll hovers the hangar scroll point
-        # (HANGAR_SCROLL_XY) and scrolls down to reveal lower rows. Returns False on any miss.
-        ship_template = msg.get("ship", "ship_bloodraider")
-        freighter = find_ship_with_scroll(matcher, "giant_freighter")
+        # The hangar window is too small to show the freighter and our ship at the same time,
+        # so: scroll all the way DOWN to reveal the freighter, click it to open its cargo, then
+        # scroll all the way back UP so our ship is on screen again, and only then drag. Both
+        # scrolls are anchored on the matched 'ship_hangar' template. Returns False on any miss.
+        # Drop target is the ship's CARGO row ('<ship>_cargo'), not the ship icon itself —
+        # dropping on the icon offers the whole ship, not its hold.
+        ship_template = msg.get("ship", "ship_bloodraider") + "_cargo"
+        sx, sy = hangar_scroll_anchor(matcher)
+        scroll_hangar_end(matcher, sx, sy, up=False)
+        freighter = matcher.wait_for("giant_freighter", timeout=2.0)
         if not freighter:
-            log.warning("load_cap_charges: giant_freighter not found (even after scrolling).")
+            log.warning("load_cap_charges: giant_freighter not found after scrolling to the bottom.")
+            scroll_hangar_end(matcher, sx, sy, up=True)
             return {"ok": True, "value": False}
         fcx, fcy = matcher.center(freighter)
         log.info("load_cap_charges: clicking giant_freighter at (%d,%d) to reveal its cargo.", fcx, fcy)
         matcher._do_click(fcx, fcy, button="left", delay=0.5)
+        # Scroll straight back up from the freighter — the cursor is already on the list.
+        scroll_hangar_end(matcher, fcx, fcy, up=True)
+        # Clear the selection/hover overlay with one left-click in empty space (never Escape)
+        # before matching — the highlight over the clicked row hides the templates underneath.
+        matcher._do_click(*EMPTY_SPACE_XY, button="left", delay=0.4)
         charges = matcher.wait_for("cap_charges", timeout=3.0)
         if not charges:
             log.warning("load_cap_charges: cap_charges not visible after opening the freighter.")
             return {"ok": True, "value": False}
-        ship = matcher.wait_for(ship_template, timeout=2.0) or find_ship_with_scroll(matcher, ship_template)
+        ship = matcher.wait_for(ship_template, timeout=2.0)
         if not ship:
-            log.warning("load_cap_charges: drop-target ship '%s' not found.", ship_template)
+            log.warning("load_cap_charges: drop-target ship '%s' not found (best conf=%.3f).",
+                        ship_template, matcher.match_conf(ship_template))
             return {"ok": True, "value": False}
         scx, scy = matcher.center(charges)
         dcx, dcy = matcher.center(ship)
         log.info("load_cap_charges: dragging cap_charges (%d,%d) -> %s (%d,%d).",
                  scx, scy, ship_template, dcx, dcy)
-        pyautogui.moveTo(scx, scy, duration=0.1)
-        pyautogui.mouseDown(button="left")
-        time.sleep(0.25)
-        pyautogui.moveTo(dcx, dcy, duration=0.4)
-        time.sleep(0.25)
-        pyautogui.mouseUp(button="left")
-        time.sleep(0.3)
-        # Confirm the item-move dialog (quantity / capacity prompt) if one appears.
-        if matcher.click("ok"):
-            log.info("load_cap_charges: clicked 'ok' to confirm the move.")
+        win32_drag(scx, scy, dcx, dcy)
+        # Confirm the item-move dialog (quantity / capacity prompt) if one appears. It needs a
+        # server round-trip, so give it a couple of seconds; no dialog at all is the normal case.
+        confirm = None
+        if matcher.wait_and_click("cargo_ok", timeout=5.0, delay=0.4):
+            confirm = "cargo_ok"
+        elif matcher.wait_and_click("ok", timeout=2.0, delay=0.4):
+            confirm = "ok"
+        if confirm:
+            log.info("load_cap_charges: clicked '%s' to confirm the move.", confirm)
+            # The click can miss (dialog moved / press swallowed) — re-click until the button
+            # is off screen, so we never undock with the confirm dialog still sitting there.
+            for attempt in range(1, 4):
+                if not matcher.find(confirm):
+                    log.info("load_cap_charges: '%s' gone — move confirmed.", confirm)
+                    break
+                log.warning("load_cap_charges: '%s' still on screen (attempt %d/3) — re-clicking.",
+                            confirm, attempt)
+                matcher.click(confirm)
+                time.sleep(0.5)
+            else:
+                log.warning("load_cap_charges: '%s' still on screen after 3 clicks.", confirm)
+        else:
+            log.warning("load_cap_charges: no confirm button matched (cargo_ok=%.3f, ok=%.3f).",
+                        matcher.match_conf("cargo_ok"), matcher.match_conf("ok"))
+        # Leave the Ship Hangar selected (the freighter's cargo is open right now), so the next
+        # run opens on the hangar list instead of the freighter's hold.
+        if matcher.click("ship_hangar"):
+            log.info("load_cap_charges: clicked 'ship_hangar' to leave the hangar focused.")
+        else:
+            log.warning("load_cap_charges: 'ship_hangar' not matched (best conf=%.3f) — "
+                        "hangar left unfocused.", matcher.match_conf("ship_hangar"))
         return {"ok": True, "value": True}
 
     if cmd == "key_press":
