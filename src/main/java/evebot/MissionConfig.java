@@ -58,7 +58,7 @@ public class MissionConfig {
     public enum Decision { ACCEPT, DECLINE }
 
     /** Recon is skipped once agent standing climbs above this, in high sec as well as null sec. */
-    private static final double RECON_MAX_STANDING = 2.0;
+    private static final double RECON_MAX_STANDING = 0.0;
 
     /** True if this offer is a Recon mission. The title wraps and OCRs inconsistently
      *  ("Recon 1 of 3" / "Recon1of3"), so the raw dialog text is checked too. */

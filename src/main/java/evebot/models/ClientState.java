@@ -359,6 +359,9 @@ public class ClientState {
     /** Last time COMPLETING clicked the dock fallback — throttles re-clicks while waiting to dock. */
     private LocalDateTime lastCompletingDock = LocalDateTime.MIN;
 
+    /** When COMPLETING began holding its turn-in to let the partner keep checking missions (MIN = not holding). Bounds the hold. */
+    private LocalDateTime completingHoldStart = LocalDateTime.MIN;
+
     /** When the IDLE travel loop first found no navigation UI on screen (MIN = not waiting). Drives the 60s podded-at-station escalation. */
     private LocalDateTime noTravelUiSince = LocalDateTime.MIN;
 
@@ -706,6 +709,9 @@ public boolean isDockingToStation()             { return dockingToStation; }
 
     public LocalDateTime getLastCompletingDock()                { return lastCompletingDock; }
     public void          setLastCompletingDock(LocalDateTime t) { this.lastCompletingDock = t; }
+
+    public LocalDateTime getCompletingHoldStart()                { return completingHoldStart; }
+    public void          setCompletingHoldStart(LocalDateTime t) { this.completingHoldStart = t; }
 
     public LocalDateTime getNoTravelUiSince()                { return noTravelUiSince; }
     public void          setNoTravelUiSince(LocalDateTime t) { this.noTravelUiSince = t; }

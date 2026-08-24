@@ -30,6 +30,9 @@ public class ClientManager {
     private static final int LOWSEC_MAX_SHIP_KILLS = 1;
     /** Only consider accepting a low-sec offer once standing has dropped below this. */
     private static final double LOWSEC_MIN_STANDING = -0.5;
+    /** Blood Raider gets its own standing gate instead of the stricter low-sec floor:
+     *  skip it whenever standing is above this (accept only at or below). */
+    private static final double BLOODRAIDER_MAX_STANDING = 1.0;
     /** 'lowsec_*' offer template stem -> ESI solar-system id whose last-hour ship_kills gates
      *  acceptance. Loaded once (lazily) from config/lowsec_systems.json. */
     private Map<String, Integer> lowsecSystems = null;
@@ -39,6 +42,8 @@ public class ClientManager {
     private final Map<String, ClientWindowInfo> clientWindows      = new ConcurrentHashMap<>();
     private final Map<String, Integer>          agentRetries       = new ConcurrentHashMap<>();
     private final Map<String, Integer>          gateWarpRetries    = new ConcurrentHashMap<>();
+    /** Blood Raider: true once the deferred Shift+a overload has fired (with the first cap inject). */
+    private final Map<String, Boolean>          brOverloaded       = new ConcurrentHashMap<>();
     /** Vengeance: consecutive re-lock attempts on 'target_inquisitor' that produced no
      *  'locked_inquisitor' bracket. Once both inquisitors are dead the remaining overview matches
      *  are false positives (a station has been locked this way), so after
@@ -921,7 +926,7 @@ public class ClientManager {
                     // landed now to skip the gate-warp verification phase (which would otherwise
                     // re-confirm a landing that already happened, timing from the warp_to_location
                     // press). Combat Step 0 does its own 20s land settle. Anchor the pod check to
-                    // now so the 2-minute no_ship timer doesn't fire at ~0s and false-PODDED.
+                    // now so the 3-minute no_ship timer doesn't fire at ~0s and false-PODDED.
                     cs.setCombatWarpLanded(true);
                     cs.setLastPodCheck(LocalDateTime.now());
                     // setState(IN_COMBAT) reset combatStep to 0; Scarlet has no land-settle step,
@@ -1595,12 +1600,30 @@ public class ClientManager {
                 return;
             }
 
+            // OCR the offer up front so the standing gate can tell Blood Raider apart: it is skipped
+            // whenever standing is above 0 (the user's rule), while other low-sec Hagilur offers
+            // (Serpentis) keep the stricter LOWSEC_MIN_STANDING floor.
+            Mission ls = missionProcessor.readMission(getMissionAreaForClient(clientId));
+            if (ls == null) {
+                log(clientId, "Low-sec: OCR returned null on the offer — retrying next tick.");
+                return;
+            }
+            cs.setCurrentMission(ls);
+            stampTextIdentifiedTarget(clientId, cs, ls);
+            boolean bloodRaider = isBloodRaiderMission(cs);
+
             double standing = cs.getLastKnownStanding();
-            if (standing >= LOWSEC_MIN_STANDING) {
+            boolean standingBlocks = bloodRaider ? bloodRaiderBlockedByStanding(cs)
+                                                 : (standing >= LOWSEC_MIN_STANDING);
+            if (standingBlocks) {
+                String gateDesc = bloodRaider ? "> " + BLOODRAIDER_MAX_STANDING + " (Blood Raider gate)"
+                                              : ">= " + LOWSEC_MIN_STANDING;
                 System.out.println(">>> [" + clientId + "] DECLINE — low-sec block "
-                        + lowsecKey + " (standing " + standing + " >= " + LOWSEC_MIN_STANDING + ")");
-                log(clientId, "Low-sec offer '" + lowsecKey + "' declined — standing "
-                        + standing + " not below " + LOWSEC_MIN_STANDING + ".");
+                        + lowsecKey + " (standing " + standing + " " + gateDesc + ")");
+                log(clientId, "Low-sec offer '" + lowsecKey + "'"
+                        + (bloodRaider ? " (Blood Raider)" : "") + " declined — standing "
+                        + standing + " " + gateDesc + ".");
+                cs.setCurrentMission(null);
                 countDeclineForStandings(clientId, cs);
                 missionProcessor.clickDeclineButton();
                 stateManager.setState(clientId, ClientState.State.DECLINING);
@@ -1610,16 +1633,9 @@ public class ClientManager {
             int systemId  = lowsecSystemId(lowsecKey);
             int shipKills = EsiKills.shipKillsLastHour(systemId);
             if (shipKills >= 0 && shipKills <= LOWSEC_MAX_SHIP_KILLS) {
-                Mission ls = missionProcessor.readMission(getMissionAreaForClient(clientId));
-                if (ls == null) {
-                    log(clientId, "Low-sec accept: OCR returned null on the offer — retrying next tick.");
-                    return;
-                }
-                cs.setCurrentMission(ls);
                 seedRouteDestinationFromOffer(clientId, cs, ls);
-                stampTextIdentifiedTarget(clientId, cs, ls);
                 System.out.println(">>> [" + clientId + "] ACCEPT — low-sec " + lowsecKey
-                        + " (standing " + standing + " < " + LOWSEC_MIN_STANDING + ", system " + systemId
+                        + " (standing " + standing + ", system " + systemId
                         + " ship_kills=" + shipKills + " <= " + LOWSEC_MAX_SHIP_KILLS + ")");
                 EventLog.log("LOWSEC_ACCEPT", clientId + " — " + lowsecKey + " accepted; system "
                         + systemId + " ship_kills=" + shipKills + ", standing=" + standing);
@@ -1636,6 +1652,7 @@ public class ClientManager {
                     + shipKills + (shipKills < 0 ? ", ESI lookup failed)" : " > " + LOWSEC_MAX_SHIP_KILLS + ")"));
             log(clientId, "Low-sec offer '" + lowsecKey + "' declined — system " + systemId
                     + " ship_kills=" + shipKills + (shipKills < 0 ? " (ESI lookup failed)" : "") + ".");
+            cs.setCurrentMission(null);
             countDeclineForStandings(clientId, cs);
             missionProcessor.clickDeclineButton();
             stateManager.setState(clientId, ClientState.State.DECLINING);
@@ -1911,6 +1928,15 @@ public class ClientManager {
     }
 
     private void applyDecision(String clientId, Mission mission, MissionConfig.Decision decision) {
+        // Blood Raider is never worth running once standing is above 0 — override an accept to a
+        // decline. Lives here so it holds on every accept path that funnels through applyDecision.
+        if (decision == MissionConfig.Decision.ACCEPT
+                && bloodRaiderBlockedByStanding(stateManager.getState(clientId))) {
+            System.out.println(">>> [" + clientId + "] DECLINE — Blood Raider, standing > "
+                    + BLOODRAIDER_MAX_STANDING + " (" + mission.getTitle() + ")");
+            log(clientId, "Blood Raider offer declined — standing above " + BLOODRAIDER_MAX_STANDING + ".");
+            decision = MissionConfig.Decision.DECLINE;
+        }
         if (decision == MissionConfig.Decision.ACCEPT) {
             System.out.println(">>> [" + clientId + "] ACCEPT — " + mission.getTitle());
             if (!missionProcessor.clickAcceptButton()) {
@@ -2360,7 +2386,7 @@ public class ClientManager {
                 log(clientId, "IN_COMBAT: warp ended after " + elapsed + "s — landed, starting combat.");
                 gateWarpRetries.put(clientId, 0);
                 cs.setCombatWarpLanded(true);
-                // Anchor the 2-minute no_ship timer to combat start. Without this the timer measures
+                // Anchor the 3-minute no_ship timer to combat start. Without this the timer measures
                 // from a stale/MIN timestamp and the check fires at ~0s — right when the HUD is still
                 // settling after warp-in, producing a false PODDED verdict.
                 cs.setLastPodCheck(LocalDateTime.now());
@@ -2383,8 +2409,8 @@ public class ClientManager {
             // verification block returns every tick until warp lands), so a pod death at the gate
             // would otherwise loop forever — exactly the "231 attempts, no pod check" wedge. The
             // ship is sitting still at the gate, so the HUD is stable and isFlyingPod is accurate.
-            if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 2) {
-                log(clientId, "IN_COMBAT: gate not firing — running 2-minute no_ship check.");
+            if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 3) {
+                log(clientId, "IN_COMBAT: gate not firing — running 3-minute no_ship check.");
                 if (podCheckInSpace()) {
                     log(clientId, "IN_COMBAT: no_ship while stuck at gate — podded, self-destructing.");
                     if (handlePodDeath(clientId, true)) {
@@ -2392,7 +2418,7 @@ public class ClientManager {
                     }
                     log(clientId, "IN_COMBAT: pod check false positive — resuming gate retries.");
                 }
-                cs.setLastPodCheck(LocalDateTime.now()); // re-arm the 2-min throttle
+                cs.setLastPodCheck(LocalDateTime.now()); // re-arm the 3-min throttle
             }
 
             // Gate still present but never fired (grayed on session change / out of range). Right-click
@@ -2411,15 +2437,15 @@ public class ClientManager {
             return;
         }
 
-        // ── Mission timer: once every two minutes in combat, run the cheap no_ship
+        // ── Mission timer: once every three minutes in combat, run the cheap no_ship
         //    check. isFlyingPod() stage 1 is a passive sliver match (no clicking) when
         //    the ship is alive, so this is safe to fire mid-fight. If we've been podded,
         //    the combat step machine would otherwise keep trying to lock targets from
         //    a capsule until the per-handler hardcap; instead handlePodDeath self-
         //    destructs (guarded by the capsule template) and hands the ~120s respawn
         //    to the other client, so this client stops spinning and yields. ──
-        if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 2) {
-            log(clientId, "IN_COMBAT: 2-minute no_ship check.");
+        if (Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes() >= 3) {
+            log(clientId, "IN_COMBAT: 3-minute no_ship check.");
             if (podCheckInSpace()) {
                 log(clientId, "IN_COMBAT: no_ship — podded mid-combat, self-destructing.");
                 // Leave lastPodCheck at the previous clean check so handlePodDeath can
@@ -2429,10 +2455,10 @@ public class ClientManager {
                 }
                 // False positive (no capsule) — don't re-probe next tick. Reset the
                 // throttle and carry on with combat.
-                log(clientId, "IN_COMBAT: pod check was a false positive — resuming combat, re-arming 2-min throttle.");
+                log(clientId, "IN_COMBAT: pod check was a false positive — resuming combat, re-arming 3-min throttle.");
                 cs.setLastPodCheck(LocalDateTime.now());
             } else {
-                cs.setLastPodCheck(LocalDateTime.now()); // clean check passed — reset the 2-min throttle
+                cs.setLastPodCheck(LocalDateTime.now()); // clean check passed — reset the 3-min throttle
             }
         }
 
@@ -2564,10 +2590,10 @@ public class ClientManager {
      *
      * Steps:
      *   0 → make target_serpentis visible (nudge), Ctrl+click to lock it
-     *   1 → 3s lock settle, then press 'asdx' (activate modules)
+     *   1 → press 'asdx' immediately (activate modules, no lock settle)
      *   2 → 10s wait, then press 'c'
-     *   3 → 15s wait, then Shift+a (overload rockets)
-     *   4 → 5s wait, then Alt+F1 (cap booster)
+     *   3 → 10s wait, then Shift+a (overload rockets)
+     *   4 → 10s wait, then Alt+F1 (cap booster)
      *   5 → poll for mission complete (set_destination / dock / pod check)
      */
     private void handleCombatSerpentis(String clientId, ClientState cs) {
@@ -2583,8 +2609,8 @@ public class ClientManager {
                 break;
             }
             case 1: {
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 3) return; // lock animation
+                // No lock-settle wait — modules are pressed immediately (even before the lock
+                // completes) so they auto-fire the moment the target locks.
                 log(clientId, "COMBAT[Serpentis] Step 1: press 'asdx' (activate modules).");
                 missionProcessor.keyPress("asdx");
                 cs.setCombatWaitStart(LocalDateTime.now());
@@ -2605,8 +2631,8 @@ public class ClientManager {
             }
             case 3: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 15) {
-                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 15s (before overload).");
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 10s (before overload).");
                     return;
                 }
                 log(clientId, "COMBAT[Serpentis] Step 3: Shift+a (overload rockets).");
@@ -2617,8 +2643,8 @@ public class ClientManager {
             }
             case 4: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 5) {
-                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 5s (before cap booster).");
+                if (elapsed < 10) {
+                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 10s (before cap booster).");
                     return;
                 }
                 log(clientId, "COMBAT[Serpentis] Step 4: Alt+F1 (cap booster).");
@@ -2649,13 +2675,14 @@ public class ClientManager {
      * (+ ship_bloodraider) exist.
      *
      * Steps:
-     *   0 → Shift+a + Shift+x + Shift+c (overload modules)
+     *   0 → Shift+x + Shift+c (overload modules)
      *   1 → make target_bloodraider visible (nudge), Ctrl+click to lock it
      *   2 → double-click target (approach) + press 'asdxc' (activate modules)
      *   3 → right-click target → 'range' (keep at range)
-     *   4 → loop: every 20s press Alt+Shift+F1 + Alt+F1 (cap); complete ONLY on a real
+     *   4 → loop: every 20s press Alt+Shift+F1 + Alt+F1 (cap) — Shift+a (rocket overload)
+     *       rides along with the FIRST cap inject (20s in), not at the start; complete ONLY on a real
      *       dock/set_destination signal (no 120s assume-complete — this fight runs long;
-     *       the upstream 2-minute no_ship check still handles podding). The camera is only
+     *       the upstream 3-minute no_ship check still handles podding). The camera is only
      *       nudged once the 'cruor' template is off the grid, and completion first presses
      *       'xc' to deactivate. The force-switch watchdog is held for the whole fight.
      */
@@ -2663,8 +2690,8 @@ public class ClientManager {
         int step = cs.getCombatStep();
         switch (step) {
             case 0: {
-                log(clientId, "COMBAT[BloodRaider] Step 0: Shift+a + Shift+x + Shift+c (overload modules).");
-                missionProcessor.shiftKeyPress("axc");
+                log(clientId, "COMBAT[BloodRaider] Step 0: Shift+x + Shift+c (overload modules).");
+                missionProcessor.shiftKeyPress("xc");
                 cs.setCombatStep(1);
                 break;
             }
@@ -2673,6 +2700,7 @@ public class ClientManager {
                 if (tk == null) return; // not visible — nudged, hold step and retry next tick
                 log(clientId, "COMBAT[BloodRaider] Step 1: Ctrl+click " + tk + " (lock target).");
                 missionProcessor.ctrlClickTemplate("target_bloodraider");
+                brOverloaded.remove(clientId); // fresh fight — Shift+a not fired yet
                 cs.setCombatStep(2);
                 break;
             }
@@ -2692,9 +2720,15 @@ public class ClientManager {
                 break;
             }
             case 4: {
-                // Every 20s inject cap: Alt+Shift+F1 then Alt+F1.
+                // Every 20s inject cap: Alt+Shift+F1 then Alt+F1. Shift+a (rocket overload) rides
+                // along with the first inject (20s in) rather than firing at combat start.
                 long sinceCap = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
                 if (sinceCap >= 20) {
+                    if (!Boolean.TRUE.equals(brOverloaded.get(clientId))) {
+                        log(clientId, "COMBAT[BloodRaider] Shift+a (overload rockets).");
+                        missionProcessor.shiftKeyPress("a");
+                        brOverloaded.put(clientId, true);
+                    }
                     log(clientId, "COMBAT[BloodRaider] Step 4: cap inject — Alt+Shift+F1 + Alt+F1.");
                     missionProcessor.altShiftKeyPress("f1");
                     missionProcessor.altKeyPress("f1");
@@ -2702,7 +2736,7 @@ public class ClientManager {
                 }
                 // Completion: only a real dock/set_destination ends it — no timeout assume-complete
                 // (this fight passes 120s). Nudge the camera when idle so a dimmed frame can't hide
-                // the prompt. Podding is caught by the upstream 2-minute no_ship check.
+                // the prompt. Podding is caught by the upstream 3-minute no_ship check.
                 String done = missionProcessor.detectCombatComplete();
                 if (done == null) {
                     // While the Cruor (the Blood Raider burner) is still on the overview the fight
@@ -4423,6 +4457,14 @@ public class ClientManager {
         return text.contains("blood raider") || text.contains("blaad") || text.contains("bload");
     }
 
+    /** The user's rule: never accept a Blood Raider burner while agent standing is above 1.0.
+     *  An unknown standing (NaN) doesn't block — same "when unsure, accept" direction as elsewhere. */
+    private boolean bloodRaiderBlockedByStanding(ClientState cs) {
+        if (!isBloodRaiderMission(cs)) return false;
+        double s = cs.getLastKnownStanding();
+        return !Double.isNaN(s) && s > BLOODRAIDER_MAX_STANDING;
+    }
+
     /** Missions where warp_to_location drops us straight into the pocket — there is no
      *  acceleration gate to activate on landing, so IDLE must enter combat directly. */
     private boolean landsInPocketOnWarpTo(ClientState cs) {
@@ -5199,6 +5241,39 @@ public class ClientManager {
             try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             return;
         }
+
+        // Standings-rescue hold: docked at the agent, mission ready to turn in — but if the partner
+        // is still actively trying to get a mission (CHECKING_MISSIONS/DECLINING, not yet paused),
+        // don't turn in yet. A turn-in hands the partner a standings boost (it clears the partner's
+        // pause), so bank it for the moment the partner needs it: hold here, yielding focus, until
+        // the partner either accepts a mission (leaves the check cycle) or declines its way below the
+        // pause floor and pauses (the "client break"). Then turn in — clearing that pause and letting
+        // the dropped client resume with the recovered standing. Bounded so a partner stuck checking
+        // can't strand this finished mission at the agent forever.
+        ClientState completingCs = stateManager.getState(clientId);
+        ClientWindowInfo holdPartner = findOtherClient(clientId);
+        if (holdPartner != null) {
+            ClientState.State ps = stateManager.getStateEnum(holdPartner.getClientId());
+            boolean partnerChecking =
+                    (ps == ClientState.State.CHECKING_MISSIONS || ps == ClientState.State.DECLINING)
+                    && !stateManager.getState(holdPartner.getClientId()).isStandingsPaused()
+                    && !isParkedOrLocked(holdPartner.getClientId());
+            if (partnerChecking) {
+                if (completingCs.getCompletingHoldStart().equals(LocalDateTime.MIN)) {
+                    completingCs.setCompletingHoldStart(LocalDateTime.now());
+                }
+                long held = Duration.between(completingCs.getCompletingHoldStart(), LocalDateTime.now()).getSeconds();
+                if (held < COMPLETING_HOLD_CAP_SECS) {
+                    log(clientId, "COMPLETING: holding turn-in — " + holdPartner.getClientId()
+                            + " is still checking missions; banking the turn-in standings boost until it gets one or drops below the floor. Held " + held + "s.");
+                    bringToForeground(holdPartner);
+                    return;
+                }
+                log(clientId, "COMPLETING: turn-in hold cap (" + COMPLETING_HOLD_CAP_SECS + "s) reached — turning in anyway.");
+            }
+            completingCs.setCompletingHoldStart(LocalDateTime.MIN);
+        }
+
         missionProcessor.doubleClickAgentIcon();
 
         // Read agent standings before completing — determines fleet reward choice
@@ -5375,6 +5450,11 @@ public class ClientManager {
     /** A client whose standing is below this at completion pauses (yields to the partner) until the
      *  partner turns in a mission, then resumes; re-pauses if still below on its next completion. */
     static final double STANDINGS_PAUSE_FLOOR = -1.2;
+
+    /** COMPLETING turn-in hold cap: a finished mission held at the agent (while the partner keeps
+     *  checking missions) is turned in anyway after this long, so a partner stuck in the check
+     *  cycle can't strand it there forever. */
+    private static final long COMPLETING_HOLD_CAP_SECS = 600;
 
     /**
      * Pick the fleet reward (share vs take-all) from the agent's standing and click it.
