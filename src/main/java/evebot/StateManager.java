@@ -225,8 +225,8 @@ public class StateManager {
 
     /** Startup gate: the persisted standing survives restarts, but the pause flag doesn't — without
      *  this a client restarted below the pause floor happily checks/declines until the next re-read.
-     *  NaN (unknown) standing never pauses. If both clients start below the floor, the pause gate's
-     *  no-partner-can-carry fallback un-pauses one of them, so the pair can't deadlock. */
+     *  NaN (unknown) standing never pauses. If both clients start below the floor, both stay paused
+     *  (the pause gate never un-pauses a below-floor client) — that needs manual intervention. */
     private void applyStartupStandingsPause(ClientState cs) {
         if (cs.getLastKnownStanding() < ClientManager.STANDINGS_PAUSE_FLOOR) {
             cs.setStandingsPaused(true);

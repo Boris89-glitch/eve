@@ -235,11 +235,21 @@ public class OCRBridge {
     // -----------------------------------------------------------------------
 
     public Mission readMission(int x, int y, int width, int height) {
+        return readMission(x, y, width, height, false);
+    }
+
+    /**
+     * As above, but {@code skipLocation} drops the focused Location OCR pass — the
+     * template already identified the offer, and the refined location only fed null-sec
+     * route/distance filtering (moot in high sec, template-gated in low sec).
+     */
+    public Mission readMission(int x, int y, int width, int height, boolean skipLocation) {
         JsonObject c = cmd("read_mission");
         c.addProperty("x", x);
         c.addProperty("y", y);
         c.addProperty("w", width);
         c.addProperty("h", height);
+        if (skipLocation) c.addProperty("skip_location", true);
         JsonObject r = daemon.send(c);
         if (r == null || !r.has("value") || r.get("value").isJsonNull()) return null;
         return parseMissionJson(gson.toJson(r.get("value")));
@@ -500,6 +510,19 @@ public class OCRBridge {
     public void clickPos(int x, int y) {
         dbg("[%s] [" + activeClient + "] clickPos: (%d,%d)%n", ts(), x, y);
         JsonObject c = cmd("click_pos");
+        c.addProperty("x", x);
+        c.addProperty("y", y);
+        sendAction(c);
+    }
+
+    /**
+     * Move the cursor to fixed screen coordinates without clicking. Used between a combat
+     * right-click and the menu-option click so the cursor isn't parked on the option
+     * template when it's matched (an overlapping cursor drops the match confidence).
+     */
+    public void hoverPos(int x, int y) {
+        dbg("[%s] [" + activeClient + "] hoverPos: (%d,%d)%n", ts(), x, y);
+        JsonObject c = cmd("hover_pos");
         c.addProperty("x", x);
         c.addProperty("y", y);
         sendAction(c);

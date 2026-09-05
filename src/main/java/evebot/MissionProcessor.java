@@ -55,9 +55,15 @@ public class MissionProcessor {
     // -----------------------------------------------------------------------
 
     public Mission readMission(Rectangle missionArea) {
+        return readMission(missionArea, false);
+    }
+
+    /** {@code skipLocation} drops the focused Location OCR pass — used once a wanted
+     *  template has already identified the offer (location no longer gates the decision). */
+    public Mission readMission(Rectangle missionArea, boolean skipLocation) {
         return ocrBridge.readMission(
                 missionArea.x, missionArea.y,
-                missionArea.width, missionArea.height);
+                missionArea.width, missionArea.height, skipLocation);
     }
 
     // -----------------------------------------------------------------------
@@ -233,15 +239,25 @@ public class MissionProcessor {
     public boolean clickAcceptButton() {
         for (int attempt = 1; attempt <= 2; attempt++) {
             log("Clicking ACCEPT (attempt " + attempt + ")");
-            ocrBridge.clickTemplate("accept");
+            boolean clicked = ocrBridge.clickTemplateChecked("accept");
+            if (!clicked) {
+                // The cursor parked on the button drops the match confidence — move it
+                // away (hover only, never a click: a click in the dialog can re-open the
+                // agent conversation) and look again.
+                hoverEmptySpace();
+                sleep(300);
+                clicked = ocrBridge.clickTemplateChecked("accept");
+            }
             sleep(POST_CLICK_DELAY_MS);
-            clickEmptySpace();   // swift click away in the middle (empty space)
-            String confirm = ocrBridge.waitForAnyTemplate(3, "quit_mission", "complete_mission");
+            hoverEmptySpace();   // move the cursor off the buttons, no click
+            sleep(800);          // let the agent dialog redraw with the active-mission buttons
+            String confirm = ocrBridge.waitForAnyTemplate(8, "quit_mission", "complete_mission");
             if (confirm != null) {
                 log("ACCEPT confirmed — '" + confirm + "' visible, mission is active.");
                 return true;
             }
-            log("ACCEPT not confirmed — neither quit_mission nor complete_mission visible.");
+            log("ACCEPT not confirmed — neither quit_mission nor complete_mission visible"
+                    + (clicked ? "." : " (accept button never found)."));
         }
         return false;
     }
@@ -573,11 +589,25 @@ public class MissionProcessor {
      * @return true if the menu item was found and clicked.
      */
     public boolean rightClickAndSelect(String targetKey, String menuKey, int attempts) {
+        return rightClickAndSelect(targetKey, menuKey, attempts, false);
+    }
+
+    /**
+     * As above, with the option to hover mid-screen empty space between the right-click and the
+     * menu click — same trick as {@link #combatRightClickSelect}: a move only, no click, so the
+     * EVE menu stays open but the cursor isn't parked on the option template when it's matched.
+     */
+    public boolean rightClickAndSelect(String targetKey, String menuKey, int attempts, boolean hoverMid) {
         for (int attempt = 1; attempt <= attempts; attempt++) {
             log("Right-clicking '" + targetKey + "' → clicking '" + menuKey + "' (attempt "
                     + attempt + "/" + attempts + ")");
             ocrBridge.rightClickTemplate(targetKey);
             sleep(100);
+            if (hoverMid) {
+                Point mid = Layout.emptySpace();
+                ocrBridge.hoverPos(mid.x, mid.y);
+                sleep(120);
+            }
             if (ocrBridge.clickTemplateChecked(menuKey)) {
                 sleep(POST_CLICK_DELAY_MS);
                 return true;
@@ -588,6 +618,25 @@ public class MissionProcessor {
         }
         log("'" + menuKey + "' never appeared after " + attempts + " right-clicks on '" + targetKey + "'.");
         return false;
+    }
+
+    /**
+     * Combat orbit / keep-at-range: right-click the target, then click the menu option.
+     * Between the two we hover empty space in the middle of the screen ({@code empty_space})
+     * — a move only, no click, which doesn't close the EVE menu — so the cursor isn't
+     * parked on the option template when it's matched; an overlapping cursor drops the
+     * match confidence and the click is lost. Returns true if the option was clicked.
+     */
+    public boolean combatRightClickSelect(String targetKey, String menuKey) {
+        log("Combat select: right-click '" + targetKey + "' → hover mid → click '" + menuKey + "'.");
+        ocrBridge.rightClickTemplate(targetKey);
+        sleep(150);
+        Point mid = Layout.emptySpace();
+        ocrBridge.hoverPos(mid.x, mid.y);
+        sleep(120);
+        boolean clicked = ocrBridge.clickTemplateChecked(menuKey);
+        sleep(POST_CLICK_DELAY_MS);
+        return clicked;
     }
 
     /** @deprecated Use {@link #rightClickAndSelect} instead. Kept for combat sequences. */
@@ -658,6 +707,13 @@ public class MissionProcessor {
     public void clickEmptySpace() {
         Point p = Layout.emptySpace();
         clickPos(p.x, p.y);
+    }
+
+    /** Move the cursor to the mid-screen empty space without clicking — used when a click
+     *  would hit something (agent dialog) but the cursor must not cover a template. */
+    public void hoverEmptySpace() {
+        Point p = Layout.emptySpace();
+        ocrBridge.hoverPos(p.x, p.y);
     }
 
     /** Right-click empty space above centre — avoids right-clicking our own ship. */
@@ -1516,7 +1572,7 @@ public class MissionProcessor {
      * Keyword → combat target fallback, mirrors ship_mission_map.json logic.
      * Returns the combat target string (e.g. "worm", "sansha") or null.
      */
-    private String resolveCombatTargetFromKeywords(String text) {
+    public String resolveCombatTargetFromKeywords(String text) {
         if (text == null || text.isEmpty()) return null;
         String lower = text.toLowerCase();
         // Order matters — more specific keywords first, same as ship_mission_map.json.

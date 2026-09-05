@@ -197,6 +197,8 @@ TEMPLATE_FILES = {
     "mission_worm": "mission_worm",  # → ship_worm
     "mission_sansha": "mission_sansha",  # → ship_sansha
     "mission_angel": "mission_angel",  # → ship_angel
+    "mission_serpentis": "mission_serpentis",  # → ship_serpentis
+    "mission_bloodraider": "mission_bloodraider",  # → ship_bloodraider  (needs templates/mission_bloodraider.png)
     "mission_infested": "mission_infested",  # → ship_infested  (Infested Ruins)
     "mission_scarlet": "mission_scarlet",  # → ship_infested  (Dread Pirate Scarlet, boss Anire)
     "mission_recon1": "mission_recon1",  # → ship_garmur  (Recon part 1)
@@ -310,6 +312,8 @@ MISSION_TEMPLATE_TO_SHIP = [
     ("mission_worm",      "ship_worm",   None),
     ("mission_sansha",    "ship_sansha",  None),
     ("mission_angel",     "ship_angel",   None),
+    ("mission_serpentis", "ship_serpentis", None),
+    ("mission_bloodraider", "ship_bloodraider", None),
     ("mission_infested",  "ship_infested", ["infested", "hive", "ruins"]),
     ("mission_scarlet",   "ship_infested", None),
 ]
@@ -2363,6 +2367,20 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
         time.sleep(0.3)
         return {"ok": True, "value": True}
 
+    if cmd == "hover_pos":
+        # Move the cursor to fixed coordinates without clicking. Used between a combat
+        # right-click and the menu-option click so the cursor isn't sitting on the option
+        # template when it's matched (an overlapping cursor drops the match confidence).
+        x, y = int(msg["x"]), int(msg["y"])
+        try:
+            import win32api
+            win32api.SetCursorPos((x, y))
+        except ImportError:
+            pyautogui.moveTo(x, y, duration=0.1)
+        time.sleep(0.1)
+        log.info("hover_pos: moved cursor to (%d,%d)", x, y)
+        return {"ok": True, "value": True}
+
     if cmd == "load_cap_charges":
         # Blood Raider prep: pull cap charges out of the 'giant_freighter' (in the ship
         # hangar) and drop them into our ship. Runs after ship select + repair, before undock.
@@ -2610,12 +2628,14 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
     if cmd == "read_mission":
         if "reader" not in reader_box:
             reader_box["reader"] = EVEMissionReader()
-        mission = refine_mission_location(
-            reader_box["reader"],
-            reader_box["reader"].read_mission(
-                int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
-            ),
+        mission = reader_box["reader"].read_mission(
+            int(msg["x"]), int(msg["y"]), int(msg["w"]), int(msg["h"])
         )
+        # The template already identified the offer; the focused Location OCR pass only
+        # mattered for null-sec route/distance filtering, which no longer applies (high sec
+        # ignores location, low sec is gated by its own template scan). Skip it when asked.
+        if not msg.get("skip_location", False):
+            mission = refine_mission_location(reader_box["reader"], mission)
         return {"ok": True, "value": mission}
 
     if cmd == "read_route":
