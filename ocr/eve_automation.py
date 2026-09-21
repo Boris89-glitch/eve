@@ -168,6 +168,7 @@ TEMPLATE_FILES = {
     "agent_set_destination": "agent_set_destination",  # "Set Destination" context menu item — click target
     "location_lanngisi": "location_lanngisi",    # "Lanngisi" location submenu entry — hover before Set Destination
     "active": "active",  # 'Active' tab in the Agency window (alt+J) — click before right-clicking the agent portrait
+    "route_tab": "route_tab",  # info-panel tab that reveals the Route destination / set_destination when the route reads empty past jump #4
     "enemy": "enemy",          # enemy icon in local chat — indicates hostile in system
     "enemy2": "enemy2",        # alternate enemy icon in local chat
     "warp_bubble1": "warp_bubble1",  # warp bubble on undock — bubble camp indicator
@@ -217,6 +218,7 @@ TEMPLATE_FILES = {
     # EVE-O Preview thumbnails — clicked to switch client focus
     "gravitar": "gravitar",
     "meeshayl_lancer": "meeshayl_lancer",
+    "hiroshi_saito": "hiroshi_saito",  # needs templates/hiroshi_saito.png
     # Combat templates
     "launcher": "launcher",
     "shooting_luncher": "shooting_luncher",  # launcher in active/cycling (shooting) state
@@ -290,7 +292,7 @@ HANGAR_FALLBACK_XY = layout_point("hangar_fallback", 380, 680)
 HANGAR_SCROLL_XY = layout_point("hangar_scroll", 800, 500)
 # Two-notch bursts needed to take the ship-hangar list from one end to the other
 # (over-scrolling past the list border is harmless, so this is deliberately generous).
-HANGAR_SCROLL_STEPS = 6
+HANGAR_SCROLL_STEPS = 10
 
 # Empty space in the middle of the screen — left-click here to dismiss context menus.
 EMPTY_SPACE_XY = layout_point("empty_space", 960, 540)
@@ -1377,7 +1379,8 @@ def quit_mission_and_request_new(matcher) -> bool:
 
 
 def find_ship_with_scroll(
-    matcher: "TemplateMatcher", ship_template: str, timeout: float = 2.0
+    matcher: "TemplateMatcher", ship_template: str, timeout: float = 2.0,
+    scroll_state: Optional[dict] = None,
 ) -> Optional[Tuple[int, int, int, int]]:
     """Locate `ship_template`, scrolling the hangar list if it isn't on screen.
 
@@ -1385,23 +1388,30 @@ def find_ship_with_scroll(
     (checking after each) to reveal lower rows; if it's still not found (list
     bottom / border reached), scroll back UP the same amount to restore the
     original position before giving up. Returns the match, or None.
+    If found after scrolling down, the notch count is recorded in `scroll_state["steps"]`
+    so the caller can scroll back up once it's done with the ship.
     """
     match = matcher.wait_for(ship_template, timeout=timeout)
     if match:
         return match
 
-    # The hangar list must have focus for the mouse wheel to scroll it. Click any
-    # ship icon that's on screen (any ship_* template) to put the list in focus.
+    # The wheel only scrolls the list under the cursor. Hover any ship icon that's on
+    # screen (any ship_* template) and scroll there; fall back to the hangar anchor.
+    anchor = None
     for key in matcher.templates:
         if key.startswith("ship_") and key != "ship_hangar":
             any_ship = matcher.find(key)
             if any_ship:
-                acx, acy = matcher.center(any_ship)
-                log.info("Clicking ship icon '%s' at (%d,%d) to focus hangar list before scrolling.", key, acx, acy)
-                matcher._do_click(acx, acy, button="left", delay=0.3)
+                anchor = matcher.center(any_ship)
+                log.info("Hovering ship icon '%s' at (%d,%d) to scroll hangar list.", key, *anchor)
                 break
-
-    sx, sy = HANGAR_SCROLL_XY
+    sx, sy = anchor if anchor else hangar_scroll_anchor(matcher)
+    try:
+        import win32api
+        win32api.SetCursorPos((sx, sy))
+    except ImportError:
+        pyautogui.moveTo(sx, sy, duration=0.1)
+    time.sleep(0.2)
     scrolled = 0
     MAX_SCROLL_STEPS = 2  # a bit down to check below the first row
     for step in range(1, MAX_SCROLL_STEPS + 1):
@@ -1414,6 +1424,8 @@ def find_ship_with_scroll(
         match = matcher.find(ship_template)
         if match:
             log.info("Ship '%s' found after scrolling down %d step(s).", ship_template, scrolled)
+            if scroll_state is not None:
+                scroll_state["steps"] = scroll_state.get("steps", 0) + scrolled
             return match
 
     # Still nothing (or hit the list border) — scroll back up to the original position.
@@ -1463,7 +1475,7 @@ def hangar_scroll_anchor(matcher: "TemplateMatcher") -> Tuple[int, int]:
     Matched off the 'ship_hangar' template so the wheel lands on the real hangar
     wherever the window sits; HANGAR_SCROLL_XY is only the fallback for a template miss.
     """
-    m = matcher.find("ship_hangar")
+    m = matcher.wait_for("ship_hangar", timeout=1.5)  # retry — a single frame can miss (hover overlay)
     if m:
         cx, cy = matcher.center(m)
         log.info("Hangar scroll anchor from 'ship_hangar' template at (%d,%d).", cx, cy)
@@ -1568,6 +1580,14 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
     # The ship hangar is usually already open — the ship icon is right there. Check for it
     # first; if it's visible the hangar is open, so skip the hangar click and its 1s settle.
     # Only open the hangar when no ship is detected.
+    scroll_state = {}  # hangar notches scrolled down to reach the ship — undone before returning
+
+    def scroll_hangar_back_up():
+        steps = scroll_state.pop("steps", 0)
+        if steps:
+            log.info("Scrolling hangar back UP %d step(s) to its original position.", steps)
+            matcher.scroll(ship_cx, ship_cy, clicks=2 * steps)
+
     log.info("Step 0: Checking whether ship icon '%s' is already visible...", ship_template)
     ship_match = matcher.find(ship_template)
     if ship_match:
@@ -1591,7 +1611,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
             matcher._do_click(*HANGAR_FALLBACK_XY, delay=1.0)
         # --- Step 1: Find ship icon now that the hangar is open ---
         log.info("Step 1: Locating ship icon '%s'...", ship_template)
-        ship_match = find_ship_with_scroll(matcher, ship_template, timeout=2.0)
+        ship_match = find_ship_with_scroll(matcher, ship_template, timeout=2.0, scroll_state=scroll_state)
 
     if not ship_match:
         log.warning("Ship icon '%s' not found — quitting mission and requesting new one", ship_template)
@@ -1635,7 +1655,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
             log.warning("No repair menu — opening Ship Hangar and re-locating ship (was it even open?).")
             if not matcher.wait_and_click("ship_hangar", timeout=1.0, delay=1.0):
                 matcher._do_click(*HANGAR_FALLBACK_XY, delay=1.0)
-            new_match = find_ship_with_scroll(matcher, ship_template, timeout=2.0)
+            new_match = find_ship_with_scroll(matcher, ship_template, timeout=2.0, scroll_state=scroll_state)
             if new_match:
                 ship_cx, ship_cy = matcher.center(new_match)
                 log.info("Ship re-located at (%d,%d) after opening hangar.", ship_cx, ship_cy)
@@ -1643,6 +1663,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
                 log.warning("Ship still not found after opening hangar — continuing retries at last coords.")
     if not quote_clicked:
         log.error("'Get Repair Quote' not found after %d attempts", MAX_QUOTE_ATTEMPTS)
+        scroll_hangar_back_up()
         return {"failed": True}
 
     # --- Step 4: Click "Repair" (Repair All) — unless ship is already fully repaired ---
@@ -1680,6 +1701,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
 
     if not repaired_already and not repair_clicked:
         log.error("'Repair' button not found after %d attempts", MAX_REPAIR_ATTEMPTS)
+        scroll_hangar_back_up()
         return {"failed": True}
 
     if repair_clicked:
@@ -1711,6 +1733,7 @@ def repair_ship_flow(matcher: "TemplateMatcher", mission_title: str, dry_run: bo
     log.info("Step 6b: Clicking 'Board Ship'...")
     if not matcher.wait_and_click("board_ship", timeout=1.0, delay=0.6):
         log.warning("'Board Ship' not found in context menu — ship may already be active.")
+    scroll_hangar_back_up()
 
     log.info("=== Ship repaired and activated successfully ===")
     result = {"ship_template": ship_template}

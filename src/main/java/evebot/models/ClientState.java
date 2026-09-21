@@ -28,7 +28,7 @@ public class ClientState {
         DECLINING,
         ACCEPTED,
         REPAIRING,
-        UNDOCKING,    // undock clicked, waiting 15s for animation to complete
+        UNDOCKING,    // undock clicked, waiting out the animation window (UNDOCK_WAIT_SECS)
         TRAVEL,       // one-shot setup: close dialogs, reload modules, set destination
         WARPING,      // in warp — polling warp_active until it disappears, then → IDLE
         IN_COMBAT,
@@ -207,6 +207,10 @@ public class ClientState {
      *  partner and does no work; the partner turning in a mission clears it (resume checking), and
      *  the next completion re-sets it if standing is still below the floor. NOT reset by setState. */
     private boolean standingsPaused = false;
+    /** One-shot: an offer was already pulled from the agent when the pause landed, so the pause
+     *  gate lets this client evaluate that single offer (accept it, or leave it and yield —
+     *  never decline it) instead of abandoning it. Cleared as soon as it is evaluated. */
+    private boolean evaluateOfferWhilePaused = false;
 
     /** Set when the standings pause came from the PERSISTED standing at startup (not a live OCR
      *  read). A persisted value is stale by nature — partner turn-ins boost our standing without
@@ -567,6 +571,8 @@ public class ClientState {
 
     public boolean isStandingsPaused()               { return standingsPaused; }
     public void    setStandingsPaused(boolean v)     { this.standingsPaused = v; }
+    public boolean isEvaluateOfferWhilePaused()           { return evaluateOfferWhilePaused; }
+    public void    setEvaluateOfferWhilePaused(boolean v) { this.evaluateOfferWhilePaused = v; }
     public boolean isStandingsPauseFromPersisted()           { return standingsPauseFromPersisted; }
     public void    setStandingsPauseFromPersisted(boolean v) { this.standingsPauseFromPersisted = v; }
 

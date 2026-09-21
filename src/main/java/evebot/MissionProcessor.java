@@ -295,6 +295,14 @@ public class MissionProcessor {
         ocrBridge.doubleClickTemplate("agent_icon");
         sleep(1200);
         surfaceMissionDialogIfHighSec();
+        // Double-click didn't take — no mission dialog and no agent standings button: try once more.
+        if (ocrBridge.findAnyTemplate("agent_standings", "accept", "decline", "complete_mission",
+                "request_mission", "view_mission", "quit_mission") == null) {
+            log("Agent dialog not open (no mission / agent standings) — double-clicking agent_icon again");
+            ocrBridge.doubleClickTemplate("agent_icon");
+            sleep(1200);
+            surfaceMissionDialogIfHighSec();
+        }
     }
 
     /**

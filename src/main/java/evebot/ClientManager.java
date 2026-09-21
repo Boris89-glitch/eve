@@ -30,9 +30,6 @@ public class ClientManager {
     private static final int LOWSEC_MAX_SHIP_KILLS = 1;
     /** Only consider accepting a low-sec offer once standing has dropped below this. */
     private static final double LOWSEC_MIN_STANDING = -0.5;
-    /** Blood Raider gets its own standing gate instead of the stricter low-sec floor:
-     *  skip it whenever standing is above this (accept only at or below). */
-    private static final double BLOODRAIDER_MAX_STANDING = 1.0;
     /** 'lowsec_*' offer template stem -> ESI solar-system id whose last-hour ship_kills gates
      *  acceptance. Loaded once (lazily) from config/lowsec_systems.json. */
     private Map<String, Integer> lowsecSystems = null;
@@ -46,6 +43,29 @@ public class ClientManager {
     private final Map<String, Boolean>          brOverloaded       = new ConcurrentHashMap<>();
     /** Blood Raider: true once the 2-minute Shift+xc (overload OFF) has fired. */
     private final Map<String, Boolean>          brOverloadOff      = new ConcurrentHashMap<>();
+    /** Foreground lend-out (Blood Raider / Scarlet runs): lender id → the client it last lent the
+     *  foreground to. Presence means focus must come back to the lender by its {@link #lendReturnAt}. */
+    private final Map<String, String>           lentTo             = new ConcurrentHashMap<>();
+    /** Foreground lend-out: lender id → when monitorClients must hand the foreground back to it. */
+    private final Map<String, LocalDateTime>    lendReturnAt       = new ConcurrentHashMap<>();
+    /** Serpentis: true once the delayed Shift+a + 'a' (15s after 'dxcv') has fired. */
+    private final Map<String, Boolean>          serpRocketsOn      = new ConcurrentHashMap<>();
+    /** Vengeance: true once the Shift+a overload (30s into shooting the vengeance) has fired. */
+    private final Map<String, Boolean>          vengOverloaded     = new ConcurrentHashMap<>();
+    /** Enyo: true once the Shift+a overload (40s into shooting the enyo) has fired. */
+    private final Map<String, Boolean>          enyoOverloaded     = new ConcurrentHashMap<>();
+    /** Completion poll: when this client last took the foreground to poll for set_destination —
+     *  it keeps polling for {@link #COMPLETION_FOCUS_POLL_SECS} before yielding focus again. */
+    private final Map<String, LocalDateTime>    completionPollFocus = new ConcurrentHashMap<>();
+    /** Seconds a client polls for set_destination/dock in the foreground before switching away,
+     *  instead of yielding on the very first miss. */
+    private static final long COMPLETION_FOCUS_POLL_SECS = 5;
+    /** COMPLETING turn-in hold: consecutive hold ticks on which the partner never got a tick after
+     *  we clicked its thumbnail (the handoff isn't landing). */
+    private final Map<String, Integer>          completingHoldHandoffMisses = new ConcurrentHashMap<>();
+    /** Give up holding the turn-in once this many consecutive handoffs to the partner fail — a
+     *  hold that can't yield the foreground just starves the partner (it can't check, jump or dock). */
+    private static final int COMPLETING_HOLD_HANDOFF_MISS_LIMIT = 4;
     /** Vengeance: consecutive re-lock attempts on 'target_inquisitor' that produced no
      *  'locked_inquisitor' bracket. Once both inquisitors are dead the remaining overview matches
      *  are false positives (a station has been locked this way), so after
@@ -91,6 +111,9 @@ public class ClientManager {
     /** Per-client foreground budget for one CHECKING_MISSIONS/DECLINING cycle before yielding focus. */
     private static final long CHECK_CYCLE_TIMEOUT_SEC   = 35;
     private static final long UNDOCK_WAIT_SECS          = 15;
+    /** When the lent-out foreground comes back to an undocking client. Longer than the
+     *  animation wait above so it returns to a ship that is already out and ready to act. */
+    private static final long UNDOCK_LEND_RETURN_SECS   = 20;
     /** Consecutive polls that must show warp_active gone before a gate-warp landing is confirmed —
      *  guards against a single sub-threshold frame ending the warp early. */
     private static final int  WARP_END_MISS_CONFIRM     = 2;
@@ -212,6 +235,39 @@ public class ClientManager {
                 return;
             }
 
+            // Foreground lend-out: a Blood Raider / Scarlet run hands the foreground to other clients
+            // during its waits — take it back once its return time is due.
+            for (String lenderId : lentTo.keySet()) {
+                ClientWindowInfo lenderWin = clientWindows.get(lenderId);
+                ClientState lenderCs = stateManager.getState(lenderId);
+                if (lenderWin == null || isParkedOrLocked(lenderId) || !isLendingRun(lenderCs)) {
+                    lentTo.remove(lenderId);
+                    lendReturnAt.remove(lenderId);
+                    continue;
+                }
+                if (lenderId.equals(fg.getClientId())) continue;
+                LocalDateTime due = lendReturnAt.get(lenderId);
+                if (due != null && !LocalDateTime.now().isBefore(due)) {
+                    // Undock lends yield to the borrower — a ship sitting just outside the undock
+                    // bay can wait, a station dialog or a run into the mission (gate activation,
+                    // warp-in, the fight itself) can't. Those sequences hand the foreground on at
+                    // their own safe points, so the handback lands then; the force-switch watchdog
+                    // is the backstop if the borrower never yields.
+                    if (lenderCs.getState() == ClientState.State.UNDOCKING
+                            && holdsForegroundForMission(fg.getClientId())) {
+                        log("[ClientManager] Lend-out over for " + lenderId + " (undock) but "
+                                + fg.getClientId() + " is mid " + stateManager.getStateEnum(fg.getClientId())
+                                + " — holding the handback until it yields.");
+                        continue;
+                    }
+                    log("[ClientManager] Lend-out over — taking the foreground back to " + lenderId
+                            + " from " + fg.getClientId() + ".");
+                    bringToForeground(lenderWin);
+                    processClient(lenderId, lenderWin);
+                    return;
+                }
+            }
+
             // Global watchdog: if the foreground client has hogged focus past FORCE_SWITCH_SECS
             // (e.g. a long combat that never yields), force a switch so the idle client gets a
             // tick and cannot sit AFK in space until podded. bringToForeground resets the timer.
@@ -300,7 +356,14 @@ public class ClientManager {
         // can carry (solo, or the partner is also paused/parked), HOLD the pause and idle: a
         // paused client must never decline, so resuming to "avoid a stall" is not an option.
         ClientState pausedCs = stateManager.getState(clientId);
-        if (pausedCs.isStandingsPaused()) {
+        if (pausedCs.isStandingsPaused()
+                && pausedCs.isEvaluateOfferWhilePaused()
+                && stateManager.getStateEnum(clientId) == ClientState.State.CHECKING_MISSIONS) {
+            // The pause landed with an offer already on screen (requested before the standings
+            // read). Don't throw that offer away — evaluate this one: accepting is free, and only
+            // declining is what the pause exists to prevent (applyDecision yields instead).
+            log(clientId, "standings-paused, but an offer is already on the agent — evaluating this one before yielding.");
+        } else if (pausedCs.isStandingsPaused()) {
             // Startup pause rests on the PERSISTED standing, which is stale by nature — the
             // partner's turn-ins boost our standing without us ever re-reading it. Verify once
             // with a live read at the agent (we start docked there) before honoring the pause:
@@ -323,6 +386,21 @@ public class ClientManager {
                     log(clientId, "standings verified: still below the pause floor — staying paused.");
                 } else {
                     log(clientId, "standings read failed — keeping the persisted pause.");
+                }
+                // Still paused — but the agent dialog (uncovered by closing the standings window) may
+                // show a mission that was accepted BY HAND while the bot sat paused: an in-progress
+                // (NOT_COMPLETE) or finished (COMPLETED / complete_mission) mission with nothing on
+                // record. Fly / turn that in instead of ignoring it: resume, and let IDLE's first
+                // agent-dialog check pick it up as a leftover. The pause re-arms at its completion
+                // if the standing is still below the floor.
+                MissionProcessor.DialogState manual = missionProcessor.detectDialog(true);
+                if (manual == MissionProcessor.DialogState.NOT_COMPLETE
+                        || manual == MissionProcessor.DialogState.ALREADY_ACCEPTED
+                        || manual == MissionProcessor.DialogState.COMPLETED) {
+                    pausedCs.setStandingsPaused(false);
+                    log(clientId, "standings-paused, but the agent shows an accepted mission (" + manual
+                            + ") — picked up manually; resuming to fly / turn it in.");
+                    return;   // next tick: IDLE first-dialog check recovers the mission
                 }
             }
             ClientWindowInfo other = findOtherClient(clientId);
@@ -622,22 +700,15 @@ public class ClientManager {
         return system;
     }
 
-    private static final int POD_CHECK_INTERVAL_MINUTES = 5;
-
     /**
-     * Periodic overview upkeep (WARPING, and IDLE while travelling), throttled to
-     * every {@link #POD_CHECK_INTERVAL_MINUTES} minutes: clicks the 'general'
-     * overview tab to reset the preset. Pod detection was removed from this timer —
-     * the no_ship check now runs on warp entry (see {@link #handleWarping}) instead.
+     * Reset the overview to the General preset right before entering mission space —
+     * the one moment it actually matters (combat targeting reads the overview). Called
+     * before the mission-start action: activate_gate, or the warp_to_location for
+     * gateless missions that land straight in the pocket.
      */
-    private void runPeriodicOverviewReset(String clientId, ClientState cs) {
-        long sinceLast = Duration.between(cs.getLastPodCheck(), LocalDateTime.now()).toMinutes();
-        if (sinceLast < POD_CHECK_INTERVAL_MINUTES) {
-            return;
-        }
-        cs.setLastPodCheck(LocalDateTime.now());
-        log(clientId, "Periodic check (every " + POD_CHECK_INTERVAL_MINUTES + "m): click 'general' overview reset.");
-        missionProcessor.clickTemplate("general"); // reset overview to the General preset (no-op if not visible)
+    private void resetOverviewBeforeMissionEntry(String clientId) {
+        log(clientId, "PRE-ENTRY: click 'general' overview reset.");
+        missionProcessor.clickTemplate("general"); // no-op if not visible
     }
 
     /**
@@ -909,11 +980,6 @@ public class ClientManager {
         // us here. One-shot (pendingGateJump), so the ticks that follow leave the count alone.
         confirmGateJump(clientId, cs);
 
-        // Periodic 'general' overview reset only while outbound in space (TO_MISSION).
-        if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION) {
-            runPeriodicOverviewReset(clientId, cs);
-        }
-
         if (cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION) {
             boolean justLanded = cs.isJustExitedWarp();
             if (justLanded) {
@@ -960,6 +1026,8 @@ public class ClientManager {
                 if (found != null) {
                     switch (found) {
                         case "activate_gate":
+                            if (blockedByOtherBurnerStart(clientId, cs)) return;
+                            resetOverviewBeforeMissionEntry(clientId);
                             loadAmmoBeforeGate(clientId, cs);
                             log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
                             cs.setLastWarpCheck(LocalDateTime.MIN);
@@ -974,7 +1042,10 @@ public class ClientManager {
                             // Scarlet / Pot and Kettle land straight in the pocket (no acceleration
                             // gate) — flag so the next landing enters combat directly instead of
                             // seeking an activate_gate that will never be there.
-                            if (landsInPocketOnWarpTo(cs)) cs.setEnterCombatOnWarpLand(true);
+                            if (landsInPocketOnWarpTo(cs)) {
+                                resetOverviewBeforeMissionEntry(clientId); // no gate — this warp is the mission start
+                                cs.setEnterCombatOnWarpLand(true);
+                            }
                             issueWarp(clientId, cs, () -> missionProcessor.clickWarpToLocation());
                             break;
                         default:
@@ -1026,6 +1097,8 @@ public class ClientManager {
             cs.setNoTravelUiSince(LocalDateTime.MIN);
             switch (found) {
                 case "activate_gate":
+                    if (blockedByOtherBurnerStart(clientId, cs)) return;
+                    resetOverviewBeforeMissionEntry(clientId);
                     loadAmmoBeforeGate(clientId, cs);
                     log(clientId, "IDLE[TO_MISSION]: activate_gate — right-click → mission_start, entering combat.");
                     cs.setLastWarpCheck(LocalDateTime.MIN);
@@ -1040,7 +1113,10 @@ public class ClientManager {
                     // Scarlet / Pot and Kettle land straight in the pocket (no acceleration gate) —
                     // flag so the next landing enters combat directly instead of looking for an
                     // activate_gate that will never be there.
-                    if (landsInPocketOnWarpTo(cs)) cs.setEnterCombatOnWarpLand(true);
+                    if (landsInPocketOnWarpTo(cs)) {
+                        resetOverviewBeforeMissionEntry(clientId); // no gate — this warp is the mission start
+                        cs.setEnterCombatOnWarpLand(true);
+                    }
                     issueWarp(clientId, cs, () -> missionProcessor.clickWarpToLocation());
                     break;
                 case "stargate":
@@ -1053,7 +1129,10 @@ public class ClientManager {
                         missionProcessor.nudgeView();
                         if (missionProcessor.findTemplate("warp_to_location") != null) {
                             log(clientId, "IDLE[TO_MISSION]: warp_to_location revealed after nudge — warping into mission space.");
-                            if (landsInPocketOnWarpTo(cs)) cs.setEnterCombatOnWarpLand(true);
+                            if (landsInPocketOnWarpTo(cs)) {
+                                resetOverviewBeforeMissionEntry(clientId); // no gate — this warp is the mission start
+                                cs.setEnterCombatOnWarpLand(true);
+                            }
                             issueWarp(clientId, cs, () -> missionProcessor.clickWarpToLocation());
                             break;
                         }
@@ -1079,6 +1158,42 @@ public class ClientManager {
                                 }
                                 return;
                             }
+                        }
+                        // Past jump #4 we're at Bei — the next gate leaves high sec, so never take
+                        // it blind: the route panel must read a destination first. "No Destination"
+                        // (or a collapsed/hidden section) with no set_destination prompt means the
+                        // route was lost or hidden: click the route tab to reveal it, re-read, then
+                        // re-scan for set_destination. Still nothing → hold, don't jump this tick.
+                        MissionProcessor.RouteInfo gateRoute = missionProcessor.readRoute();
+                        if (!gateRoute.isSet()) {
+                            log(clientId, "IDLE[TO_MISSION]: jump #" + cs.getJumpCount()
+                                    + " — no readable destination on the route panel [" + gateRoute.rawOneLine()
+                                    + "] — not jumping blind; opening the mission via the route tab to re-track it.");
+                            // The route tab opens the mission dialog. It shows 'Untrack' (the mission
+                            // is tracked but its route got dropped): untrack, then track again — that
+                            // re-issues the set_destination prompt. Click it, close the dialog on its
+                            // X, and confirm on the route panel. Every click is a no-op if not on screen.
+                            missionProcessor.clickTemplate("route_tab");
+                            missionProcessor.clickTemplate("untrack");
+                            try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                            missionProcessor.clickTemplate("track");
+                            try { Thread.sleep(500); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                            if (missionProcessor.isSetDestinationVisible()) {
+                                log(clientId, "IDLE[TO_MISSION]: re-tracked — set_destination is up, clicking it.");
+                                if (clickSetDestinationByTemplate(clientId) == null) {
+                                    log(clientId, "IDLE[TO_MISSION]: set_destination click not confirmed on the route panel.");
+                                }
+                            } else {
+                                log(clientId, "IDLE[TO_MISSION]: no set_destination prompt after re-tracking.");
+                            }
+                            missionProcessor.closeAllDialogs(); // close the mission dialog on its X
+                            gateRoute = missionProcessor.readRoute();
+                            if (!gateRoute.isSet()) {
+                                log(clientId, "IDLE[TO_MISSION]: still no route [" + gateRoute.rawOneLine()
+                                        + "] — holding at the gate, retrying next tick.");
+                                return;
+                            }
+                            log(clientId, "IDLE[TO_MISSION]: route revealed — " + gateRoute + ".");
                         }
                     }
                     // Distance from home only moves once we come out of warp in the next system
@@ -1300,7 +1415,7 @@ public class ClientManager {
                     log(clientId, "IDLE: faction run docked — waiting for agent_icon; yielding foreground to " + other.getClientId() + ".");
                     bringToForeground(other);
                 } else {
-                    log(clientId, "IDLE: faction run docked — waiting for agent_icon before resuming checking.");
+                    logTick(clientId, "IDLE: faction run docked — waiting for agent_icon before resuming checking.");
                 }
                 return;
             }
@@ -1538,7 +1653,7 @@ public class ClientManager {
         // it can never leak into a later, unrelated offer.
         if (cs.isDeclineNextOffer()) {
             if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
-                log(clientId, "CHECKING_MISSIONS: chain follow-up expected but no live OFFER dialog yet — waiting.");
+                logTick(clientId, "CHECKING_MISSIONS: chain follow-up expected but no live OFFER dialog yet — waiting.");
                 return;
             }
             cs.setDeclineNextOffer(false);
@@ -1632,9 +1747,8 @@ public class ClientManager {
                 return;
             }
 
-            // OCR the offer up front so the standing gate can tell Blood Raider apart: it is skipped
-            // whenever standing is above 0 (the user's rule), while other low-sec Hagilur offers
-            // (Serpentis) keep the stricter LOWSEC_MIN_STANDING floor.
+            // OCR the offer up front so it's on the state before the gates below run. The low-sec
+            // standing floor applies to every low-sec offer, Blood Raider included.
             Mission ls = missionProcessor.readMission(getMissionAreaForClient(clientId));
             if (ls == null) {
                 log(clientId, "Low-sec: OCR returned null on the offer — retrying next tick.");
@@ -1642,18 +1756,13 @@ public class ClientManager {
             }
             cs.setCurrentMission(ls);
             stampTextIdentifiedTarget(clientId, cs, ls);
-            boolean bloodRaider = isBloodRaiderMission(cs);
 
             double standing = cs.getLastKnownStanding();
-            boolean standingBlocks = bloodRaider ? bloodRaiderBlockedByStanding(cs)
-                                                 : (standing >= LOWSEC_MIN_STANDING);
-            if (standingBlocks) {
-                String gateDesc = bloodRaider ? "> " + BLOODRAIDER_MAX_STANDING + " (Blood Raider gate)"
-                                              : ">= " + LOWSEC_MIN_STANDING;
+            if (standing >= LOWSEC_MIN_STANDING) {
+                String gateDesc = ">= " + LOWSEC_MIN_STANDING;
                 System.out.println(">>> [" + clientId + "] DECLINE — low-sec block "
                         + lowsecKey + " (standing " + standing + " " + gateDesc + ")");
-                log(clientId, "Low-sec offer '" + lowsecKey + "'"
-                        + (bloodRaider ? " (Blood Raider)" : "") + " declined — standing "
+                log(clientId, "Low-sec offer '" + lowsecKey + "' declined — standing "
                         + standing + " " + gateDesc + ".");
                 cs.setCurrentMission(null);
                 countDeclineForStandings(clientId, cs);
@@ -1831,12 +1940,22 @@ public class ClientManager {
             // a read that clearly names a DIFFERENT known combat target means this isn't Scarlet.
             // Fly it as that mission instead; a read that names nothing still proceeds as Scarlet.
             Mission scarletOcr = missionProcessor.readMission(getMissionAreaForClient(clientId), true);
-            String named = scarletOcr != null
-                    ? missionProcessor.resolveCombatTargetFromKeywords(missionOfferText(scarletOcr))
-                    : null;
-            if (named != null && !"scarlet".equals(named)) {
-                log(clientId, "mission_scarlet matched but OCR names '" + named + "' — false positive, "
-                        + "evaluating as that mission instead of accepting as Scarlet.");
+            if (scarletOcr == null) {
+                log(clientId, "mission_scarlet matched but OCR returned null — retrying next tick.");
+                return;
+            }
+            String named = missionProcessor.resolveCombatTargetFromKeywords(missionOfferText(scarletOcr));
+            // Positive Scarlet evidence, whitespace-stripped so the split OCR ("Sc a rlet") still
+            // counts. Without it the tiny text template has false-positived on an unrelated
+            // offer (seen right after a Scarlet turn-in): committing the hardcoded identity then
+            // flies the next mission as Scarlet — wrong ship, wrong combat handler.
+            String stripped = missionOfferText(scarletOcr).replaceAll("\\s+", "");
+            boolean scarletEvidence = stripped.contains("scarlet") || stripped.contains("anire")
+                    || stripped.contains("dreadpirate");
+            if ((named != null && !"scarlet".equals(named)) || !scarletEvidence) {
+                log(clientId, "mission_scarlet matched but " + (named != null && !"scarlet".equals(named)
+                        ? "OCR names '" + named + "'" : "the offer text has no Scarlet/Anire in it")
+                        + " — false positive, evaluating the OCR'd offer instead of accepting as Scarlet.");
                 cs.setCurrentMission(scarletOcr);
                 seedRouteDestinationFromOffer(clientId, cs, scarletOcr);
                 if (declineIfPodAvoided(clientId, cs, scarletOcr)) return;
@@ -1848,7 +1967,7 @@ public class ClientManager {
             scarlet.setTitle("scarlet");
             scarlet.setShipTarget("scarlet"); // so IN_COMBAT routes to handleCombatScarlet
             cs.setCurrentMission(scarlet);
-            log(clientId, "Scarlet template matched, OCR named no other target — evaluating against standings.");
+            log(clientId, "Scarlet template matched and the offer text confirms Scarlet — evaluating against standings.");
             applyDecision(clientId, scarlet, missionConfig.evaluate(scarlet, cs.getLastKnownStanding()));
             return;
         }
@@ -1979,23 +2098,32 @@ public class ClientManager {
     }
 
     private void applyDecision(String clientId, Mission mission, MissionConfig.Decision decision) {
-        // Blood Raider is never worth running once standing is above 0 — override an accept to a
-        // decline. Lives here so it holds on every accept path that funnels through applyDecision.
-        if (decision == MissionConfig.Decision.ACCEPT
-                && bloodRaiderBlockedByStanding(stateManager.getState(clientId))) {
-            System.out.println(">>> [" + clientId + "] DECLINE — Blood Raider, standing > "
-                    + BLOODRAIDER_MAX_STANDING + " (" + mission.getTitle() + ")");
-            log(clientId, "Blood Raider offer declined — standing above " + BLOODRAIDER_MAX_STANDING + ".");
-            decision = MissionConfig.Decision.DECLINE;
-        }
         if (decision == MissionConfig.Decision.ACCEPT) {
             System.out.println(">>> [" + clientId + "] ACCEPT — " + mission.getTitle());
             if (!missionProcessor.clickAcceptButton()) {
                 log(clientId, "ACCEPT failed — offer still on screen, staying put to retry next tick.");
                 return;
             }
+            ClientState acs = stateManager.getState(clientId);
+            acs.setEvaluateOfferWhilePaused(false);
+            // Accepted while paused (the offer pulled just before the standings read): running it
+            // is how the standing climbs, so lift the pause and fly it. The next completion
+            // re-arms the pause if the standing is still below the floor.
+            if (acs.isStandingsPaused()) {
+                acs.setStandingsPaused(false);
+                log(clientId, "standings-paused but this offer is acceptable — taking it and lifting the pause to fly it.");
+            }
             stateManager.setState(clientId, ClientState.State.ACCEPTED);
         } else {
+            ClientState dcs = stateManager.getState(clientId);
+            // Paused clients never decline — that is the whole point of the pause. Leave the offer
+            // on the agent and yield; it is re-evaluated once the partner's turn-in clears us.
+            if (dcs.isStandingsPaused()) {
+                dcs.setEvaluateOfferWhilePaused(false);
+                log(clientId, "standings-paused — leaving '" + mission.getTitle()
+                        + "' on the agent instead of declining; yielding until the pause clears.");
+                return;
+            }
             System.out.println(">>> [" + clientId + "] DECLINE — " + mission.getTitle());
             countDeclineForStandings(clientId, stateManager.getState(clientId));
             missionProcessor.clickDeclineButton();
@@ -2025,7 +2153,7 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleDeclining(String clientId, ClientWindowInfo window) {
-        log(clientId, "DECLINING — waiting for offer dialog to close...");
+        logTick(clientId, "DECLINING — waiting for offer dialog to close...");
 
         if (!missionProcessor.waitForDialogClosed()) {
             ClientState cs = stateManager.getState(clientId);
@@ -2042,38 +2170,7 @@ public class ClientManager {
             return;
         }
 
-        // Scheduled standings re-read (every Nth non-anomic decline): the agent dialog is open
-        // now that the offer closed, so read standings, persist, then refocus the agent dialog
-        // before requesting the next mission. NaN OCR misses are ignored by recordStanding.
         ClientState cs = stateManager.getState(clientId);
-        if (cs.isStandingsCheckDue()) {
-            cs.setStandingsCheckDue(false);
-            log(clientId, "DECLINING: standings re-check due — reading agent standings.");
-            missionProcessor.clickAgentStandings();
-            double standings = missionProcessor.readAgentStandings();
-            boolean pauseNow = false;
-            if (!Double.isNaN(standings)) {
-                stateManager.recordStanding(clientId, standings);
-                log(clientId, "DECLINING: tracked agent standing updated for mission gating.");
-                // Standing dropped below the pause floor mid-decline-streak (no completion to
-                // trigger the check in handleCompleting): yield to the partner now instead of
-                // requesting/accepting the next mission. The partner turning in clears the pause.
-                if (standings < STANDINGS_PAUSE_FLOOR) {
-                    boolean wasPaused = cs.isStandingsPaused();
-                    cs.setStandingsPaused(true);
-                    pauseNow = true;
-                    log(clientId, "DECLINING: standing below " + STANDINGS_PAUSE_FLOOR
-                            + " — pausing until the partner completes a mission.");
-                    if (!wasPaused) soundAlert(STANDINGS_ALERT);
-                }
-            }
-            missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X')
-            // Closing the standings window uncovers the agent window that was already open behind it,
-            // and the offer has just been declined — so what's showing is Request Mission, not View
-            // Mission. Don't re-double-click the agent (that would hunt for a View Mission that isn't
-            // there); fall straight through to the clickRequestMission below.
-            if (pauseNow) return;   // yield; the pause gate hands focus to the partner next tick
-        }
 
         log(clientId, "Dialog closed — requesting new mission.");
         missionProcessor.clickRequestMission();
@@ -2107,6 +2204,35 @@ public class ClientManager {
         }
         declineNoOfferRetries.put(clientId, 0);
 
+        // Scheduled standings re-read (every Nth non-anomic decline), run AFTER the new offer is
+        // up rather than before requesting it: reading first and pausing on a low standing costs
+        // us the look at this offer entirely. Requested first, the offer stays on screen — a pause
+        // here only yields to the partner, and CHECKING_MISSIONS evaluates the offer (against the
+        // standing we just read) once the pause clears. NaN OCR misses are ignored by
+        // recordStanding; closing the standings window uncovers the offer behind it.
+        if (cs.isStandingsCheckDue()) {
+            cs.setStandingsCheckDue(false);
+            log(clientId, "DECLINING: standings re-check due — reading agent standings.");
+            missionProcessor.clickAgentStandings();
+            double standings = missionProcessor.readAgentStandings();
+            if (!Double.isNaN(standings)) {
+                stateManager.recordStanding(clientId, standings);
+                log(clientId, "DECLINING: tracked agent standing updated for mission gating.");
+                // Standing dropped below the pause floor mid-decline-streak (no completion to
+                // trigger the check in handleCompleting): yield to the partner instead of
+                // accepting/declining anything else. The partner turning in clears the pause.
+                if (standings < STANDINGS_PAUSE_FLOOR) {
+                    boolean wasPaused = cs.isStandingsPaused();
+                    cs.setStandingsPaused(true);
+                    cs.setEvaluateOfferWhilePaused(true);   // evaluate the offer we just pulled
+                    log(clientId, "DECLINING: standing below " + STANDINGS_PAUSE_FLOOR
+                            + " — pausing after this offer is evaluated (accept only, never decline).");
+                    if (!wasPaused) soundAlert(STANDINGS_ALERT);
+                }
+            }
+            missionProcessor.closeStandingsDialog();  // close the standings window (region-scoped 'X')
+        }
+
         // Leave currentMission null so CHECKING_MISSIONS classifies the new offer
         // via template matching first (OCR only runs if a wanted type matches).
         stateManager.getState(clientId).setCurrentMission(null);
@@ -2137,6 +2263,7 @@ public class ClientManager {
     // -----------------------------------------------------------------------
 
     private void handleRepairing(String clientId, ClientWindowInfo window) {
+        if (blockedByBurnerRun(clientId, "repair + undock")) return;
         Mission mission = stateManager.getState(clientId).getCurrentMission();
         log(clientId, "Starting repair + undock flow for: "
                 + (mission != null ? mission.getTitle() : "unknown mission"));
@@ -2161,14 +2288,10 @@ public class ClientManager {
             stateManager.setState(clientId, ClientState.State.UNDOCKING);
             // Null sec: stay on this client through the undock animation so it can jump out as
             // fast as possible. High sec: nothing to babysit during undock (can't insta-dock back
-            // on this station anyway), so hand focus to the other client the moment undock is
-            // clicked — UNDOCKING resumes for this client when it's refocused.
+            // on this station anyway), so lend the foreground out the moment undock is clicked and
+            // take it back at UNDOCK_LEND_RETURN_SECS, just past the animation window.
             if (Environment.isHighSec()) {
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "Undock clicked — switching focus to " + other.getClientId() + ".");
-                    bringToForeground(other);
-                }
+                lendForeground(clientId, LocalDateTime.now().plusSeconds(UNDOCK_LEND_RETURN_SECS), true);
             }
         } else if (MissionProcessor.UNDOCK_SHIP_NOT_FOUND.equals(result)) {
             String mTitle = mission != null ? mission.getTitle() : "unknown";
@@ -2206,7 +2329,17 @@ public class ClientManager {
      */
     private MissionProcessor.RouteInfo clickSetDestinationByTemplate(String clientId) {
         int[] pos = missionProcessor.findTemplatePos("set_destination");
-        if (pos == null) return null;
+        if (pos == null) {
+            // No prompt on screen — but the route may already be set (an earlier click landed and
+            // the prompt is gone). The route panel is the real confirmation, so read it anyway.
+            MissionProcessor.RouteInfo existing = missionProcessor.readRoute();
+            if (existing.isSet()) {
+                log(clientId, "ROUTE = " + existing + " — already set (no set_destination prompt), using it.");
+                return existing;
+            }
+            log(clientId, "ROUTE: no set_destination prompt and panel OCR: [" + existing.rawOneLine() + "] — no route.");
+            return null;
+        }
         log(clientId, "ROUTE: set_destination found at (" + pos[0] + "," + pos[1] + ") — clicking.");
         missionProcessor.clickPos(pos[0], pos[1]);
         // Move the cursor off the prompt (click in empty space) so it can't cover either template
@@ -2634,82 +2767,135 @@ public class ClientManager {
     }
 
     /**
-     * Serpentis burner combat sequence (manual recipe from the user). Dormant until
-     * acceptance is enabled — Serpentis is still auto-declined by config, so shipTarget
-     * 'serpentis' only occurs once the accept path is wired and templates/target_serpentis.png
-     * exists.
+     * Serpentis burner combat sequence (Sansha-style entry).
      *
      * Steps:
-     *   0 → make target_serpentis visible (nudge), Ctrl+click to lock it
-     *   1 → press 'asdx' immediately (activate modules, no lock settle)
-     *   2 → 14s wait, then press 'c'
-     *   3 → 3s after 'c', Alt+F1 (cap booster)
-     *   4 → 9s after 'c', Shift+a (overload rockets)
-     *   5 → poll for mission complete (set_destination / dock / pod check)
+     *   0 → Shift+sxc (overload modules — 'a' is held back)
+     *   1 → right-click 'target_serpentis' → 'approach' + press 's' (afterburner)
+     *   2 → Ctrl+click 'target_serpentis' (lock) + press 'dxcv' (remaining modules)
+     *   3 → 15s after 'dxcv', Shift+a + 'a' (overload + activate); 30s after 'dxcv', Alt+F1 (cap booster)
+     *   4 → 30s after 'dxcv', Shift+s (stop overloading afterburner), then safe-switch
+     *   5 → WAIT for set_destination/dock; 30s after the first Alt+F1 (~60s into the fight) → Alt+F1 again (once); 180s hardcap (pod check) → step 6
+     *   6 → press 'xcv' (deactivate modules), then dock / RETURNING
      */
     private void handleCombatSerpentis(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
         switch (step) {
             case 0: {
-                String tk = awaitCombatTarget(clientId, cs, "target_serpentis");
-                if (tk == null) return; // not visible — nudged, hold step and retry next tick
-                log(clientId, "COMBAT[Serpentis] Step 0: Ctrl+click " + tk + " (lock target).");
-                missionProcessor.ctrlClickTemplate("target_serpentis");
-                cs.setCombatWaitStart(LocalDateTime.now());
+                log(clientId, "COMBAT[Serpentis] Step 0: Shift+sxc (overload modules; Shift+a delayed).");
+                missionProcessor.shiftKeyPress("sxc");
+                serpRocketsOn.remove(clientId);
+                cs.setExtraCapPulseDone(false);
                 cs.setCombatStep(1);
                 break;
             }
             case 1: {
-                // No lock-settle wait — modules are pressed immediately (even before the lock
-                // completes) so they auto-fire the moment the target locks.
-                log(clientId, "COMBAT[Serpentis] Step 1: press 'asdx' (activate modules).");
-                missionProcessor.keyPress("asdx");
-                cs.setCombatWaitStart(LocalDateTime.now());
+                String tk = awaitCombatTarget(clientId, cs, "target_serpentis");
+                if (tk == null) return; // not visible — nudged, hold step and retry next tick
+                cs.setCombatTargetKey(tk);
+                log(clientId, "COMBAT[Serpentis] Step 1: right-click " + tk + " → 'approach', then press 's' (afterburner).");
+                missionProcessor.rightClickAndSelect(tk, "approach", 3, true);
+                missionProcessor.keyPress("s");
                 cs.setCombatStep(2);
                 break;
             }
             case 2: {
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 14) {
-                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 14s (before 'c').");
-                    return;
-                }
-                log(clientId, "COMBAT[Serpentis] Step 2: press 'c'.");
-                missionProcessor.keyPress("c");
+                String tk = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_serpentis";
+                log(clientId, "COMBAT[Serpentis] Step 2: Ctrl+click " + tk + " (lock), then press 'dxcv' (activate remaining modules; 'a' delayed 15s).");
+                missionProcessor.ctrlClickTemplate(tk);
+                missionProcessor.keyPress("dxcv");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
                 break;
             }
             case 3: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 3) {
-                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 3s (before cap booster).");
+                if (elapsed >= 15 && !Boolean.TRUE.equals(serpRocketsOn.get(clientId))) {
+                    log(clientId, "COMBAT[Serpentis] 15s after 'dxcv' — Shift+a + 'a' (overload + activate).");
+                    missionProcessor.shiftKeyPress("a");
+                    missionProcessor.keyPress("a");
+                    serpRocketsOn.put(clientId, true);
+                }
+                if (elapsed < 30) {
+                    logTick(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 30s (before cap booster).");
                     return;
                 }
                 log(clientId, "COMBAT[Serpentis] Step 3: Alt+F1 (cap booster).");
                 missionProcessor.altKeyPress("f1");
-                cs.setCombatStep(4); // keep combatWaitStart at 'c' — Shift+a is measured from there
+                cs.setCombatStartTime(LocalDateTime.now()); // first boost — the 30s re-boost is measured from here
+                cs.setCombatStep(4); // keep combatWaitStart at 'adxcv' — Shift+s is measured from there
                 break;
             }
             case 4: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 9) {
-                    log(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 9s (before overload).");
+                if (elapsed < 30) {
+                    logTick(clientId, "COMBAT[Serpentis] wait: " + elapsed + "s / 30s (before Shift+s).");
                     return;
                 }
-                log(clientId, "COMBAT[Serpentis] Step 4: Shift+a (overload rockets).");
-                missionProcessor.shiftKeyPress("a");
+                log(clientId, "COMBAT[Serpentis] Step 4: Shift+s (stop overloading afterburner).");
+                missionProcessor.shiftKeyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Serpentis] waiting for mission complete — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
+                // Lend the foreground out, back shortly before the second Alt+F1 (30s after the first).
+                lendForeground(clientId, cs.getCombatStartTime().plusSeconds(SERP_RETURN_SECS), false, true);
                 break;
             }
             case 5: {
-                pollSetDestinationOrCapsule(clientId, cs, "Serpentis", true);
+                // WAIT for set_destination/dock
+                String completed = missionProcessor.detectCombatComplete();
+                if (completed != null) {
+                    log(clientId, "COMBAT[Serpentis] " + completed + " detected — deactivating modules.");
+                    cs.setCombatStep(6);
+                    break;
+                }
+
+                // Long fight: 30s after the first boost (~60s into the fight)
+                // Alt+F1 again (once).
+                if (!cs.isExtraCapPulseDone()
+                        && Duration.between(cs.getCombatStartTime(), LocalDateTime.now()).getSeconds() >= 30) {
+                    log(clientId, "COMBAT[Serpentis] 30s since first boost (~60s into fight) — Alt+F1 again.");
+                    missionProcessor.altKeyPress("f1");
+                    cs.setExtraCapPulseDone(true);
+                }
+
+                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
+
+                String revealed = nudgeForCompletion(clientId, cs, "Serpentis", elapsed, COMPLETION_NUDGE_AFTER_SECS);
+                if (revealed != null) {
+                    log(clientId, "COMBAT[Serpentis] " + revealed + " revealed after nudge — deactivating modules.");
+                    cs.setCombatStep(6);
+                    break;
+                }
+
+                // 180s hardcap: no set_destination/dock seen — pod check, then force deactivate + return.
+                if (elapsed >= 180) {
+                    if (podCheckInSpace()) {
+                        handlePodDeath(clientId, true);
+                        return;
+                    }
+                    log(clientId, "COMBAT[Serpentis] 180s hardcap — no completion, forcing deactivate + return.");
+                    cs.setCombatStep(6);
+                    break;
+                }
+
+                logTick(clientId, "COMBAT[Serpentis] waiting for mission complete (" + elapsed + "s)...");
+                break;
+            }
+            case 6: {
+                log(clientId, "COMBAT[Serpentis] Step 6: press 'xcv' (deactivate modules).");
+                missionProcessor.keyPress("xcv");
+                // Re-detect: dock = same system, set_destination = different system
+                String result = missionProcessor.detectCombatComplete();
+                if ("dock".equals(result)) {
+                    log(clientId, "COMBAT[Serpentis] dock detected — same system, docking.");
+                    missionProcessor.clickTemplate("dock");
+                    cs.setDockingToStation(true);
+                    cs.setTravelPhase(ClientState.TravelPhase.NONE);
+                    cs.setWarpStartTime(LocalDateTime.now());
+                    stateManager.setState(clientId, ClientState.State.WARPING);
+                } else {
+                    stateManager.setState(clientId, ClientState.State.RETURNING);
+                }
                 break;
             }
             default:
@@ -2775,6 +2961,7 @@ public class ClientManager {
                 // Every 20s inject cap: Alt+Shift+F1 then Alt+F1. Shift+a (rocket overload) rides
                 // along with the first inject (20s in) rather than firing at combat start.
                 long sinceCap = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
+                boolean injected = false;
                 if (sinceCap >= 20) {
                     if (!Boolean.TRUE.equals(brOverloaded.get(clientId))) {
                         log(clientId, "COMBAT[BloodRaider] Shift+a (overload rockets).");
@@ -2785,6 +2972,7 @@ public class ClientManager {
                     missionProcessor.altShiftKeyPress("f1");
                     missionProcessor.altKeyPress("f1");
                     cs.setCombatPollStart(LocalDateTime.now());
+                    injected = true;
                 }
                 // 90s in, switch overload off (Shift+xc) once — saves the modules from burnout.
                 if (!Boolean.TRUE.equals(brOverloadOff.get(clientId))
@@ -2815,6 +3003,13 @@ public class ClientManager {
                     missionProcessor.clickEmptySpace();
                     missionProcessor.keyPress("xc");
                 }
+                if (done != null) {
+                    lentTo.remove(clientId);
+                    lendReturnAt.remove(clientId);
+                } else if (injected) {
+                    // Lend the foreground out until shortly before the next 20s inject.
+                    lendForeground(clientId, LocalDateTime.now().plusSeconds(BR_RETURN_SECS), false, true);
+                }
                 if ("dock".equals(done)) {
                     log(clientId, "COMBAT[BloodRaider] dock detected — same system, docking.");
                     missionProcessor.clickTemplate("dock");
@@ -2831,6 +3026,101 @@ public class ClientManager {
             default:
                 log(clientId, "COMBAT[BloodRaider] unexpected step " + step + " — resetting.");
                 cs.setCombatStep(0);
+        }
+    }
+
+    /** Seconds after a Blood Raider cap inject at which the lent-out foreground is taken back
+     *  (inject cadence is 20s; the margin covers the thumbnail switch and a slow borrower tick). */
+    private static final long BR_RETURN_SECS = 15;
+    /** A lend shorter than this isn't worth the two thumbnail switches. */
+    private static final long MIN_LEND_SECS = 5;
+
+    /** Seconds after Serpentis' first Alt+F1 at which the lent-out foreground is taken back
+     *  (the second Alt+F1 is due at 30s). */
+    private static final long SERP_RETURN_SECS = 27;
+
+    /** States that own the foreground until they yield it themselves: a docked multi-tick station
+     *  dialog, the run into the mission (travel setup, gate activation, warp-in) and the mission
+     *  itself. Yanking focus here breaks a half-finished sequence — an undock handback waits. */
+    private boolean holdsForegroundForMission(String clientId) {
+        ClientState cs = stateManager.getState(clientId);
+        switch (cs.getState()) {
+            case CHECKING_MISSIONS:
+            case DECLINING:
+            case ACCEPTED:
+            case REPAIRING:
+            case COMPLETING:
+            case FACTION_CHECK:
+            case FACTION_COMPLETING:
+            case FACTION_TRAVEL:
+            case TRAVEL:
+            case WARPING:
+            case IN_COMBAT:
+                return true;
+            case IDLE:
+                // Heading to the mission: the next thing it does is activate the gate / warp in.
+                return cs.getTravelPhase() == ClientState.TravelPhase.TO_MISSION;
+            default:
+                return false;
+        }
+    }
+
+    /** A run that lends the foreground out: the undock animation wait, the Blood Raider fight,
+     *  Scarlet's 20s gate-load wait after the first gate + destination (step 3 only — from the
+     *  second gate on it stays put), or Serpentis between its first and second Alt+F1. */
+    private boolean isLendingRun(ClientState cs) {
+        if (cs.getState() == ClientState.State.UNDOCKING) return true;
+        if (cs.getState() != ClientState.State.IN_COMBAT) return false;
+        if (isBloodRaiderMission(cs)) return true;
+        if (isSerpentisMission(cs) && cs.getCombatStep() == 5 && !cs.isExtraCapPulseDone()) return true;
+        return isScarletMission(cs) && cs.getCombatStep() == 3;
+    }
+
+    /**
+     * Lend the foreground to the next other client in rotation (continuing from the one lent to
+     * last time) so a long run doesn't block everyone; monitorClients hands it back at
+     * {@code returnAt}. Only lends to clients out flying (undocking, travelling, warping, in
+     * combat, heading home) — never to docked clients (checking missions, repairing, turning in)
+     * whose multi-step dialogs a yank would break, nor to another lending run.
+     */
+    private void lendForeground(String clientId, LocalDateTime returnAt) {
+        lendForeground(clientId, returnAt, false);
+    }
+
+    /** As above; {@code allowDocked} also lends to docked clients — used for the undock wait,
+     *  whose handback defers while the borrower is mid station dialog. */
+    private void lendForeground(String clientId, LocalDateTime returnAt, boolean allowDocked) {
+        lendForeground(clientId, returnAt, allowDocked, false);
+    }
+
+    /** As above; {@code allowUndockingTarget} also lends to a client sitting out its undock
+     *  animation wait — that client isn't doing anything with the foreground, so the Blood Raider
+     *  and Serpentis waits are free to hand it the screen. */
+    private void lendForeground(String clientId, LocalDateTime returnAt, boolean allowDocked,
+                                boolean allowUndockingTarget) {
+        long secs = Duration.between(LocalDateTime.now(), returnAt).getSeconds();
+        if (secs < MIN_LEND_SECS) return;
+        String after = lentTo.getOrDefault(clientId, clientId);
+        for (int i = 0; i < clientWindows.size(); i++) {
+            ClientWindowInfo next = nextClientAfter(after, clientId);
+            if (next == null) return;
+            after = next.getClientId();
+            ClientState ncs = stateManager.getState(after);
+            ClientState.State st = ncs.getState();
+            boolean flying = st == ClientState.State.UNDOCKING || st == ClientState.State.TRAVEL
+                    || st == ClientState.State.WARPING || st == ClientState.State.RETURNING
+                    || st == ClientState.State.FACTION_TRAVEL
+                    || st == ClientState.State.IN_COMBAT
+                    || (st == ClientState.State.IDLE && ncs.getTravelPhase() != ClientState.TravelPhase.NONE);
+            boolean busyRun = isLendingRun(ncs)
+                    && !(allowUndockingTarget && st == ClientState.State.UNDOCKING);
+            if (!(flying || allowDocked) || busyRun
+                    || isParkedOrLocked(after) || ncs.isStandingsPaused()) continue;
+            log(clientId, "lending the foreground to " + after + " for " + secs + "s.");
+            lentTo.put(clientId, after);
+            lendReturnAt.put(clientId, returnAt);
+            bringToForeground(next);
+            return;
         }
     }
 
@@ -2874,6 +3164,7 @@ public class ClientManager {
             completed = missionProcessor.detectCombatComplete();
         }
         if (completed != null) {
+            completionPollFocus.remove(clientId);
             if ("dock".equals(completed)) {
                 log(clientId, "COMBAT[" + combatLabel + "] dock detected — same system, docking.");
                 missionProcessor.clickTemplate("dock");
@@ -2956,10 +3247,24 @@ public class ClientManager {
             return;
         }
 
-        log(clientId, "COMBAT[" + combatLabel + "] waiting for mission complete (" + elapsed + "s)...");
+        logTick(clientId, "COMBAT[" + combatLabel + "] waiting for mission complete (" + elapsed + "s)...");
         if (allowClientSwitch) {
             ClientWindowInfo other = findOtherClient(clientId);
             if (other != null) {
+                // Don't yield on the first miss: keep polling in the foreground for a few seconds
+                // (the prompt often lands moments after the kill), then hand off.
+                LocalDateTime focusStart = completionPollFocus.get(clientId);
+                if (focusStart == null || clientRefocused) {
+                    focusStart = LocalDateTime.now();
+                    completionPollFocus.put(clientId, focusStart);
+                }
+                long focused = Duration.between(focusStart, LocalDateTime.now()).getSeconds();
+                if (focused < COMPLETION_FOCUS_POLL_SECS) {
+                    logTick(clientId, "COMBAT[" + combatLabel + "] polling for completion in the foreground (" + focused
+                            + "s / " + COMPLETION_FOCUS_POLL_SECS + "s) before switching.");
+                    return;
+                }
+                completionPollFocus.remove(clientId);
                 log(clientId, "COMBAT[" + combatLabel + "] safe wait — switching to: " + other.getClientId());
                 bringToForeground(other);
             }
@@ -3044,7 +3349,7 @@ public class ClientManager {
                 // SAFE WAIT: 100 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 100) {
-                    log(clientId, "COMBAT[Jaguar] safe wait: " + elapsed + "s / 100s.");
+                    logTick(clientId, "COMBAT[Jaguar] safe wait: " + elapsed + "s / 100s.");
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
@@ -3112,13 +3417,14 @@ public class ClientManager {
      *         INQ_PHANTOM_LOCK_LIMIT failed locks the row is a false positive → skip the support (step 8)
      *   6  → Press 'adc' (activate modules), click 'locked_inquisitor' (verify)
      *   7  → SAFE WAIT 90s (one-shot 30s drift re-check), then poll every 5s: 'locked_inquisitor' still up → keep
-     *         shooting; gone → support dead → step 8 (150s failsafe). The second inquisitor is left alive.
+     *         shooting; gone → support dead → step 8 (no time failsafe). The second inquisitor is left alive.
      *   8  → Switch ammo → 'inf_damage' (infernal/thermal)
      *   9  → Ammo loaded — arm the load wait
      *   10 → SAFE WAIT 10s (ammo load) — no overload, this ship can't run one
      *   11 → Vengeance already locked from step 4 — select + fire
      *   12 → check 'locked_vengeance' — if not found, relock (3s between attempts); if found, click + press 'a', 'd'
-     *   13 → SAFE WAIT for set_destination (mission complete → RETURNING)
+     *   13 → SAFE WAIT for set_destination (mission complete → RETURNING); 30s into shooting the
+     *         vengeance, Shift+a (overload rockets) once
      */
     private void handleCombatVengeance(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -3146,18 +3452,15 @@ public class ClientManager {
                 missionProcessor.keyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(3);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Vengeance] 5s safe wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
+                // No switch here (Enyo's pattern): 5s is too short to be worth two thumbnail
+                // switches, and the supports must be locked + shot the moment the wait is up.
                 break;
             }
             case 3: {
                 // SAFE WAIT: 5 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 5) {
-                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 5s.");
+                    logTick(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 5s.");
                     return;
                 }
                 log(clientId, "COMBAT[Vengeance] 5s wait complete — locking inquisitors.");
@@ -3282,7 +3585,7 @@ public class ClientManager {
                     log(clientId, "COMBAT[Vengeance] 30s lock re-check: locked_inquisitor still held (false-negative filtered) — keep firing.");
                 }
                 if (elapsed < 90) {
-                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 90s.");
+                    logTick(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 90s.");
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
@@ -3295,13 +3598,8 @@ public class ClientManager {
                 // The support kill is confirmed by its LOCKED bracket disappearing.
                 // ('target_*' is only for acquiring locks; 'locked_*' is what we confirm against.)
                 if (missionProcessor.findTemplate("locked_inquisitor") != null) {
-                    if (elapsed >= 150) {
-                        // Failsafe: a stale bracket can keep "still alive" up forever — after 150s
-                        // assume dead and move on to the vengeance.
-                        log(clientId, "COMBAT[Vengeance] Step 7: support still alive after " + elapsed + "s — 150s failsafe, assuming dead — switching ammo.");
-                        cs.setCombatStep(8);
-                        break;
-                    }
+                    // No time-based failsafe: the support must actually be confirmed dead (bracket
+                    // gone) before moving on — switching early burns the overload on a live support.
                     log(clientId, "COMBAT[Vengeance] Step 7: support still alive (" + elapsed + "s) — keep shooting.");
                     break;
                 }
@@ -3334,7 +3632,7 @@ public class ClientManager {
                 // SAFE WAIT: 10 seconds (ammo load)
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 10) {
-                    log(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 10s.");
+                    logTick(clientId, "COMBAT[Vengeance] safe wait: " + elapsed + "s / 10s.");
                     return;
                 }
                 // No overload in this combat — the ship can't run it, so the ammo load is all we wait for.
@@ -3354,10 +3652,12 @@ public class ClientManager {
             case 12: {
                 String lockedV = missionProcessor.findTemplate("locked_vengeance");
                 if (lockedV != null) {
-                    log(clientId, "COMBAT[Vengeance] Step 12: locked_vengeance confirmed — click + press 'a', 'd' (no overload).");
+                    log(clientId, "COMBAT[Vengeance] Step 12: locked_vengeance confirmed — click + press 'a', 'd' (Shift+a overload follows 30s in).");
                     missionProcessor.clickTemplate("locked_vengeance");
                     missionProcessor.keyPress("a");
                     missionProcessor.keyPress("d");
+                    cs.setCombatWaitStart(LocalDateTime.now()); // the 30s overload delay is measured from here
+                    vengOverloaded.remove(clientId);
                     cs.setCombatStep(13);
                     ClientWindowInfo other = findOtherClient(clientId);
                     if (other != null) {
@@ -3376,6 +3676,13 @@ public class ClientManager {
                 break;
             }
             case 13: {
+                // 30s into shooting the vengeance, overload the rockets once (Shift+a).
+                if (!Boolean.TRUE.equals(vengOverloaded.get(clientId))
+                        && Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds() >= 30) {
+                    log(clientId, "COMBAT[Vengeance] 30s shooting the vengeance — Shift+a (overload rockets).");
+                    missionProcessor.shiftKeyPress("a");
+                    vengOverloaded.put(clientId, true);
+                }
                 pollSetDestinationOrCapsule(clientId, cs, "Vengeance", true);
                 break;
             }
@@ -3395,12 +3702,10 @@ public class ClientManager {
      *   3  → Confirm 'orbiting' (nudge once to verify); if missing, repeat step 2
      *   4  → Keypress 's' (activate module)
      *   5  → SAFE WAIT 5s
-     *   6  → Ctrl+click ONE 'target_navitas' (support) + 'target_enyo' (main) — only ever one support locked
-     *   7  → WAIT 3s → confirm 'locked_navitas' — if not found, relock ONE support (stay); if found, select
-     *   8  → Press 'adc', click 'locked_navitas' (verify), start firing wait
-     *   9  → SAFE WAIT 90s (one-shot 20s drift re-check), then poll every 5s: 'locked_navitas' still up → keep shooting; gone → support dead → step 10 (engage enyo)
-     *   10 → 'locked_enyo' present → click + overload (shift+a, a, d); absent → relock the enyo
-     *   11 → SAFE WAIT for set_destination (mission complete → RETURNING)
+     *   6  → Click 'target_navitas' (moves the selection off the enyo), Ctrl+click 'target_enyo' (main only — supports are never locked)
+     *   7  → 'locked_enyo' present → click + press 'adc'; absent → keep polling
+     *   8  → SAFE WAIT for set_destination (mission complete → RETURNING); 40s into shooting the
+     *         enyo, Shift+a (overload) once
      */
     private void handleCombatEnyo(String clientId, ClientState cs) {
         int step = cs.getCombatStep();
@@ -3440,158 +3745,64 @@ public class ClientManager {
                 missionProcessor.keyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(5);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Enyo] 5s safe wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
                 break;
             }
             case 5: {
                 // SAFE WAIT: 5 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 5) {
-                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 5s.");
+                    logTick(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 5s.");
                     return;
                 }
-                log(clientId, "COMBAT[Enyo] 5s wait complete — locking navitas targets.");
+                log(clientId, "COMBAT[Enyo] 5s wait complete — locking the enyo.");
                 cs.setCombatStep(6);
                 break;
             }
             case 6: {
-                // Lock exactly ONE support (navitas) + the main ship (enyo). Locking a single
-                // support at a time means there is never a second support bracket to stall on;
-                // the main stays locked throughout — we only ever re-lock supports.
-                log(clientId, "COMBAT[Enyo] Step 6: Ctrl+click ONE target_navitas (support) + target_enyo (main).");
-                missionProcessor.ctrlClickTemplateOnce("target_navitas");
+                // Lock the main only — no support kill. The enyo is still the selected item from the
+                // orbit click, so its name also shows in the Selected Item panel and target_enyo can
+                // match there instead of the overview row. Plain-click a support row first (no lock)
+                // to move the selection off the enyo, then ctrl+click its overview row.
+                log(clientId, "COMBAT[Enyo] Step 6: click target_navitas (deselect enyo) → Ctrl+click target_enyo (main).");
+                missionProcessor.clickTemplate("target_navitas");
                 missionProcessor.ctrlClickTemplateOnce("target_enyo");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(7);
                 break;
             }
             case 7: {
-                // WAIT 3s for lock animation, then confirm locked_navitas. If absent the support
-                // is out of range / not yet locked — relock ONE (don't touch the main) and retry.
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                if (elapsed < 3) return;
-                String lockedN = missionProcessor.findTemplate("locked_navitas");
-                if (lockedN != null) {
-                    log(clientId, "COMBAT[Enyo] Step 7: locked_navitas confirmed — selecting.");
-                    missionProcessor.clickTemplate("locked_navitas");
-                    cs.setCombatStep(8);
-                } else {
-                    log(clientId, "COMBAT[Enyo] Step 7: locked_navitas NOT found (out of range) — relocking one support.");
-                    missionProcessor.ctrlClickTemplateOnce("target_navitas");
-                    cs.setCombatWaitStart(LocalDateTime.now());
-                }
-                break;
-            }
-            case 8: {
-                log(clientId, "COMBAT[Enyo] Step 8: press 'adc' (activate modules), click locked_navitas (verify).");
-                missionProcessor.keyPress("adc");
-                missionProcessor.clickTemplate("locked_navitas");
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatPollStart(LocalDateTime.now());
-                cs.setFrigateLockRechecked(false);
-                cs.setCombatStep(9);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Enyo] 90s safe wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
-                break;
-            }
-            case 9: {
-                // Safe wait 90s (modules firing on the single locked support), then poll every 5s:
-                // bracket still up → keep shooting; gone → support dead → engage the main (step 10).
-                // Never switch while the bracket is still up.
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                // One-shot ~30s drift re-check: gone this early = drift (not a kill) — re-lock the
-                // support + re-fire and restart the countdown.
-                if (!cs.isFrigateLockRechecked() && elapsed >= 30) {
-                    cs.setFrigateLockRechecked(true);
-                    // 'adc' are toggle keys — re-firing when the modules are actually still on
-                    // turns them OFF. So a single missed frame must NOT trigger a re-fire: confirm
-                    // the lock is really gone across several scans before re-locking + re-firing.
-                    if (missionProcessor.confirmTemplateGone("locked_navitas", 4, 300)) {
-                        log(clientId, "COMBAT[Enyo] 30s lock re-check: locked_navitas gone (drifted, confirmed) — re-locking, waiting for lock, then re-firing.");
-                        missionProcessor.ctrlClickTemplateOnce("target_navitas");
-                        // Wait for the lock to take, then SELECT the locked bracket BEFORE firing —
-                        // firing straight after the ctrl-click applies the modules to nothing.
-                        try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                        if (missionProcessor.findTemplate("locked_navitas") != null) {
-                            missionProcessor.clickTemplate("locked_navitas"); // select first
-                            missionProcessor.keyPress("adc");                 // then fire
-                        } else {
-                            log(clientId, "COMBAT[Enyo] 30s lock re-check: re-lock not confirmed (no locked_navitas) — not firing, re-polling.");
-                        }
-                        cs.setCombatWaitStart(LocalDateTime.now()); // fire (re)started — reset countdown
-                        return;
-                    } else {
-                        log(clientId, "COMBAT[Enyo] 30s lock re-check: locked_navitas still held (false-negative filtered) — keep firing.");
-                    }
-                }
-                if (elapsed < 90) {
-                    log(clientId, "COMBAT[Enyo] safe wait: " + elapsed + "s / 90s.");
-                    if (elapsed > 0 && elapsed % 10 == 0) {
-                        ClientWindowInfo other = findOtherClient(clientId);
-                        if (other != null) bringToForeground(other);
-                    }
-                    return;
-                }
-                long sincePoll = Duration.between(cs.getCombatPollStart(), LocalDateTime.now()).getSeconds();
-                if (sincePoll < 5) return;
-                cs.setCombatPollStart(LocalDateTime.now());
-                if (missionProcessor.findTemplate("locked_navitas") != null) {
-                    if (elapsed >= 150) {
-                        // Failsafe: a stale bracket can keep "still alive" up forever — after
-                        // 150s assume dead and move on to the main.
-                        log(clientId, "COMBAT[Enyo] Step 9: still alive after " + elapsed + "s — 150s failsafe, assuming dead — engaging the enyo.");
-                        cs.setCombatWaitStart(LocalDateTime.now());
-                        cs.setCombatStep(10);
-                        break;
-                    }
-                    log(clientId, "COMBAT[Enyo] Step 9: support still alive (" + elapsed + "s) — keep shooting.");
-                    break;
-                }
-                // Double-check across multiple scans before declaring the kill — a single
-                // missed frame would prematurely burn the overload on the main.
-                if (!missionProcessor.confirmTemplateGone("locked_navitas", 4, 300)) {
-                    log(clientId, "COMBAT[Enyo] Step 9: locked_navitas missed frame (false-negative filtered) — keep shooting.");
-                    break;
-                }
-                // Support dead — move to the main (already locked in step 6).
-                log(clientId, "COMBAT[Enyo] Step 9: support dead (confirmed) — engaging the enyo.");
-                cs.setCombatWaitStart(LocalDateTime.now());
-                cs.setCombatStep(10);
-                break;
-            }
-            case 10: {
-                // Kill the main (locked back in step 6). Select + overload; only relock if its
-                // bracket is somehow gone (drifted), waiting 3s between relock attempts.
-                long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
-                String lockedE = missionProcessor.findTemplate("locked_enyo");
-                if (lockedE != null) {
-                    log(clientId, "COMBAT[Enyo] Step 10: locked_enyo confirmed — click + overload (shift+a, 3s, a, d).");
+                // Poll for locked_enyo: found → select + fire (guns + rep); absent → keep polling.
+                String lockedM = missionProcessor.findTemplate("locked_enyo");
+                if (lockedM != null) {
+                    log(clientId, "COMBAT[Enyo] Step 7: locked_enyo confirmed — click + press 'adc' (Shift+a overload follows 40s in).");
                     missionProcessor.clickTemplate("locked_enyo");
-                    missionProcessor.shiftKeyPress("a");
-                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
-                    missionProcessor.keyPress("a");
-                    missionProcessor.keyPress("d"); // activate 'd' after overloading 'a'
-                    cs.setCombatStep(11);
+                    missionProcessor.keyPress("adc");
+                    cs.setCombatWaitStart(LocalDateTime.now()); // the 40s overload delay is measured from here
+                    cs.setCombatPollStart(LocalDateTime.now());
+                    enyoOverloaded.remove(clientId);
+                    cs.setCombatStep(8);
                     ClientWindowInfo other = findOtherClient(clientId);
                     if (other != null) {
                         log(clientId, "COMBAT[Enyo] shooting enyo — switching to: " + other.getClientId());
                         bringToForeground(other);
                     }
-                } else if (elapsed >= 3) {
-                    log(clientId, "COMBAT[Enyo] Step 10: locked_enyo NOT found — relocking the enyo.");
-                    missionProcessor.ctrlClickTemplateOnce("target_enyo");
-                    cs.setCombatWaitStart(LocalDateTime.now());
+                } else if (Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds() >= 5) {
+                    // Lock never landed (missed click / target drifted) — redo the deselect + Ctrl+click.
+                    log(clientId, "COMBAT[Enyo] Step 7: locked_enyo NOT found after 5s — relocking the enyo (back to step 6).");
+                    cs.setCombatStep(6);
+                } else {
+                    logTick(clientId, "COMBAT[Enyo] Step 7: locked_enyo not yet present — waiting for the lock.");
                 }
                 break;
             }
-            case 11: {
+            case 8: {
+                // 40s into shooting the enyo, overload the launcher once (Shift+a).
+                if (!Boolean.TRUE.equals(enyoOverloaded.get(clientId))
+                        && Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds() >= 40) {
+                    log(clientId, "COMBAT[Enyo] 40s shooting the enyo — Shift+a (overload).");
+                    missionProcessor.shiftKeyPress("a");
+                    enyoOverloaded.put(clientId, true);
+                }
                 pollSetDestinationOrCapsule(clientId, cs, "Enyo", true);
                 break;
             }
@@ -3613,7 +3824,7 @@ public class ClientManager {
      *   5  → Ctrl+click ONE 'target_bantam' (support) + 'target_hawk' (main) — only ever one support locked
      *   6  → WAIT 3s → confirm 'locked_bantam' — if not found, relock ONE support (stay); if found, select
      *   7  → Press 'adc', click 'locked_bantam' (verify), start firing wait
-     *   8  → SAFE WAIT 60s (one-shot 20s drift re-check), then poll every 5s: 'locked_bantam' still up → keep shooting; gone → support dead → step 9 (engage hawk)
+     *   8  → SAFE WAIT 55s (one-shot 30s drift re-check), then poll every 5s: 'locked_bantam' still up → keep shooting; gone → support dead → step 9 (engage hawk)
      *   9  → 'locked_hawk' present → click + overload (shift+a, a, d); absent → relock the hawk
      *   10 → SAFE WAIT for set_destination (mission complete → RETURNING)
      */
@@ -3651,18 +3862,15 @@ public class ClientManager {
                 missionProcessor.keyPress("s");
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatStep(4);
-                ClientWindowInfo other = findOtherClient(clientId);
-                if (other != null) {
-                    log(clientId, "COMBAT[Hawk] 5s safe wait — switching to: " + other.getClientId());
-                    bringToForeground(other);
-                }
+                // No switch here (Enyo's pattern): 5s is too short to be worth two thumbnail
+                // switches, and the supports must be locked + shot the moment the wait is up.
                 break;
             }
             case 4: {
                 // SAFE WAIT: 5 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 5) {
-                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 5s.");
+                    logTick(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 5s.");
                     return;
                 }
                 log(clientId, "COMBAT[Hawk] 5s wait complete — locking targets.");
@@ -3706,13 +3914,13 @@ public class ClientManager {
                 cs.setCombatStep(8);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
-                    log(clientId, "COMBAT[Hawk] 40s safe wait — switching to: " + other.getClientId());
+                    log(clientId, "COMBAT[Hawk] 55s safe wait — switching to: " + other.getClientId());
                     bringToForeground(other);
                 }
                 break;
             }
             case 8: {
-                // Safe wait 40s (modules firing on the locked support), then poll every 5s:
+                // Safe wait 55s (modules firing on the locked support), then poll every 5s:
                 // bracket still up → keep shooting; gone → relock ONE more support (step 9
                 // confirms whether any remain). Never switch while the bracket is still up.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
@@ -3727,7 +3935,7 @@ public class ClientManager {
                         log(clientId, "COMBAT[Hawk] 30s lock re-check: locked_bantam gone (drifted, confirmed) — re-locking, waiting for lock, then re-firing.");
                         missionProcessor.ctrlClickTemplateOnce("target_bantam");
                         // The lock takes several seconds; a single 3s check reads too early (target
-                        // still locking) and drops us into a 40s safe wait firing at nothing. Poll for
+                        // still locking) and drops us into a 55s safe wait firing at nothing. Poll for
                         // the bracket to appear, then SELECT it BEFORE firing (adc on nothing wastes
                         // the cycle) so the drifted support is actually re-engaged.
                         String relocked = null;
@@ -3748,8 +3956,8 @@ public class ClientManager {
                         log(clientId, "COMBAT[Hawk] 30s lock re-check: locked_bantam still held (false-negative filtered) — keep firing.");
                     }
                 }
-                if (elapsed < 40) {
-                    log(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 40s.");
+                if (elapsed < 55) {
+                    logTick(clientId, "COMBAT[Hawk] safe wait: " + elapsed + "s / 55s.");
                     if (elapsed > 0 && elapsed % 10 == 0) {
                         ClientWindowInfo other = findOtherClient(clientId);
                         if (other != null) bringToForeground(other);
@@ -3760,14 +3968,8 @@ public class ClientManager {
                 if (sincePoll < 5) return;
                 cs.setCombatPollStart(LocalDateTime.now());
                 if (missionProcessor.findTemplate("locked_bantam") != null) {
-                    if (elapsed >= 150) {
-                        // Failsafe: a stale bracket can keep "still alive" up forever — after
-                        // 150s assume dead and move on to the main.
-                        log(clientId, "COMBAT[Hawk] Step 8: still alive after " + elapsed + "s — 150s failsafe, assuming dead — engaging the hawk.");
-                        cs.setCombatWaitStart(LocalDateTime.now());
-                        cs.setCombatStep(9);
-                        break;
-                    }
+                    // No time-based failsafe: the support must actually be confirmed dead (bracket
+                    // gone) before moving on — switching early burns the overload on a live support.
                     log(clientId, "COMBAT[Hawk] Step 8: support still alive (" + elapsed + "s) — keep shooting.");
                     break;
                 }
@@ -3789,10 +3991,9 @@ public class ClientManager {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 String lockedH = missionProcessor.findTemplate("locked_hawk");
                 if (lockedH != null) {
-                    log(clientId, "COMBAT[Hawk] Step 9: locked_hawk confirmed — click + overload (shift+a, 3s, a, d).");
+                    log(clientId, "COMBAT[Hawk] Step 9: locked_hawk confirmed — click + overload (shift+a, a, d).");
                     missionProcessor.clickTemplate("locked_hawk");
                     missionProcessor.shiftKeyPress("a");
-                    try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
                     missionProcessor.keyPress("a");
                     missionProcessor.keyPress("d"); // activate 'd' after overloading 'a'
                     cs.setCombatStep(10);
@@ -3855,7 +4056,7 @@ public class ClientManager {
                 // WAIT 7s (closing to range) — stay on this client, no switching.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 7) {
-                    log(clientId, "COMBAT[Pot] approach wait: " + elapsed + "s / 7s.");
+                    logTick(clientId, "COMBAT[Pot] approach wait: " + elapsed + "s / 7s.");
                     return;
                 }
                 log(clientId, "COMBAT[Pot] 7s approach complete — locking Prophecy.");
@@ -3920,8 +4121,8 @@ public class ClientManager {
      *
      * Steps:
      *   0  → Shift+asdx (overload modules)
-     *   1  → Ctrl+click 'target_sansha' (lock) + right-click → 'approach' + press 's'
-     *   2  → press 'adxc' (activate modules)
+     *   1  → right-click 'target_sansha' → 'approach' + press 's' (afterburner)
+     *   2  → Ctrl+click 'target_sansha' (lock) + press 'adxc' (remaining modules)
      *   3  → WAIT 4s → right-click target_sansha → click range (keep at range)
      *   4  → Confirm keep_at_range (nudge to verify); if missing, repeat step 3
      *   5  → WAIT 12s
@@ -3929,7 +4130,7 @@ public class ClientManager {
      *   7  → Alt+F1 (burst cap recharge)
      *   8  → WAIT 1s
      *   9  → Alt+F1 (deactivate cap module)
-     *  10  → WAIT for set_destination/dock; if fight > 60s → Alt+F1 again (once); 180s hardcap (pod check) → step 11
+     *  10  → WAIT for set_destination/dock; if fight > 50s → Alt+F1 again (once); 180s hardcap (pod check) → step 11
      *  11  → press 'xc' (deactivate modules) + handle dock/returning (RETURNING clicks set_destination coords)
      */
     /** Nudge-retries spent hunting the primary combat target before 'alt_target' is accepted. */
@@ -4011,23 +4212,25 @@ public class ClientManager {
             case 0: {
                 log(clientId, "COMBAT[Sansha] Step 0: Shift+asdx (overload modules).");
                 missionProcessor.shiftKeyPress("asdx");
-                cs.setCombatStartTime(LocalDateTime.now()); // start of the fight, for the 35s extra-cap check
+                cs.setCombatStartTime(LocalDateTime.now()); // start of the fight, for the 50s extra-cap check
                 cs.setExtraCapPulseDone(false);
                 cs.setCombatStep(1);
                 break;
             }
             case 1: {
-                log(clientId, "COMBAT[Sansha] Step 1: press 's' (pre-lock).");
+                // Approach + afterburner FIRST, then lock, then the remaining modules (step 2).
+                String tk = awaitCombatTarget(clientId, cs, "target_sansha");
+                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
+                cs.setCombatTargetKey(tk);
+                log(clientId, "COMBAT[Sansha] Step 1: right-click " + tk + " → 'approach', then press 's' (afterburner).");
+                missionProcessor.rightClickAndSelect(tk, "approach", 3, true);
                 missionProcessor.keyPress("s");
                 cs.setCombatStep(2);
                 break;
             }
             case 2: {
-                String tk = awaitCombatTarget(clientId, cs, "target_sansha");
-                if (tk == null) return; // target not visible — nudged, hold step and retry next tick
-                cs.setCombatTargetKey(tk);
-                log(clientId, "COMBAT[Sansha] Step 2: right-click " + tk + " → 'approach' + Ctrl+click (lock) + press 'adxc' (activate modules).");
-                missionProcessor.rightClickAndSelect(tk, "approach", 3, true);
+                String tk = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_sansha";
+                log(clientId, "COMBAT[Sansha] Step 2: Ctrl+click " + tk + " (lock), then press 'adxc' (activate remaining modules).");
                 missionProcessor.ctrlClickTemplate(tk);
                 missionProcessor.keyPress("adxc");
                 cs.setCombatWaitStart(LocalDateTime.now());
@@ -4038,7 +4241,7 @@ public class ClientManager {
                 // WAIT 4s before keeping at range (like Worm) so modules apply first.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 4) {
-                    log(clientId, "COMBAT[Sansha] wait before range: " + elapsed + "s / 4s.");
+                    logTick(clientId, "COMBAT[Sansha] wait before range: " + elapsed + "s / 4s.");
                     return;
                 }
                 String rangeKey = cs.getCombatTargetKey() != null ? cs.getCombatTargetKey() : "target_sansha";
@@ -4057,7 +4260,7 @@ public class ClientManager {
                 // WAIT: 12 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 12) {
-                    log(clientId, "COMBAT[Sansha] wait: " + elapsed + "s / 12s.");
+                    logTick(clientId, "COMBAT[Sansha] wait: " + elapsed + "s / 12s.");
                     return;
                 }
                 log(clientId, "COMBAT[Sansha] 12s wait complete — stopping overloads.");
@@ -4109,11 +4312,11 @@ public class ClientManager {
                     break;
                 }
 
-                // Long fight: if the whole combat has run past 60s and we're still not
+                // Long fight: if the whole combat has run past 50s and we're still not
                 // done, give the cap module another Alt+F1 pulse (once).
                 if (!cs.isExtraCapPulseDone()
-                        && Duration.between(cs.getCombatStartTime(), LocalDateTime.now()).getSeconds() > 60) {
-                    log(clientId, "COMBAT[Sansha] fight > 60s — Alt+F1 again (extra cap pulse).");
+                        && Duration.between(cs.getCombatStartTime(), LocalDateTime.now()).getSeconds() > 50) {
+                    log(clientId, "COMBAT[Sansha] fight > 50s — Alt+F1 again (extra cap pulse).");
                     missionProcessor.altKeyPress("f1");
                     cs.setExtraCapPulseDone(true);
                 }
@@ -4142,7 +4345,7 @@ public class ClientManager {
                     break;
                 }
 
-                log(clientId, "COMBAT[Sansha] waiting for mission complete (" + elapsed + "s)...");
+                logTick(clientId, "COMBAT[Sansha] waiting for mission complete (" + elapsed + "s)...");
                 break;
             }
             case 11: {
@@ -4220,7 +4423,7 @@ public class ClientManager {
                 // WAIT 15 seconds
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 15) {
-                    log(clientId, "COMBAT[Infested] wait: " + elapsed + "s / 15s.");
+                    logTick(clientId, "COMBAT[Infested] wait: " + elapsed + "s / 15s.");
                     return;
                 }
                 log(clientId, "COMBAT[Infested] 15s wait complete.");
@@ -4268,7 +4471,7 @@ public class ClientManager {
                 // (like Worm/Angel) — no more switching during the 50s wait.
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 50) {
-                    log(clientId, "COMBAT[Infested] safe wait: " + elapsed + "s / 50s.");
+                    logTick(clientId, "COMBAT[Infested] safe wait: " + elapsed + "s / 50s.");
                     return;
                 }
                 log(clientId, "COMBAT[Infested] 50s wait complete — awaiting set_destination.");
@@ -4354,14 +4557,14 @@ public class ClientManager {
 
                 // No client switching — stay here and keep watching for set_destination/dock
                 // or a jam to escape until the mission completes (or the 120s backstop).
-                log(clientId, "COMBAT[Infested] awaiting set_destination, no switch (" + elapsed7 + "s)...");
+                logTick(clientId, "COMBAT[Infested] awaiting set_destination, no switch (" + elapsed7 + "s)...");
                 break;
             }
             case 8: {
                 // After burning away from a jam, wait 5s then resume awaiting completion.
                 long elapsed8 = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed8 < 5) {
-                    log(clientId, "COMBAT[Infested] jam burn wait: " + elapsed8 + "s / 5s.");
+                    logTick(clientId, "COMBAT[Infested] jam burn wait: " + elapsed8 + "s / 5s.");
                     return;
                 }
                 log(clientId, "COMBAT[Infested] jam burn complete — resuming await.");
@@ -4423,7 +4626,7 @@ public class ClientManager {
                     cs.setTravelPhase(ClientState.TravelPhase.RETURNING_HOME);
                     stateManager.setState(clientId, ClientState.State.WARPING);
                 } else {
-                    log(clientId, "COMBAT[Recon] Step 2: dock not visible yet — waiting.");
+                    logTick(clientId, "COMBAT[Recon] Step 2: dock not visible yet — waiting.");
                 }
                 break;
             }
@@ -4524,12 +4727,45 @@ public class ClientManager {
         return text.contains("blood raider") || text.contains("blaad") || text.contains("bload");
     }
 
-    /** The user's rule: never accept a Blood Raider burner while agent standing is above 1.0.
-     *  An unknown standing (NaN) doesn't block — same "when unsure, accept" direction as elsewhere. */
-    private boolean bloodRaiderBlockedByStanding(ClientState cs) {
-        if (!isBloodRaiderMission(cs)) return false;
-        double s = cs.getLastKnownStanding();
-        return !Double.isNaN(s) && s > BLOODRAIDER_MAX_STANDING;
+    /**
+     * Serpentis and Blood Raider can't be in their pockets at the same time: both yank the
+     * foreground back on a hard timer for their cap injections, so whichever started second would
+     * lose its injection while the other holds the screen. The second one waits at the acceleration
+     * gate — the mission doesn't start until the other burner is done.
+     */
+    private boolean blockedByOtherBurnerStart(String clientId, ClientState cs) {
+        boolean serp = isSerpentisMission(cs);
+        boolean br   = isBloodRaiderMission(cs);
+        if (!serp && !br) return false;
+        List<ClientWindowInfo> busy = otherClients(clientId, w -> {
+            ClientState ocs = stateManager.getState(w.getClientId());
+            if (ocs.getState() != ClientState.State.IN_COMBAT) return false;
+            return serp ? isBloodRaiderMission(ocs) : isSerpentisMission(ocs);
+        });
+        if (busy.isEmpty()) return false;
+        logTick(clientId, "IDLE[TO_MISSION]: holding at the gate — " + busy.get(0).getClientId()
+                + " is mid " + (serp ? "Blood Raider" : "Serpentis")
+                + "; the two burners can't run at once (both need the foreground for cap).");
+        return true;
+    }
+
+    /** True while another client is mid Blood Raider or Serpentis burner. Both yank the foreground
+     *  back on a timer for their cap injections (Blood Raider every ~20s, Serpentis for the 30s
+     *  Alt+F1 booster), so a multi-step station sequence started here (repair + undock, or the
+     *  turn-in) would be yanked apart halfway — wait until the run is done. */
+    private boolean blockedByBurnerRun(String clientId, String what) {
+        List<ClientWindowInfo> br = otherClients(clientId, w -> {
+            ClientState ocs = stateManager.getState(w.getClientId());
+            return ocs.getState() == ClientState.State.IN_COMBAT
+                    && (isBloodRaiderMission(ocs) || isSerpentisMission(ocs));
+        });
+        if (br.isEmpty()) return false;
+        String otherId = br.get(0).getClientId();
+        boolean serp = isSerpentisMission(stateManager.getState(otherId));
+        log(clientId, "holding " + what + " — " + otherId
+                + (serp ? " is mid Serpentis (foreground yanks back at 30s for the Alt+F1 booster)."
+                        : " is mid Blood Raider (foreground yanks back every ~20s for the cap inject)."));
+        return true;
     }
 
     /** Missions where warp_to_location drops us straight into the pocket — there is no
@@ -4620,12 +4856,13 @@ public class ClientManager {
                 cs.setCombatStep(3);
                 // No client switching anywhere in Scarlet — the whole run stays on this client
                 // (the watchdog holds too, see monitorClients).
-                log(clientId, "COMBAT[Scarlet] destination set — gate loading, 20s wait (no switch).");
+                log(clientId, "COMBAT[Scarlet] destination set — gate loading, 20s wait (lending the foreground meanwhile).");
                 break;
             }
             case 3: {
                 long elapsed = Duration.between(cs.getCombatWaitStart(), LocalDateTime.now()).getSeconds();
                 if (elapsed < 20) {
+                    lendForeground(clientId, cs.getCombatWaitStart().plusSeconds(19));
                     return;
                 }
                 log(clientId, "COMBAT[Scarlet] 20s gate load complete — activating next gate.");
@@ -4651,7 +4888,7 @@ public class ClientManager {
                 }
                 // Don't lock until we've actually exited warp — a lock attempt mid-warp won't take.
                 if (missionProcessor.isWarpActive()) {
-                    log(clientId, "COMBAT[Scarlet] Step 5: 25s elapsed but still in warp — waiting to land before locking.");
+                    logTick(clientId, "COMBAT[Scarlet] Step 5: 25s elapsed but still in warp — waiting to land before locking.");
                     return;
                 }
                 log(clientId, "COMBAT[Scarlet] 25s wait complete + warp ended — engaging Anire.");
@@ -5316,28 +5553,60 @@ public class ClientManager {
         // the dropped client resume with the recovered standing. Bounded so a partner stuck checking
         // can't strand this finished mission at the agent forever.
         ClientState completingCs = stateManager.getState(clientId);
-        ClientWindowInfo holdPartner = findOtherClient(clientId);
-        if (holdPartner != null) {
-            ClientState.State ps = stateManager.getStateEnum(holdPartner.getClientId());
-            boolean partnerChecking =
-                    (ps == ClientState.State.CHECKING_MISSIONS || ps == ClientState.State.DECLINING)
-                    && !stateManager.getState(holdPartner.getClientId()).isStandingsPaused()
-                    && !isParkedOrLocked(holdPartner.getClientId());
-            if (partnerChecking) {
-                if (completingCs.getCompletingHoldStart().equals(LocalDateTime.MIN)) {
+        // With several clients: hold while ANY other client is in the check cycle, handing focus to
+        // the next such client in rotation.
+        List<ClientWindowInfo> checkingPartners = otherClients(clientId, w -> {
+            ClientState.State ps = stateManager.getStateEnum(w.getClientId());
+            ClientState partnerHoldCs = stateManager.getState(w.getClientId());
+            // The check cycle yields focus by bouncing to IDLE (CHECK_CYCLE_TIMEOUT_SEC), so the
+            // partner is almost never literally in CHECKING/DECLINING on the tick we get here —
+            // docked IDLE with no travel leg and no mission on record is that same check cycle
+            // between rounds, and must hold the turn-in too.
+            boolean partnerBetweenChecks = ps == ClientState.State.IDLE
+                    && partnerHoldCs.getTravelPhase() == ClientState.TravelPhase.NONE
+                    && partnerHoldCs.getCurrentMission() == null;
+            return (ps == ClientState.State.CHECKING_MISSIONS || ps == ClientState.State.DECLINING
+                     || partnerBetweenChecks)
+                    && !partnerHoldCs.isStandingsPaused()
+                    && !isParkedOrLocked(w.getClientId());
+        });
+        ClientWindowInfo holdPartner = checkingPartners.isEmpty() ? null : checkingPartners.get(0);
+        {
+            if (holdPartner != null) {
+                boolean holdStarting = completingCs.getCompletingHoldStart().equals(LocalDateTime.MIN);
+                if (holdStarting) {
                     completingCs.setCompletingHoldStart(LocalDateTime.now());
+                    completingHoldHandoffMisses.put(clientId, 0);
+                }
+                // The hold only works if the partner actually gets the foreground. clientRefocused
+                // is false when we are ticked again without the partner ever being processed in
+                // between — the thumbnail click didn't land. A few of those in a row and the hold
+                // is just starving the partner (it can't check, jump or dock), so stop holding.
+                int misses;
+                if (holdStarting || clientRefocused) {
+                    misses = 0;
+                    completingHoldHandoffMisses.put(clientId, 0);
+                } else {
+                    misses = completingHoldHandoffMisses.merge(clientId, 1, Integer::sum);
                 }
                 long held = Duration.between(completingCs.getCompletingHoldStart(), LocalDateTime.now()).getSeconds();
-                if (held < COMPLETING_HOLD_CAP_SECS) {
+                if (misses >= COMPLETING_HOLD_HANDOFF_MISS_LIMIT) {
+                    log(clientId, "COMPLETING: turn-in hold — " + holdPartner.getClientId() + " never took the foreground after "
+                            + misses + " handoffs (held " + held + "s); the hold is starving it — turning in anyway.");
+                } else if (held < COMPLETING_HOLD_CAP_SECS) {
                     log(clientId, "COMPLETING: holding turn-in — " + holdPartner.getClientId()
                             + " is still checking missions; banking the turn-in standings boost until it gets one or drops below the floor. Held " + held + "s.");
                     bringToForeground(holdPartner);
                     return;
+                } else {
+                    log(clientId, "COMPLETING: turn-in hold cap (" + COMPLETING_HOLD_CAP_SECS + "s) reached — turning in anyway.");
                 }
-                log(clientId, "COMPLETING: turn-in hold cap (" + COMPLETING_HOLD_CAP_SECS + "s) reached — turning in anyway.");
             }
             completingCs.setCompletingHoldStart(LocalDateTime.MIN);
+            completingHoldHandoffMisses.remove(clientId);
         }
+
+        if (blockedByBurnerRun(clientId, "mission turn-in")) return;
 
         missionProcessor.doubleClickAgentIcon();
 
@@ -5413,10 +5682,12 @@ public class ClientManager {
         // it checks again. Then, if OUR standing is still below the pause floor, pause ourselves and
         // let the partner carry the next mission; we resume when it completes and hands focus back.
         ClientState selfCs    = stateManager.getState(clientId);
-        ClientState partnerCs = stateManager.getOtherState(clientId);
-        if (partnerCs != null && partnerCs.isStandingsPaused()) {
-            partnerCs.setStandingsPaused(false);
-            log(clientId, "COMPLETING: turned in — clearing partner's standings pause (resume checking).");
+        // Several paused clients: clear the one with the lowest last-known standing.
+        ClientWindowInfo pausedPartner = lowestStanding(otherClients(clientId,
+                w -> stateManager.getState(w.getClientId()).isStandingsPaused()));
+        if (pausedPartner != null) {
+            stateManager.getState(pausedPartner.getClientId()).setStandingsPaused(false);
+            log(clientId, "COMPLETING: turned in — clearing " + pausedPartner.getClientId() + "'s standings pause (resume checking).");
         }
         if (!Double.isNaN(standings) && standings < STANDINGS_PAUSE_FLOOR) {
             // That reading is from BEFORE the turn-in, so it doesn't include the standing this
@@ -5484,14 +5755,9 @@ public class ClientManager {
         // instead of IDLE — avoids stale complete_mission being misdetected.
         missionProcessor.clickRequestMission();
 
-        // Switch to other client after requesting — gives the dialog time to load. Exception: if
-        // the other client is flying its mission back to turn in, don't hand it the foreground —
-        // keep checking missions here so we bank more standings before it turns its own in.
+        // Switch to other client after requesting — gives the dialog time to load.
         ClientWindowInfo other = findOtherClient(clientId);
-        if (other != null && isReturningMission(other.getClientId())) {
-            log(clientId, "COMPLETING: mission turned in — " + other.getClientId()
-                    + " is returning its mission, holding focus and proceeding with mission checking.");
-        } else if (other != null) {
+        if (other != null) {
             log(clientId, "COMPLETING: mission turned in — switching focus to " + other.getClientId());
             bringToForeground(other);
         }
@@ -5500,17 +5766,14 @@ public class ClientManager {
         stateManager.setState(clientId, ClientState.State.CHECKING_MISSIONS);
     }
 
-    /** True when the client is bringing a finished mission home to turn in: the one-shot RETURNING
-     *  setup state, or any later leg (WARPING/IDLE gate hops) flown with TravelPhase.RETURNING_HOME. */
-    private boolean isReturningMission(String clientId) {
-        return stateManager.getStateEnum(clientId) == ClientState.State.RETURNING
-                || stateManager.getState(clientId).getTravelPhase() == ClientState.TravelPhase.RETURNING_HOME;
-    }
-
     /** Take-all standings threshold is normally 0.0, forced to take-all (regardless of our own
      *  standing) when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours,
      *  so the lagging client catches up. The same gap drives the leader's forced share. */
     private static final double PARTNER_STANDING_GAP = 0.6;
+
+    /** Take-all is also forced when our standing is this far below the FLEET AVERAGE (all clients,
+     *  us included) — i.e. only when we are well behind the middle of the fleet. */
+    private static final double FLEET_AVG_TAKE_ALL_GAP = 0.7;
 
     /** A client whose standing is below this at completion pauses (yields to the partner) until the
      *  partner turns in a mission, then resumes; re-pauses if still below on its next completion. */
@@ -5535,16 +5798,18 @@ public class ClientManager {
         // ran just before this and keeps the last good value on a NaN read, so a failed/blank
         // standings OCR can't flip the leader into taking for himself. Standings don't swing a
         // full point in one mission, so trusting the stored lead is safe.
-        ClientState partner = stateManager.getOtherState(clientId);
         // Paused partner override — it sits below the pause floor doing nothing until we turn in,
         // and it only climbs back out on shared rewards. Share unconditionally here, even when our
         // own standing is critical: taking all would leave the partner stuck at the floor with no
-        // way back. Runs before every take-all branch below.
-        if (partner != null && partner.isStandingsPaused()) {
+        // way back. Runs before every take-all branch below. Any paused client counts.
+        if (!otherClients(clientId, w -> stateManager.getState(w.getClientId()).isStandingsPaused()).isEmpty()) {
             log(clientId, "COMPLETING: partner is standings-paused — sharing so it can climb back above the floor.");
             missionProcessor.clickFleetYes();
             return;
         }
+        // Leader check is against the lowest-standing other client (the one lagging furthest).
+        ClientWindowInfo lagging = lowestStanding(otherClients(clientId, w -> true));
+        ClientState partner = lagging != null ? stateManager.getState(lagging.getClientId()) : null;
         if (partner != null) {
             double selfLast    = stateManager.getState(clientId).getLastKnownStanding();
             double partnerLast = partner.getLastKnownStanding();
@@ -5581,20 +5846,30 @@ public class ClientManager {
 
     /**
      * The take-all (fleet_no) threshold for this client's completion. Normally 0.0, forced to
-     * take-all when the partner's standing is more than {@link #PARTNER_STANDING_GAP} above ours
-     * (so the lagging client catches up) — if the other has more standing, we take all.
+     * take-all when we are lagging the rest of the fleet: more than
+     * {@link #FLEET_AVG_TAKE_ALL_GAP} below the average standing of all clients (us included),
+     * so the lagging client catches up. With two clients that is the same bar as being
+     * {@link #PARTNER_STANDING_GAP} under the partner; with three it is measured against the
+     * middle rather than against whoever happens to be highest.
      */
     private double takeAllThreshold(String clientId, double standings) {
-        ClientState partner = stateManager.getOtherState(clientId);
-        if (partner == null) return 0.0;
+        if (Double.isNaN(standings)) return 0.0;
 
-        // Partner ahead of us in standing: take all unconditionally to catch up, even when our
-        // own standing already looks healthy.
-        double partnerStanding = partner.getLastKnownStanding();
-        if (!Double.isNaN(standings) && !Double.isNaN(partnerStanding)
-                && partnerStanding - standings > PARTNER_STANDING_GAP) {
-            log(clientId, "COMPLETING: partner standing >" + PARTNER_STANDING_GAP
-                    + " above ours — taking all.");
+        // Average across the whole fleet: our live read plus every other client's last known.
+        double sum = standings;
+        int count = 1;
+        for (ClientWindowInfo w : otherClients(clientId, x -> true)) {
+            double other = stateManager.getState(w.getClientId()).getLastKnownStanding();
+            if (Double.isNaN(other)) continue;
+            sum += other;
+            count++;
+        }
+        if (count < 2) return 0.0;   // solo — nothing to compare against
+
+        double average = sum / count;
+        if (average - standings > FLEET_AVG_TAKE_ALL_GAP) {
+            log(clientId, "COMPLETING: standing >" + FLEET_AVG_TAKE_ALL_GAP
+                    + " below the fleet average of " + count + " clients — taking all.");
             return Double.POSITIVE_INFINITY;
         }
         return 0.0;
@@ -5629,17 +5904,6 @@ public class ClientManager {
         // Open the faction agent's conversation.
         missionProcessor.doubleClickFactionAgent();
 
-        // If no live offer is showing, request one.
-        if (missionProcessor.detectDialog() != MissionProcessor.DialogState.OFFER) {
-            missionProcessor.clickRequestMissionPlain();
-            if (!missionProcessor.waitForNewOffer()) {
-                log(clientId, "FACTION_CHECK: no offer from faction agent — closing the faction dialog and resuming.");
-                missionProcessor.clickAllCloseButtons();
-                stateManager.setState(clientId, ClientState.State.IDLE);
-                return;
-            }
-        }
-
         // 1) Kernite ("Resources for War").
         if (missionProcessor.isKerniteOffer()) {
             // High sec: the faction agent is in our home station, so there's no remote-accept
@@ -5660,10 +5924,19 @@ public class ClientManager {
             return;
         }
 
-        // 2) Evolution (no template — OCR) — leave it, never check the faction agent again this session.
+        // 2) One OCR read of the dialog. No mission text at all = the faction agent has nothing
+        // on offer — don't request/wait/retry, just close his dialog and go back to the normal agent.
         Mission offer = missionProcessor.readMission(getMissionAreaForClient(clientId));
         String title = (offer != null && offer.getTitle()   != null) ? offer.getTitle().toLowerCase()   : "";
         String raw   = (offer != null && offer.getRawText() != null) ? offer.getRawText().toLowerCase() : "";
+        if (title.trim().isEmpty() && raw.trim().isEmpty()) {
+            log(clientId, "FACTION_CHECK: no mission text in the faction dialog — closing it and resuming with the normal agent.");
+            missionProcessor.clickAllCloseButtons();
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            return;
+        }
+
+        // Evolution (no template — OCR) — leave it, never check the faction agent again this session.
         if (title.contains("evolution") || raw.contains("evolution")) {
             parkEvolution(clientId, cs, "FACTION_CHECK");
             return;
@@ -6430,7 +6703,7 @@ public class ClientManager {
                     case 2: {
                         long bubbleElapsed = Duration.between(cs.getBubbleEscapeStart(), LocalDateTime.now()).getSeconds();
                         if (bubbleElapsed < 6) {
-                            log(clientId, "WARPING[BUBBLE] step 2: waiting (" + bubbleElapsed + "s / 6s).");
+                            logTick(clientId, "WARPING[BUBBLE] step 2: waiting (" + bubbleElapsed + "s / 6s).");
                             return;
                         }
                         log(clientId, "WARPING[BUBBLE] step 2: 6s wait complete — attempting jump.");
@@ -6575,9 +6848,6 @@ public class ClientManager {
             }
         }
 
-        // Periodic 'general' overview reset (every 5m, throttled by lastPodCheck).
-        runPeriodicOverviewReset(clientId, cs);
-
         // Poll every 2s for warp_active — but if this client just regained the foreground, check
         // immediately rather than waiting out the throttle it left behind when it yielded focus.
         // (Only the first tick after refocus is exempt; setLastWarpCheck below re-arms the throttle,
@@ -6663,14 +6933,141 @@ public class ClientManager {
         return cs.isParked() || cs.isStandingsLocked();
     }
 
-    /** Returns the first registered client that is not {@code excludeId}. */
+    /** A warp running this long has almost certainly landed already — the client is sitting on a
+     *  gate doing nothing, so it jumps the queue. */
+    private static final long WARP_STALE_PRIORITY_SECS = 40;
+    /** A client that hasn't held the foreground for this long is boosted so priority can't starve
+     *  it (a docked client would otherwise always lose to one out flying). */
+    private static final long FOREGROUND_STARVED_SECS  = 120;
+    private static final int  STARVED_BONUS            = 50;
+    /** When each client last got the foreground — drives the anti-starvation bonus above. */
+    private final Map<String, LocalDateTime> lastForegroundAt = new HashMap<>();
+
+    /**
+     * How badly this client needs the screen. Higher wins when handing the foreground off:
+     * the mission itself always first, then undocking (the animation must run in the foreground)
+     * and a warp that has almost certainly already landed (sitting on a gate), then the run out
+     * to the mission, and
+     * station work (checking, accepting, repairing, turning in) last — a docked client is parked
+     * safely and can wait, a client idle on a gate cannot.
+     */
+    private int foregroundPriority(String clientId) {
+        ClientState cs = stateManager.getState(clientId);
+        switch (cs.getState()) {
+            case UNDOCKING:
+                return 100;
+            case WARPING: {
+                long warping = Duration.between(cs.getWarpStartTime(), LocalDateTime.now()).getSeconds();
+                // Mid-warp there is nothing to do but wait — lowest of all. Past the stale mark
+                // the warp has ended in all likelihood and the ship is idling on the far gate.
+                return warping >= WARP_STALE_PRIORITY_SECS ? 90 : 10;
+            }
+            case IN_COMBAT:
+                // In the mission — always first, above everything else including the starvation
+                // bonus: the fight is the only thing that can't be paused safely.
+                return 200;
+            case TRAVEL:
+                return 70;                       // mission start: route + gate
+            case IDLE:
+                // Out flying a leg (gate to take, mission to warp into) vs docked at the agent.
+                return cs.getTravelPhase() != ClientState.TravelPhase.NONE ? 70 : 30;
+            case POD_COOLDOWN:
+                return 5;                        // waiting out a timer — nothing to do
+            default:
+                return 30;                       // station work: checking, declining, accepting,
+                                                 // repairing, completing, faction runs
+        }
+    }
+
+    /**
+     * Pick the client to hand the foreground to: the one that most needs it right now
+     * ({@link #foregroundPriority}, plus a bonus for any client starved of focus for
+     * {@link #FOREGROUND_STARVED_SECS}), with ties broken by round-robin order so equal-priority
+     * clients still rotate. Prefers a client that can work (not parked/locked, not
+     * standings-paused); failing that a paused one, then any other — callers still apply their
+     * own parked/paused checks.
+     */
     private ClientWindowInfo findOtherClient(String excludeId) {
-        for (ClientWindowInfo info : clientWindows.values()) {
-            if (!info.getClientId().equals(excludeId)) {
-                return info;
+        List<ClientWindowInfo> order = rotationOrder(excludeId, excludeId);
+        if (order.isEmpty()) return null;
+        LocalDateTime now = LocalDateTime.now();
+        ClientWindowInfo best = null, paused = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (ClientWindowInfo w : order) {
+            String id = w.getClientId();
+            if (isParkedOrLocked(id)) continue;
+            if (stateManager.getState(id).isStandingsPaused()) {
+                if (paused == null) paused = w;
+                continue;
+            }
+            LocalDateTime last = lastForegroundAt.get(id);
+            boolean starved = last == null
+                    || Duration.between(last, now).getSeconds() >= FOREGROUND_STARVED_SECS;
+            int score = foregroundPriority(id) + (starved ? STARVED_BONUS : 0);
+            if (score > bestScore) {      // strict >: ties keep the earlier (rotation-order) client
+                bestScore = score;
+                best = w;
             }
         }
-        return null;
+        if (best != null) return best;
+        return paused != null ? paused : order.get(0);
+    }
+
+    /** Registered clients in round-robin order starting after {@code afterId}, never {@code skipId}. */
+    private List<ClientWindowInfo> rotationOrder(String afterId, String skipId) {
+        List<ClientWindowInfo> order = new ArrayList<>(clientWindows.values());
+        order.sort(Comparator.comparing(ClientWindowInfo::getClientId));
+        order.removeIf(w -> w.getClientId().equals(skipId));
+        if (order.isEmpty()) return order;
+        int start = 0;
+        for (int i = 0; i < order.size(); i++) {
+            if (order.get(i).getClientId().compareTo(afterId) > 0) { start = i; break; }
+        }
+        List<ClientWindowInfo> rotated = new ArrayList<>(order.size());
+        for (int k = 0; k < order.size(); k++) rotated.add(order.get((start + k) % order.size()));
+        return rotated;
+    }
+
+    /** Next client after {@code afterId} in strict rotation order (no priority), never
+     *  {@code skipId} — used by the lend-out walk, which tries every candidate in turn. */
+    private ClientWindowInfo nextClientAfter(String afterId, String skipId) {
+        List<ClientWindowInfo> order = rotationOrder(afterId, skipId);
+        if (order.isEmpty()) return null;
+        ClientWindowInfo paused = null, any = null;
+        for (ClientWindowInfo w : order) {
+            if (any == null) any = w;
+            if (isParkedOrLocked(w.getClientId())) continue;
+            if (stateManager.getState(w.getClientId()).isStandingsPaused()) {
+                if (paused == null) paused = w;
+                continue;
+            }
+            return w;
+        }
+        return paused != null ? paused : any;
+    }
+
+    /** The client with the lowest last-known standing (unknown standings rank last), or null if none. */
+    private ClientWindowInfo lowestStanding(List<ClientWindowInfo> clients) {
+        ClientWindowInfo best = null;
+        double bestSt = Double.NaN;
+        for (ClientWindowInfo w : clients) {
+            double st = stateManager.getState(w.getClientId()).getLastKnownStanding();
+            if (best == null || (!Double.isNaN(st) && (Double.isNaN(bestSt) || st < bestSt))) {
+                best = w;
+                bestSt = st;
+            }
+        }
+        return best;
+    }
+
+    /** Other clients (not {@code excludeId}) matching {@code test}, in rotation order starting after {@code excludeId}. */
+    private List<ClientWindowInfo> otherClients(String excludeId, java.util.function.Predicate<ClientWindowInfo> test) {
+        List<ClientWindowInfo> order = new ArrayList<>(clientWindows.values());
+        order.sort(Comparator.comparing(ClientWindowInfo::getClientId));
+        List<ClientWindowInfo> out = new ArrayList<>();
+        for (ClientWindowInfo w : order) if (w.getClientId().compareTo(excludeId) > 0 && test.test(w)) out.add(w);
+        for (ClientWindowInfo w : order) if (w.getClientId().compareTo(excludeId) < 0 && test.test(w)) out.add(w);
+        return out;
     }
 
     /**
@@ -6710,6 +7107,7 @@ public class ClientManager {
         //log("[ClientManager] Clicking EVE-O Preview  '" + templateKey + "'");
         missionProcessor.clickTemplateBelow(templateKey, THUMBNAIL_CLICK_OFFSET_Y);
         lastClientSwitch = LocalDateTime.now();
+        lastForegroundAt.put(window.getClientId(), lastClientSwitch);
     }
 
     // -----------------------------------------------------------------------
@@ -6828,6 +7226,27 @@ public class ClientManager {
 
     private void log(String msg) {
         System.out.printf("[%s] %s%n", LocalDateTime.now().format(TS), msg);
+    }
+
+    /** Throttle window for per-tick chatter (wait counters, "still waiting" polls). */
+    private static final long TICK_LOG_THROTTLE_SECS = 10;
+    /** Last print time per client + message shape (digits stripped, so a counting wait line
+     *  counts as one shape). */
+    private final Map<String, LocalDateTime> tickLogLast = new HashMap<>();
+
+    /**
+     * Log a line that a 500ms poll would otherwise repeat every tick. The same line — ignoring
+     * the numbers in it — prints at most once every {@link #TICK_LOG_THROTTLE_SECS} per client,
+     * so waits and polls show progress without flooding the console. Event lines (transitions,
+     * clicks, failures) keep using {@link #log(String, String)} and always print.
+     */
+    private void logTick(String clientId, String msg) {
+        String key = clientId + "|" + msg.replaceAll("[0-9]+", "#");
+        LocalDateTime now = LocalDateTime.now();
+        LocalDateTime last = tickLogLast.get(key);
+        if (last != null && Duration.between(last, now).getSeconds() < TICK_LOG_THROTTLE_SECS) return;
+        tickLogLast.put(key, now);
+        log(clientId, msg);
     }
 
     /**
