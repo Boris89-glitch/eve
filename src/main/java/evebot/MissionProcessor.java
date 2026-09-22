@@ -869,6 +869,44 @@ public class MissionProcessor {
         return true;
     }
 
+    /**
+     * Loot the mission wreck on the way home: switch the overview to 'mining' (wrecks aren't on the
+     * General preset), double-click 'wreck', then after a second check for the 'loot' icon inside
+     * the opened window. Loot present → 'loot_all'; either way the window is closed and the
+     * overview is put back on 'general' before the return leg continues.
+     *
+     * Nothing here is an error — a missing wreck or an empty one just means no loot. Returns true
+     * if Loot All was clicked.
+     */
+    public boolean lootWreck() {
+        log("Loot: selecting the 'mining' overview tab.");
+        clickTemplate("mining");
+        sleep(800);
+        if (ocrBridge.findAnyTemplate("wreck") == null) {
+            log("Loot: no 'wreck' on the mining overview — nothing to loot.");
+            clickTemplate("general");
+            sleep(POST_CLICK_DELAY_MS);
+            return false;
+        }
+        log("Loot: double-clicking 'wreck' to open it.");
+        ocrBridge.doubleClickTemplate("wreck");
+        sleep(1000);
+        boolean looted = false;
+        if (ocrBridge.findAnyTemplate("loot") != null) {
+            log("Loot: 'loot' present — clicking 'loot_all'.");
+            ocrBridge.clickTemplate("loot_all");
+            sleep(1000);
+            looted = true;
+        } else {
+            log("Loot: wreck is empty — closing.");
+        }
+        ocrBridge.clickTemplate("close_active_window");
+        sleep(800);
+        clickTemplate("general");
+        sleep(POST_CLICK_DELAY_MS);
+        return looted;
+    }
+
     public void clickWarpToLocation() {
         log("Clicking WARP TO LOCATION (template)");
         ocrBridge.clickTemplate("warp_to_location");

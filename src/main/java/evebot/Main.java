@@ -50,10 +50,12 @@ public class Main {
         // 3. Scheduler
         this.scheduler = Executors.newScheduledThreadPool(3);
 
-        // Poll clients every 500ms for snappier response times
+        // Poll clients every 250ms. Station work (mission checks, ship swaps) runs at this full
+        // rate; ClientManager drops every other tick once the client is out of the station, so
+        // space work stays on the old 500ms cadence.
         scheduler.scheduleAtFixedRate(
                 clientManager::monitorClients,
-                0, 500, TimeUnit.MILLISECONDS);
+                0, 250, TimeUnit.MILLISECONDS);
 
         // Auto-save state every 20 s
         scheduler.scheduleAtFixedRate(stateManager::saveStates, 20, 20, TimeUnit.SECONDS);

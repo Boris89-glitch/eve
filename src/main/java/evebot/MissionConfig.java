@@ -60,6 +60,20 @@ public class MissionConfig {
     /** Recon is skipped once agent standing climbs above this, in high sec as well as null sec. */
     private static final double RECON_MAX_STANDING = 0.0;
 
+    /** Blood Raider is skipped once agent standing climbs above this. */
+    private static final double BLOODRAIDER_MAX_STANDING = 1.0;
+
+    /** True if this offer is a Blood Raider burner. Mirrors ClientManager's test: the template-set
+     *  ship target when present, otherwise the dialog text (with the usual OCR misreads of "blood"). */
+    private static boolean isBloodRaider(Mission m) {
+        String t = m.getShipTarget() != null ? m.getShipTarget() : m.getTarget();
+        if ("bloodraider".equalsIgnoreCase(t)) return true;
+        String title = m.getTitle()   == null ? "" : m.getTitle().toLowerCase();
+        String raw   = m.getRawText() == null ? "" : m.getRawText().toLowerCase();
+        String text  = title + " " + raw;
+        return text.contains("blood raider") || text.contains("blaad") || text.contains("bload");
+    }
+
     /** True if this offer is a Recon mission. The title wraps and OCRs inconsistently
      *  ("Recon 1 of 3" / "Recon1of3"), so the raw dialog text is checked too. */
     private static boolean isRecon(Mission m) {
@@ -96,6 +110,18 @@ public class MissionConfig {
             if (!Double.isNaN(s) && s > RECON_MAX_STANDING) {
                 System.out.printf("[DECISION] DECLINE — %s  (recon: standing > %.1f)%n",
                         mission.getTitle(), RECON_MAX_STANDING);
+                return Decision.DECLINE;
+            }
+        }
+
+        // 1c. Blood Raider has its own standings ceiling — above it the burner isn't worth
+        //     running, so refuse before any accept rule ("anomic") can match. An unknown
+        //     standing (NaN) passes — same "when unsure, accept" direction as elsewhere.
+        if (isBloodRaider(mission)) {
+            double s = normalizeStanding(standing);
+            if (!Double.isNaN(s) && s > BLOODRAIDER_MAX_STANDING) {
+                System.out.printf("[DECISION] DECLINE — %s  (blood raider: standing > %.1f)%n",
+                        mission.getTitle(), BLOODRAIDER_MAX_STANDING);
                 return Decision.DECLINE;
             }
         }

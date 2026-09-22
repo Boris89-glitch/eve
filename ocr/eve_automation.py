@@ -178,6 +178,9 @@ TEMPLATE_FILES = {
     "general": "general",      # 'General' overview tab — clicked periodically in space to reset the preset
     "container": "container",  # Scarlet loot container on the overview — double-click to open
     "loot_all": "loot_all",    # 'Loot All' button in the open container window
+    "mining": "mining",        # 'Mining' overview tab — selected on the way home so wrecks show up
+    "wreck": "wreck",          # mission wreck on the mining overview — double-click to open
+    "loot": "loot",            # loot icon inside the opened wreck — absent when the wreck is empty
     # Safe-spot & system-detection templates for enemy evasion
     "jcv_spot": "jcv_spot",      # JCV safe spot bookmark in Locations submenu
     "kly_spot": "kly_spot",      # KLY safe spot bookmark in Locations submenu
@@ -405,6 +408,24 @@ def resolve_ship_template(mission_target: str, ship_map: dict):
 # -----------------------------------------------------------------------------
 
 
+# Per-key match thresholds, overriding the default. 'loot' is the tiny green dot in the
+# opened wreck — the only thing that says the wreck actually holds something. It is small
+# and mostly flat, so at the default threshold it scores a match against almost any dark
+# UI corner and every wreck looked full.
+TEMPLATE_THRESHOLDS: Dict[str, float] = {
+    "loot": 0.95,
+}
+
+# Keys whose match only counts when the matched patch is really green — the dot IS the
+# signal, so a same-shaped grey/dark icon must not pass for it.
+GREEN_ONLY_KEYS = {"loot"}
+# A pixel counts as green when its green channel leads both others by this much, and the
+# patch counts as the dot when at least this fraction of it is green (the template itself
+# is ~44% green, so a quarter is a generous floor).
+GREEN_PIXEL_LEAD = 25
+GREEN_PATCH_FRACTION = 0.25
+
+
 class TemplateMatcher:
     """Loads PNG templates once and exposes find / click / right-click helpers."""
 
@@ -500,16 +521,42 @@ class TemplateMatcher:
             return None
         if screen is None:
             screen = self.screenshot_cv()
-        th = threshold if threshold is not None else self.threshold
+        if threshold is not None:
+            th = threshold
+        else:
+            th = TEMPLATE_THRESHOLDS.get(key, self.threshold)
         result = cv2.matchTemplate(screen, template, cv2.TM_CCOEFF_NORMED)
+        h, w = template.shape[:2]
+        if key in GREEN_ONLY_KEYS:
+            # The green dot: take every location above the threshold, best first, and return
+            # the first one that is actually green. The top-scoring match alone isn't enough —
+            # a grey icon of the same shape outscores nothing, it just wins by default.
+            ys, xs = np.where(result >= th)
+            cands = sorted(zip(result[ys, xs], xs, ys), key=lambda c: -c[0])[:50]
+            for score, x, y in cands:
+                if self._is_green_patch(screen, int(x), int(y), w, h):
+                    log.debug("Found '%s' at (%d,%d) conf=%.3f (green confirmed)", key, x, y, score)
+                    return (int(x), int(y), w, h)
+            log.debug("'%s' not found — %d match(es) >= %.3f, none of them green.",
+                      key, len(cands), th)
+            return None
         _, max_val, _, max_loc = cv2.minMaxLoc(result)
         if max_val >= th:
-            h, w = template.shape[:2]
             x, y = max_loc
             log.debug("Found '%s' at (%d,%d) conf=%.3f", key, x, y, max_val)
             return (x, y, w, h)
         log.debug("'%s' not found (best=%.3f < threshold %.3f)", key, max_val, th)
         return None
+
+    @staticmethod
+    def _is_green_patch(screen: np.ndarray, x: int, y: int, w: int, h: int) -> bool:
+        """True when enough of the screen patch at (x, y, w, h) is green — the loot dot's
+        own signature (BGR screen, so channel 1 is green)."""
+        patch = screen[y:y + h, x:x + w].astype(int)
+        if patch.size == 0:
+            return False
+        lead = patch[:, :, 1] - np.maximum(patch[:, :, 0], patch[:, :, 2])
+        return float((lead > GREEN_PIXEL_LEAD).mean()) >= GREEN_PATCH_FRACTION
 
     def match_conf(
         self, key: str, screen: Optional[np.ndarray] = None
