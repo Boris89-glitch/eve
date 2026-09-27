@@ -283,6 +283,20 @@ TEMPLATE_FILES = {
     "standing_bad": "standing_bad",                 # bad (orange) standing option in the add-contact dialog
     "contacts": "contacts",                         # contacts window/button — backup add path
     "contacts_search": "contacts_search",           # search field in the contacts window
+    # Standings-refused relog + re-fleet flow
+    "log_off": "log_off",            # 'Log Off' button in the Escape menu
+    "login_1": "login_1",            # character-select slots — whichever shows is clicked to log back in
+    "login_2": "login_2",
+    "login_3": "login_3",
+    "login_4": "login_4",
+    "fleet_1": "fleet_1",            # partner rows in the contacts window — right-click to fleet up
+    "fleet_2": "fleet_2",
+    "fleet_3": "fleet_3",
+    "fleet_4": "fleet_4",
+    "form_fleet_1": "form_fleet_1",  # 'Form Fleet With...' on the contact right-click (not in fleet yet)
+    "form_fleet_2": "form_fleet_2",  # 'Fleet' submenu on the contact right-click (already in a fleet) — hover
+    "fleet_member": "fleet_member",  # 'Invite as fleet member' in the Fleet submenu
+    "yes": "yes",                    # 'Yes' on the fleet invite, clicked on the relogged client
 }
 
 # Fixed screen position of the "Ship Hangar" station-services button. Used as a
@@ -2538,6 +2552,20 @@ def daemon_dispatch(matcher: "TemplateMatcher", reader_box: dict, msg: dict) -> 
 
     if cmd == "alt_shift_key_press":
         matcher._do_alt_shift_key_press(msg["key"], delay=DAEMON_CLICK_DELAY)
+        return {"ok": True, "value": True}
+
+    if cmd == "escape":
+        # Only for the standings-refused relog (opens the Escape menu for log_off) — everywhere
+        # else menus are dismissed with a left-click, never Escape.
+        try:
+            import win32api, win32con
+            win32api.keybd_event(0x1B, 0, 0, 0)
+            time.sleep(0.05)
+            win32api.keybd_event(0x1B, 0, win32con.KEYEVENTF_KEYUP, 0)
+        except ImportError:
+            pyautogui.press("esc")
+        log.info("escape pressed")
+        time.sleep(DAEMON_CLICK_DELAY)
         return {"ok": True, "value": True}
 
     if cmd == "ctrl_r":

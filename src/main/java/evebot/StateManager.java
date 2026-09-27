@@ -292,6 +292,7 @@ public class StateManager {
                     Double st = standings.get(id);
                     if (st != null) cs.setLastKnownStanding(st);   // dedicated file wins — survives bot_state.json wipe
                     applyStartupStandingsPause(cs);
+                    if (Boolean.TRUE.equals(dto.forceStandingsRefused)) cs.setForceStandingsRefused(true);
                     LocalDateTime fd = factionDeclines.get(id);
                     if (fd != null) cs.setLastFactionDecline(fd);
                     LocalDateTime fc = factionChecks.get(id);
@@ -700,6 +701,9 @@ public class StateManager {
         String                  missionTarget;
         String                  missionShipTarget;
         Mission.MissionType     missionType;
+        // Test hook, load-only (never written back): set true by hand to fire the
+        // standings_refused relog flow once on this client's next CHECKING_MISSIONS tick.
+        Boolean                 forceStandingsRefused;
 
         ClientStateDto() {}   // Gson
 

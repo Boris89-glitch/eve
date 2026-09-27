@@ -1634,24 +1634,110 @@ public class ClientManager {
         }
     }
 
+    /** Relogged character's login slot → its row in the partner's contacts (login_N → fleet_N):
+     *  e.g. Gravitar (login_1) inviting relogged Lancer (login_2) right-clicks fleet_2. */
+    private static final Map<String, String> LOGIN_TO_FLEET_ROW = Map.of(
+            "login_1", "fleet_1",
+            "login_2", "fleet_2",
+            "login_3", "fleet_3",
+            "login_4", "fleet_4");
+
+    /** Below this the agent's refusal is genuine — boost standing via the partner instead of relogging. */
+    private static final double STANDINGS_REFUSED_FLOOR = -2.0;
+
+    /** Seconds to wait for a relogged client's "EVE - Name" window title to come back. */
+    private static final int RELOG_TITLE_WAIT_SECS = 90;
+
     /**
-     * If the agent's "standing too low" refusal message is on screen, park this client
-     * for the rest of the session (standing won't climb on its own, so retrying is
-     * pointless) and hand the foreground to the other client. Returns true if parked.
+     * If the agent's "standing too low" refusal is on screen and a live standings read says we're
+     * NOT below -2 (then it's a bug), relog this client and re-form the fleet: log off → log back in → the partner
+     * invites it from contacts → this client accepts. Then it resumes from IDLE (reopens the
+     * agent) instead of parking. Falls back to the old park + alarm only if the character-select
+     * slot never shows. Returns true if the refusal was handled.
      *
      * @param where short label of the calling state, for the log line
      */
-    private boolean parkIfStandingsRefused(String clientId, ClientState cs, String where) {
-        if (!missionProcessor.isStandingsRefused()) return false;
-        log(clientId, where + ": agent refused — standing too low (< 2). Parking this client for the session.");
-        EventLog.log("STANDINGS_REFUSED", clientId + " — agent refused mission (standing < 2), client parked for session");
-        soundAlert(POD_ALERT); // needs a human — same alarm as a pod death
-        cs.setStandingsLocked(true);
+    private boolean relogIfStandingsRefused(String clientId, ClientState cs, String where) {
+        boolean forced = cs.consumeForceStandingsRefused();
+        if (!forced && !missionProcessor.isStandingsRefused()) return false;
+        log(clientId, where + ": standings_refused" + (forced ? " (forced test)" : "")
+                + " — checking standing before relogging.");
+        EventLog.log("STANDINGS_REFUSED", clientId + " — agent refused mission, relogging");
         cs.setCurrentMission(null);
-        stateManager.setState(clientId, ClientState.State.IDLE);
+
+        // Really below -2: a relog won't help — pause and let the partner's shared turn-ins
+        // boost us (its turn-in clears the pause; a repeat refusal re-checks here).
+        missionProcessor.clickAgentStandings();
+        double standing = missionProcessor.readAgentStandings();
+        missionProcessor.closeStandingsDialog();
+        if (!Double.isNaN(standing)) stateManager.recordStanding(clientId, standing);
+        else standing = cs.getLastKnownStanding();
+        if (!Double.isNaN(standing) && standing < STANDINGS_REFUSED_FLOOR) {
+            log(clientId, where + ": standing really below " + STANDINGS_REFUSED_FLOOR
+                    + " — no relog; pausing until the partner's turn-ins boost it.");
+            cs.setStandingsPaused(true);
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) bringToForeground(other);
+            return true;
+        }
+
+        ClientWindowInfo self = clientWindows.get(clientId);
+
+        String login = missionProcessor.logOffAndLogBackIn();
+        if (login == null) {
+            log(clientId, "Relog failed — parking this client for the session.");
+            soundAlert(POD_ALERT); // needs a human — same alarm as a pod death
+            cs.setStandingsLocked(true);
+            stateManager.setState(clientId, ClientState.State.IDLE);
+            ClientWindowInfo other = findOtherClient(clientId);
+            if (other != null) bringToForeground(other);
+            return true;
+        }
+        if (self == null || !waitForWindowTitle(self, RELOG_TITLE_WAIT_SECS)) {
+            log(clientId, "Relog: window title did not come back within " + RELOG_TITLE_WAIT_SECS + "s — continuing anyway.");
+        }
+        sleepMs(5000); // let the station finish loading before the invite
+
         ClientWindowInfo other = findOtherClient(clientId);
-        if (other != null) bringToForeground(other);
+        String fleetRow = LOGIN_TO_FLEET_ROW.get(login);
+        if (other != null && self != null) {
+            log(clientId, "Relog: switching to " + other.getClientId() + " to invite via " + fleetRow + ".");
+            clickThumbnail(other);
+            sleepMs(1500);
+            if (missionProcessor.inviteToFleet(fleetRow)) {
+                clickThumbnail(self);
+                sleepMs(1500);
+                missionProcessor.acceptFleetInvite();
+            } else {
+                clickThumbnail(self);
+            }
+        } else {
+            log(clientId, "Relog: no partner client — skipping fleet invite.");
+        }
+        missionProcessor.clickAnyShip();
+        EventLog.log("RELOGGED", clientId + " — logged back in via " + login + ", resuming");
+        stateManager.setState(clientId, ClientState.State.IDLE);
         return true;
+    }
+
+    /** Wait until the window's title is back to the one it was discovered with (relog done). */
+    private boolean waitForWindowTitle(ClientWindowInfo window, int timeoutSecs) {
+        com.sun.jna.platform.win32.User32 user32 = com.sun.jna.platform.win32.User32.INSTANCE;
+        com.sun.jna.platform.win32.WinDef.HWND hwnd = new com.sun.jna.platform.win32.WinDef.HWND(
+                new com.sun.jna.Pointer(window.getHandle()));
+        long deadline = System.currentTimeMillis() + timeoutSecs * 1000L;
+        while (System.currentTimeMillis() < deadline) {
+            char[] buf = new char[512];
+            user32.GetWindowText(hwnd, buf, buf.length);
+            if (window.getTitle().equals(com.sun.jna.Native.toString(buf))) return true;
+            sleepMs(1000);
+        }
+        return false;
+    }
+
+    private static void sleepMs(long ms) {
+        try { Thread.sleep(ms); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
     }
 
     // -----------------------------------------------------------------------
@@ -1662,8 +1748,8 @@ public class ClientManager {
         ClientState cs = stateManager.getState(clientId);
         cs.setLastCombatOrCheck(LocalDateTime.now()); // docked & checking missions — ship is alive, gates the warp pod check
 
-        // Agent refused to hand out a mission because our standing is too low (< 2).
-        if (parkIfStandingsRefused(clientId, cs, "CHECKING_MISSIONS")) return;
+        // Agent refused a mission (standings_refused) — relog + re-fleet, then resume.
+        if (relogIfStandingsRefused(clientId, cs, "CHECKING_MISSIONS")) return;
 
         if (cs.getMissionCheckStartTime().equals(LocalDateTime.MIN)) {
             cs.setMissionCheckStartTime(LocalDateTime.now());
@@ -2241,7 +2327,7 @@ public class ClientManager {
             // No offer appeared — the agent may be refusing because our standing is too
             // low. Check here too: otherwise this request/retry loop spins forever
             // without ever re-entering CHECKING_MISSIONS where the other check lives.
-            if (parkIfStandingsRefused(clientId, stateManager.getState(clientId), "DECLINING")) return;
+            if (relogIfStandingsRefused(clientId, stateManager.getState(clientId), "DECLINING")) return;
 
             // Accidental accept: the "decline" click can land on Accept, so the mission we meant to
             // reject is now active. Request Mission is a no-op while a mission is in progress, hence
@@ -7455,6 +7541,11 @@ public class ClientManager {
         // bailout on its very first tick back. The cycle budget is per client and counts only the
         // time it actually holds the foreground, so restart it whenever a client takes focus.
         stateManager.getState(window.getClientId()).setMissionCheckStartTime(LocalDateTime.MIN);
+        clickThumbnail(window);
+    }
+
+    /** Click the window's EVE-O Preview thumbnail — the raw focus switch, no parked/paused gating. */
+    private void clickThumbnail(ClientWindowInfo window) {
         String templateKey = window.getClientId()
                 .replaceFirst("^eve_", "")
                 .toLowerCase();

@@ -680,6 +680,12 @@ public class OCRBridge {
         sendAction(c);
     }
 
+    /** Press Escape. Only used to open the Escape menu for the standings-refused relog. */
+    public void escapeKey() {
+        dbg("[%s] [" + activeClient + "] escapeKey%n", ts());
+        sendAction(cmd("escape"));
+    }
+
     /**
      * Hold Ctrl and press R — reloads modules in EVE.
      */

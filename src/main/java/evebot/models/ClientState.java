@@ -564,6 +564,15 @@ public class ClientState {
     public void setWarpEndMisses(int v)              { this.warpEndMisses = v; }
 
 
+    /** Test hook: one-shot — the next standings_refused check fires without the template. */
+    private boolean forceStandingsRefused = false;
+    public void    setForceStandingsRefused(boolean v) { this.forceStandingsRefused = v; }
+    public boolean consumeForceStandingsRefused() {
+        boolean v = forceStandingsRefused;
+        forceStandingsRefused = false;
+        return v;
+    }
+
     public boolean isStandingsLocked()               { return standingsLocked; }
     public void    setStandingsLocked(boolean v)     { this.standingsLocked = v; }
     public boolean isParked()                        { return parked; }

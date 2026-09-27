@@ -1226,6 +1226,92 @@ public class MissionProcessor {
     }
 
     /**
+     * Log this client off (Escape menu → log_off) and back in by clicking whichever character
+     * slot (login_1..login_4) shows on the character-select screen. Escape is pressed on purpose
+     * here — it is the only way to reach Log Off. Returns the clicked login key, or null if no
+     * character slot appeared.
+     */
+    public String logOffAndLogBackIn() {
+        log("Relog: pressing Escape and clicking log_off");
+        ocrBridge.escapeKey();
+        sleep(1000);
+        if (!ocrBridge.waitAndClickTemplate("log_off", 5)) {
+            log("Relog: log_off not found.");
+            return null;
+        }
+        sleep(5000);
+        String login = ocrBridge.waitForAnyTemplate(60, "login_1", "login_2", "login_3", "login_4");
+        if (login == null) {
+            log("Relog: no login_1..login_4 slot appeared.");
+            return null;
+        }
+        log("Relog: clicking " + login);
+        ocrBridge.clickTemplate(login);
+        return login;
+    }
+
+    /**
+     * On the partner client: open contacts, right-click the relogged character's row
+     * ({@code fleetKey}) and invite it — "Form Fleet With" (form_fleet_1) when not yet in a
+     * fleet, else hover the Fleet submenu (form_fleet_2) and click fleet_member.
+     */
+    public boolean inviteToFleet(String fleetKey) {
+        log("Fleet invite: opening contacts, right-clicking " + fleetKey);
+        ocrBridge.clickTemplate("contacts");
+        sleep(1500);
+        if (!ocrBridge.waitForTemplate(fleetKey, 5)) {
+            log("Fleet invite: " + fleetKey + " not found in contacts.");
+            return false;
+        }
+        ocrBridge.rightClickTemplate(fleetKey);
+        sleep(800);
+        String item = ocrBridge.waitForAnyTemplate(3, "form_fleet_1", "form_fleet_2");
+        if ("form_fleet_1".equals(item)) {
+            ocrBridge.clickTemplate("form_fleet_1");
+            log("Fleet invite: form_fleet_1 clicked.");
+        } else if ("form_fleet_2".equals(item)) {
+            ocrBridge.hoverTemplate("form_fleet_2");
+            sleep(600);
+            if (!ocrBridge.waitAndClickTemplate("fleet_member", 3)) {
+                log("Fleet invite: fleet_member not found under form_fleet_2.");
+                return false;
+            }
+            log("Fleet invite: already in fleet — invited via form_fleet_2 → fleet_member.");
+        } else {
+            log("Fleet invite: neither form_fleet_1 nor form_fleet_2 on the menu.");
+            return false;
+        }
+        sleep(POST_CLICK_DELAY_MS);
+        return true;
+    }
+
+    /** Ship templates in the hangar — any one of them is clicked after a relog. */
+    private static final String[] HANGAR_SHIPS = {
+            "ship_garmur", "ship_worm", "ship_sansha", "ship_angel",
+            "ship_infested", "ship_serpentis", "ship_bloodraider"};
+
+    /** On the relogged client: click any ship in the hangar so the hangar view (ship_hangar) is up. */
+    public boolean clickAnyShip() {
+        String ship = ocrBridge.findAnyTemplate(HANGAR_SHIPS);
+        if (ship == null) {
+            log("Relog: no ship template visible to click.");
+            return false;
+        }
+        log("Relog: clicking " + ship + " to bring the hangar into view.");
+        ocrBridge.clickTemplate(ship);
+        sleep(POST_CLICK_DELAY_MS);
+        return true;
+    }
+
+    /** On the relogged client: accept the fleet invite (yes). */
+    public boolean acceptFleetInvite() {
+        boolean ok = ocrBridge.waitAndClickTemplate("yes", 10);
+        log(ok ? "Fleet invite accepted (yes)." : "Fleet invite: yes not found.");
+        sleep(POST_CLICK_DELAY_MS);
+        return ok;
+    }
+
+    /**
      * Single screenshot scan for travel UI elements.
      * Returns: "activate_gate", "warp_to_location", "stargate", or null.
      * Priority order: activate_gate first (mission entrance), then warp_to_location,
