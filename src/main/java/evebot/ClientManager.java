@@ -81,6 +81,10 @@ public class ClientManager {
     /** Vengeance: stall re-fires after which the re-fire also re-locks ('target_inquisitor') —
      *  the selected bracket may be a support we never locked properly. */
     private static final int  VENG_SUPPORT_RELOCK_AFTER = 1;
+    /** Hawk: same stall guard as vengSupportRefires, for the bantam support kill. */
+    private final Map<String, Integer>          hawkSupportRefires = new ConcurrentHashMap<>();
+    /** Hawk: seconds shooting the bantam with its bracket still up before the launcher is checked. */
+    private static final long HAWK_SUPPORT_STALL_SECS   = 60;
     /** Counts the IDLE<->CHECKING_MISSIONS bounces caused by a stuck 'not_complete' dialog with
      *  no mission on record. Survives the bounce (unlike agentRetries, which CHECKING resets) so
      *  we can double-click the agent to reset the dialog after a few cycles. */
@@ -3667,6 +3671,12 @@ public class ClientManager {
                             log(clientId, "COMBAT[Vengeance] Step 7: " + elapsed + "s with the bracket up but the launcher idle — "
                                     + (relock ? "re-locking target_inquisitor, then re-selecting" : "re-selecting")
                                     + " locked_inquisitor + 'ad' (stall " + tries + ").");
+                            // No point firing the wrong charge — make sure explosive is loaded; a real
+                            // switch means a reload, so give it the 10s load time before firing.
+                            if (switchAmmo(clientId, "exp_damage")) {
+                                log(clientId, "COMBAT[Vengeance] Step 7: wrong ammo was loaded — switched to exp_damage, waiting 10s for the reload.");
+                                try { Thread.sleep(10000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                            }
                             if (relock) {
                                 missionProcessor.ctrlClickTemplateOnce("target_inquisitor");
                                 try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
@@ -3991,6 +4001,7 @@ public class ClientManager {
                 cs.setCombatWaitStart(LocalDateTime.now());
                 cs.setCombatPollStart(LocalDateTime.now());
                 cs.setFrigateLockRechecked(false);
+                hawkSupportRefires.remove(clientId);
                 cs.setCombatStep(8);
                 ClientWindowInfo other = findOtherClient(clientId);
                 if (other != null) {
@@ -4050,6 +4061,34 @@ public class ClientManager {
                 if (missionProcessor.findTemplate("locked_bantam") != null) {
                     // No time-based failsafe: the support must actually be confirmed dead (bracket
                     // gone) before moving on — switching early burns the overload on a live support.
+                    // Past HAWK_SUPPORT_STALL_SECS verify the launcher is actually firing; if it is
+                    // idle (confirmed across scans — 'a' is a toggle), re-select + re-fire, re-locking
+                    // first from the second stall on (same guard as the Vengeance support kill).
+                    if (elapsed >= HAWK_SUPPORT_STALL_SECS) {
+                        if (missionProcessor.confirmTemplateGone("shooting_luncher", 3, 300)) {
+                            int tries = hawkSupportRefires.merge(clientId, 1, Integer::sum);
+                            boolean relock = tries > VENG_SUPPORT_RELOCK_AFTER;
+                            log(clientId, "COMBAT[Hawk] Step 8: " + elapsed + "s with the bracket up but the launcher idle — "
+                                    + (relock ? "re-locking target_bantam, then re-selecting" : "re-selecting")
+                                    + " locked_bantam + 'a' (stall " + tries + ").");
+                            // No point firing the wrong charge — make sure EM is loaded; a real
+                            // switch means a reload, so give it the 10s load time before firing.
+                            if (switchAmmo(clientId, "em_damage")) {
+                                log(clientId, "COMBAT[Hawk] Step 8: wrong ammo was loaded — switched to em_damage, waiting 10s for the reload.");
+                                try { Thread.sleep(10000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                            }
+                            if (relock) {
+                                missionProcessor.ctrlClickTemplateOnce("target_bantam");
+                                try { Thread.sleep(3000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+                            }
+                            missionProcessor.clickTemplate("locked_bantam");
+                            missionProcessor.keyPress("a");
+                            cs.setCombatWaitStart(LocalDateTime.now()); // fire restarted — reset the stall window
+                            break;
+                        }
+                        log(clientId, "COMBAT[Hawk] Step 8: support still alive (" + elapsed + "s) but the launcher IS firing — keep shooting.");
+                        break;
+                    }
                     log(clientId, "COMBAT[Hawk] Step 8: support still alive (" + elapsed + "s) — keep shooting.");
                     break;
                 }

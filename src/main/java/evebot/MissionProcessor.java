@@ -862,6 +862,7 @@ public class MissionProcessor {
         }
         log("Loot: 'loot_all' clicked — closing the container window ('X', twice).");
         sleep(1000);
+        dismissCargoFullOk();
         ocrBridge.clickTemplate("close_active_window");
         sleep(800);
         ocrBridge.clickTemplate("close_active_window");
@@ -896,6 +897,7 @@ public class MissionProcessor {
             log("Loot: 'loot' present — clicking 'loot_all'.");
             ocrBridge.clickTemplate("loot_all");
             sleep(1000);
+            dismissCargoFullOk();
             looted = true;
         } else {
             log("Loot: wreck is empty — closing.");
@@ -905,6 +907,15 @@ public class MissionProcessor {
         clickTemplate("general");
         sleep(POST_CLICK_DELAY_MS);
         return looted;
+    }
+
+    /** Loot All with a full cargo hold pops a not-enough-space dialog — click its 'ok' if it's up. */
+    private void dismissCargoFullOk() {
+        if (ocrBridge.findAnyTemplate("ok") != null) {
+            log("Loot: 'ok' dialog up (cargo likely full) — clicking it.");
+            ocrBridge.clickTemplate("ok");
+            sleep(800);
+        }
     }
 
     public void clickWarpToLocation() {
